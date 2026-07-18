@@ -331,6 +331,136 @@ function extractTextFromNonTextPart(obj: unknown): { text: string; source: strin
   return { text: '', source: 'no-text-extracted' };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// v0.14.12: 相对路径自动转绝对路径
+//
+// 背景：
+//   recon/acting agent 调用 copilot_readFile / copilot_grep_search 等
+//   工具时，LLM 经常给出相对路径（如 "GSEAlens/man/foo.Rd"）。VSCode
+//   的 copilot_* 工具用 process.cwd() 解析相对路径，而 process.cwd()
+//   是 VSCode 可执行文件所在目录（如 "D:\...\Microsoft VS Code\"），
+//   不是 workspace root。结果全部 ENOENT。
+//
+// 修复：
+//   在 invokeTool 调用前拦截 input，对路径类字段做规范化：
+//     1. 绝对路径 → 原样保留
+//     2. 相对路径 → 智能匹配 workspace folder：
+//        a. 路径首段匹配某 workspace folder 名 → 拼到该 folder 后
+//        b. 否则 → 拼到第一个 workspace folder 后
+//     3. 路径里含 \ 或 / → 统一规范化（path.resolve）
+//
+// 多 workspace 场景：
+//   用户有 5 个 workspace folders，路径 "GSEAlens/man/foo.Rd" 首段是
+//   "GSEAlens"，匹配名为 "GSEAlens" 的 folder → 拼成
+//   "<workspace_root>/GSEAlens/man/foo.Rd"。
+// ─────────────────────────────────────────────────────────────────────────
+
+/** 工具 input 中常见的路径字段名（覆盖 copilot_* 与 gcmp_* 等）。 */
+const PATH_INPUT_FIELDS = [
+  'filePath',
+  'path',
+  'file',
+  'fileName',
+  'includePattern',
+  'excludePattern',
+  'folder',
+  'directory',
+  'dir',
+  'query',          // copilot_grep_search 的 query 也可能是路径
+  'pattern',        // 同上
+];
+
+/** 检测字符串是否为绝对路径（跨平台：Windows 盘符 / POSIX / UNC）。 */
+function isAbsolutePath(p: string): boolean {
+  if (!p || typeof p !== 'string') return false;
+  // Windows: C:\, C:/, D:\, etc.  — /^[A-Za-z]:[\\/]/
+  // POSIX: /...
+  // UNC: \\server\share
+  return /^(?:[A-Za-z]:[\\/]|[\\/]|[A-Za-z]:[\\/])/.test(p) || p.startsWith('/') || p.startsWith('\\');
+}
+
+/**
+ * 把一个相对路径解析成绝对路径（相对合适的 workspace folder）。
+ *
+ * 智能匹配策略：
+ *   1. 取路径首段（第一个 / 或 \ 之前的部分）
+ *   2. 遍历 workspace.workspaceFolders，找 name 匹配的
+ *   3. 匹配到 → 拼成 `<folder.fsPath>/<相对路径>`
+ *   4. 都不匹配 → 拼到第一个 workspace folder（典型 fallback）
+ *   5. 没有 workspace → 返回原样（让工具自己处理，至少不 worse）
+ */
+function resolveRelativeToWorkspace(relPath: string): string {
+  if (!relPath || typeof relPath !== 'string' || isAbsolutePath(relPath)) {
+    return relPath;
+  }
+
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    return relPath;  // 无 workspace 兜底
+  }
+
+  // 取首段（统一处理 / 和 \）
+  const normalizedRel = relPath.replace(/\\/g, '/');
+  const firstSeg = normalizedRel.split('/')[0]?.toLowerCase();
+
+  // 1. 精确匹配 workspace folder name
+  if (firstSeg) {
+    for (const f of folders) {
+      if (f.name.toLowerCase() === firstSeg) {
+        return path.resolve(f.uri.fsPath, relPath);
+      }
+    }
+    // 2. 首段是 folder name 的前缀（如 "GSEAlens/man/..." 匹配 folder "GSEAlens"）
+    //    上一条已覆盖，这里额外防御：folder name 拼接路径形式
+    for (const f of folders) {
+      if (normalizedRel.toLowerCase().startsWith(f.name.toLowerCase() + '/')) {
+        return path.resolve(f.uri.fsPath, relPath.substring(f.name.length + 1));
+      }
+    }
+  }
+
+  // 3. Fallback：拼到第一个 workspace folder
+  return path.resolve(folders[0].uri.fsPath, relPath);
+}
+
+/**
+ * 规范化工具调用的 input —— 对所有路径类字段做相对→绝对转换。
+ *
+ * 返回新的 input 对象（不修改原对象）。同时返回一个 diagnostic 字符串
+ * （用于 progress 日志，让用户看到路径被改写了）。
+ */
+function normalizeToolInput(
+  toolName: string,
+  input: unknown
+): { input: unknown; rewritten: string[] } {
+  if (!input || typeof input !== 'object') {
+    return { input, rewritten: [] };
+  }
+
+  const original = input as Record<string, unknown>;
+  const rewritten: string[] = [];
+  const changed = false;
+  const result: Record<string, unknown> = { ...original };
+
+  for (const field of PATH_INPUT_FIELDS) {
+    const v = result[field];
+    if (typeof v !== 'string' || v.length === 0) continue;
+
+    // skip glob patterns (含 * ? [])  —— 只对纯路径字段做规范化
+    if (/[*?\[\]]/.test(v)) continue;
+
+    if (!isAbsolutePath(v)) {
+      const resolved = resolveRelativeToWorkspace(v);
+      if (resolved !== v) {
+        result[field] = resolved;
+        rewritten.push(`${field}: "${v}" → "${resolved}"`);
+      }
+    }
+  }
+
+  return { input: result, rewritten };
+}
+
 /**
  * Run the acting agent loop.
  *
@@ -685,6 +815,25 @@ export async function runActingAgent(
     // Execute each tool call and add the result as a User message.
     for (const call of toolCalls) {
       const shortName = call.name.length > 40 ? call.name.substring(0, 37) + '...' : call.name;
+
+      // v0.14.12: 相对路径自动转绝对路径
+      // LLM 经常把 "GSEAlens/man/foo.Rd" 这种相对路径直接传给 copilot_readFile，
+      // 但 copilot_* 工具用 process.cwd()（VSCode 可执行文件目录）解析相对路径，
+      // 导致全部 ENOENT。这里在调用前规范化：相对 → 绝对（基于 workspace folder）。
+      const { input: normalizedInput, rewritten: pathRewrites } = normalizeToolInput(
+        call.name,
+        call.input
+      );
+      // 用规范化后的 input 覆盖 call.input（影响后续 capturedToolCalls 记录、
+      // shortInput 显示、以及实际 invokeTool 调用）
+      if (pathRewrites.length > 0) {
+        (call as { input?: unknown }).input = normalizedInput;
+        stream.progress(
+          `[${progressPrefix}] ${readOnly ? 'recon' : 'acting'} path normalization: ` +
+          pathRewrites.join('; ').substring(0, 200)
+        );
+      }
+
       const shortInput = JSON.stringify(call.input).substring(0, 100);
       stream.progress(`[${progressPrefix}] ${readOnly ? 'recon' : 'acting'} tool: ${shortName}(${shortInput})`);
 
@@ -1026,6 +1175,17 @@ function buildReconSystemPrompt(missingHints?: string[]): string {
     'Match the language of the user\'s question for search queries',
     '(Chinese question → can search in English for broader coverage, then prefer',
     'Chinese sources when quality is equivalent).',
+    '',
+    '# Path handling (v0.14.12+)',
+    '',
+    'When calling file-reading or search tools, prefer ABSOLUTE paths. The runtime',
+    'auto-resolves relative paths against the workspace root, but explicit absolute',
+    'paths are more robust and easier to debug. If you see a workspace folder name',
+    '(e.g. "GSEAlens/", "src/") in a path, prefix it with the workspace root.',
+    '',
+    'For multi-workspace setups, paths like "GSEAlens/man/foo.Rd" will be matched',
+    'against workspace folder names — so relative paths starting with a folder name',
+    'are fine. But when in doubt, use the absolute form.',
   ];
 
   if (missingHints && missingHints.length > 0) {

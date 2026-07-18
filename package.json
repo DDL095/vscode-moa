@@ -1,8 +1,8 @@
 {
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.11: 改为正式 publisher dudali095 发布到 VSCode Marketplace。v0.14.10: 作为会向工作区写文件的插件，新增 cacheReadme.ts 模块 —— l3Summarizer / moaOrchestrator / moaRunner 三处首次创建 .moa_cache/ 时自动写入 README.md（不覆盖用户已修改版），含目录结构说明、诊断指南、清理策略、.gitignore 建议、隐私说明。让用户在工作区直接看到这是什么、能否删除、出问题怎么排查，符合开源插件的自文档标准。",
-  "version": "0.14.11",
+  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.12: 修复 recon/acting agent 用相对路径调用 copilot_readFile 等工具时全部 ENOENT 的 bug。根因：VSCode copilot_* 工具用 process.cwd()（VSCode 可执行文件目录）解析相对路径，而不是 workspace root。修复：在 invokeTool 调用前增加路径规范化层（normalizeToolInput），对 input.filePath/path/includePattern 等字段做相对→绝对转换，智能匹配多 workspace folder 名称（如 'GSEAlens/man/foo.Rd' 自动匹配名为 'GSEAlens' 的 workspace folder）。同时 recon system prompt 加路径处理提示，鼓励 LLM 用绝对路径。",
+  "version": "0.14.12",
   "publisher": "dudali095",
   "license": "MIT",
   "repository": {

@@ -5,6 +5,37 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.12] - 2026-07-19
+
+### Fixed — Relative path resolution in recon/acting agent tool calls
+
+**Symptom**: recon agent calling `copilot_readFile` with a relative path like `GSEAlens/man/build_gsea_pathways.Rd` failed uniformly with ENOENT, the error revealing that the path was being resolved against `D:\Users\Administrator\AppData\Local\Programs\Microsoft VS Code\` (the VSCode executable directory) instead of the workspace root.
+
+**Root cause**: VSCode's `copilot_*` built-in tools resolve relative paths via `process.cwd()`, which for an extension host process is the VSCode executable directory — NOT the workspace root. The LLM has no way to know this and routinely emits relative paths like `src/foo.ts` or `GSEAlens/man/foo.Rd`.
+
+**Fix** — two layers of defense:
+
+1. **Tool-input normalization layer** (`actingAgent.ts`, new `normalizeToolInput()` + `resolveRelativeToWorkspace()` + `isAbsolutePath()` helpers, ~100 LOC):
+   - Intercepts every `invokeTool` call BEFORE dispatch
+   - For tools with path-like input fields (`filePath`, `path`, `file`, `includePattern`, `folder`, `query`, `pattern`, etc. — 10 fields covered):
+     - Absolute paths: pass through unchanged
+     - Relative paths: resolve against a smartly-chosen workspace folder
+   - **Multi-workspace smart matching**:
+     - If the path's first segment matches a workspace folder name (case-insensitive), resolve against THAT folder. E.g. `GSEAlens/man/foo.Rd` with a workspace folder named `GSEAlens` → `<workspaceRoot>/GSEAlens/man/foo.Rd`
+     - Otherwise, fall back to the first workspace folder
+   - Skips glob patterns (`*`, `?`, `[`, `]`) — only pure paths get rewritten
+   - Emits a progress log entry whenever a path is rewritten: `[MoA] recon path normalization: filePath: "X" → "Y"`
+   - The normalized input is also written back to `call.input` so `capturedToolCalls` records the resolved path (better audit trail)
+
+2. **Recon system prompt update**: added a "Path handling (v0.14.12+)" section encouraging the LLM to prefer absolute paths and explaining the multi-workspace matching behavior. Defense in depth — even if normalization somehow misses a case, the LLM is now aware.
+
+**Why this matters**: without this fix, recon against any multi-folder workspace (very common for users who open several related projects) is effectively broken — the LLM has no signal that paths are wrong until ENOENT errors pile up, and even then it can't easily discover the correct absolute prefix.
+
+### Changed
+- `normalizeToolInput` is applied uniformly to both recon (read-only) and acting (full tool) modes — relative-path bugs bite both.
+
+---
+
 ## [0.14.11] - 2026-07-19
 
 ### Changed — Marketplace publish
