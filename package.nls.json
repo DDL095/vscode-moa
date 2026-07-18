@@ -1,0 +1,13 @@
+{
+  "extension.displayName": "vscode-moa",
+  "extension.description": "Mixture-of-Agents (@moa) chat participant for VSCode Copilot",
+  "chatParticipant.moa.description": "Trigger Mixture-of-Agents multi-perspective analysis",
+  "chatParticipant.moa.fullName": "MoA Bridge",
+  "command.moa.preset.title": "Switch MoA Preset",
+  "command.moa.help.title": "MoA Help",
+  "configuration.title": "MoA Bridge",
+  "configuration.defaultPreset.description": "Default preset to use when no preset is specified",
+  "configuration.presetsDir.description": "Path to directory containing preset JSON files (defaults to bundled presets)",
+  "configuration.timeoutSec.description": "Timeout in seconds for each MoA call",
+  "configuration.parallelRefs.description": "Whether to fan out reference advisors in parallel"
+}

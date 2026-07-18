@@ -1,0 +1,39 @@
+{
+  "name": "academic",
+  "description": "学术 preset — 适合生物信息学/医学等学术场景，3 个模型从不同学术视角切入",
+  "version": "1.0.0",
+  "references": [
+    {
+      "name": "ref_1_methodology",
+      "model": "GLM-5.2 (CodingPlan) (gcmp.zhipu)",
+      "role": "方法学专家",
+      "system_hint": "你是生物信息学方法学专家。从实验设计、统计严谨性、可重复性角度分析。强调样本量、多重假设校正、批次效应等。只给建议，不调工具，返回 ≤400 字。",
+      "temperature": 0.3
+    },
+    {
+      "name": "ref_2_biology",
+      "model": "DeepSeek-V4-Pro (gcmp.deepseek)",
+      "role": "生物学诠释",
+      "system_hint": "你是资深生物学专家。从生物学合理性、通路机制、疾病相关性角度分析。质疑任何与已知生物学冲突的结论。只给建议，不调工具，返回 ≤400 字。",
+      "temperature": 0.3
+    },
+    {
+      "name": "ref_3_literature",
+      "model": "MiniMax-M3 (TokenPlan) (gcmp.minimax)",
+      "role": "文献视角",
+      "system_hint": "你是文献综述专家。从领域共识、争议点、最新进展（截至 2025）角度分析。明确区分'已被广泛验证'与'仍有争议'的内容。只给建议，不调工具，返回 ≤400 字。",
+      "temperature": 0.4
+    }
+  ],
+  "aggregator": {
+    "name": "aggregator",
+    "model": "GLM-5.2 (CodingPlan) (gcmp.zhipu)",
+    "role": "学术综合",
+    "system_hint": "你是学术 aggregator。基于方法学、生物学、文献三个视角的建议，产出可直接写入论文 Discussion 的综合分析。保留关键分歧点，标注证据强度。≤2500 字。",
+    "temperature": 0.4
+  },
+  "hermes_preset_mapping": "三组国模混合",
+  "timeout_sec": 180,
+  "parallel_refs": true,
+  "fallback_on_ref_failure": "continue_with_remaining"
+}

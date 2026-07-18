@@ -1,0 +1,32 @@
+{
+  "name": "fast",
+  "description": "快速 preset — 用 Flash 模型，10-30s 出结果，适合迭代咨询",
+  "version": "1.0.0",
+  "references": [
+    {
+      "name": "ref_1_quick",
+      "model": "DeepSeek-V4-Flash (gcmp.deepseek)",
+      "role": "快速分析",
+      "system_hint": "快速给出技术判断。只给建议，不调工具，返回 ≤200 字。",
+      "temperature": 0.5
+    },
+    {
+      "name": "ref_2_broad",
+      "model": "MiniMax-M3 (TokenPlan) (gcmp.minimax)",
+      "role": "广视角",
+      "system_hint": "从广泛视角快速扫描问题。只给建议，不调工具，返回 ≤200 字。",
+      "temperature": 0.6
+    }
+  ],
+  "aggregator": {
+    "name": "aggregator",
+    "model": "DeepSeek-V4-Flash (gcmp.deepseek)",
+    "role": "快速综合",
+    "system_hint": "快速综合两方建议，给出平衡答案。≤800 字。",
+    "temperature": 0.4
+  },
+  "hermes_preset_mapping": null,
+  "timeout_sec": 60,
+  "parallel_refs": true,
+  "fallback_on_ref_failure": "continue_with_remaining"
+}

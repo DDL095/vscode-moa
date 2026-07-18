@@ -1,0 +1,66 @@
+{
+  "name": "moa-bridge",
+  "displayName": "MoA Bridge - Mixture of Agents for Copilot",
+  "description": "@moa chat participant — Mixture-of-Agents multi-perspective analysis via PowerShell MoA scripts",
+  "version": "0.1.0",
+  "publisher": "moa-bridge",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "moa-bridge.moa",
+        "name": "moa",
+        "fullName": "MoA Bridge",
+        "description": "Trigger Mixture-of-Agents multi-perspective analysis",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "preset",
+            "description": "Switch preset (default/fast/academic/custom)"
+          },
+          {
+            "name": "help",
+            "description": "Show MoA Bridge usage"
+          }
+        ],
+        "disambiguation": [
+          {
+            "category": "moa",
+            "description": "Multi-perspective analysis with multiple LLM advisors",
+            "examples": [
+              "多视角分析",
+              "多模型对比",
+              "moa 规划",
+              "mixture of agents",
+              "@moa 分析单细胞轨迹"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "test-compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.95.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^5.3.0",
+    "ts-loader": "^9.5.0",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.0"
+  }
+}
