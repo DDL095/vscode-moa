@@ -47,35 +47,80 @@
         ]
       }
     ],
+    "commands": [
+      {
+        "command": "moa.configureModels",
+        "title": "MoA: Configure Models",
+        "category": "MoA",
+        "description": "Interactive setup: pick how many ref advisors, assign a model + role to each."
+      },
+      {
+        "command": "moa.listModels",
+        "title": "MoA: List Available Models",
+        "category": "MoA",
+        "description": "Show all chat models currently registered with vscode.lm."
+      },
+      {
+        "command": "moa.testModels",
+        "title": "MoA: Probe Models (Ping Test)",
+        "category": "MoA",
+        "description": "Send a tiny 'PONG' request to each registered model to detect expired/invalid subscriptions."
+      }
+    ],
     "configuration": {
       "title": "MoA Bridge",
       "properties": {
+        "moa.refModels": {
+          "type": "array",
+          "default": [],
+          "description": "Reference advisor roles. Each item: {role, model, systemHint?}. Use 'Moa: Configure Models' command to set this interactively.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": { "type": "string", "description": "Display label, e.g. 'Technical' or 'Skeptical'" },
+              "model": { "type": "string", "description": "Substring to match vscode.lm model name, e.g. 'GLM-5.2'" },
+              "systemHint": { "type": "string", "description": "Optional extra system-prompt hint prepended to user prompt." }
+            },
+            "required": ["role", "model"]
+          },
+          "order": 1
+        },
+        "moa.aggregator": {
+          "type": "object",
+          "default": {},
+          "description": "Aggregator (synthesizer) model. Use 'Moa: Configure Models' command to set interactively.",
+          "properties": {
+            "model": { "type": "string", "description": "Substring to match vscode.lm model name" },
+            "temperature": { "type": "number", "description": "Informational only (vscode.lm doesn't expose per-call temp yet)." }
+          },
+          "order": 2
+        },
         "moa.preferredModels": {
           "type": "array",
           "items": { "type": "string" },
           "default": [],
-          "description": "Preferred model name substrings (e.g. [\"GLM-5.2\", \"DeepSeek-V4-Pro\", \"MiniMax-M3\"]). When set, only models whose name contains one of these substrings are considered. Use this to skip placeholder/expired models.",
-          "order": 1
+          "description": "Fallback model name substrings (used only when moa.refModels is empty).",
+          "order": 3
         },
         "moa.defaultPreset": {
           "type": "string",
           "default": "default",
           "enum": ["default", "fast", "academic", "custom"],
           "description": "Default preset to use when no preset is specified in the prompt.",
-          "order": 2
+          "order": 4
         },
         "moa.timeoutSec": {
           "type": "number",
           "default": 120,
           "minimum": 10,
           "description": "Per-call timeout in seconds.",
-          "order": 3
+          "order": 5
         },
         "moa.parallelRefs": {
           "type": "boolean",
           "default": false,
           "description": "Fan out reference advisors in parallel (may cause cascading 4xx/5xx when models have expired subscriptions).",
-          "order": 4
+          "order": 6
         }
       }
     }

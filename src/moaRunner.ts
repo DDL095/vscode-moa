@@ -18,7 +18,7 @@
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import type { MoaPath, MoaRunResult, PathDetection, ParsedPrompt } from './types';
+import type { MoaPath, MoaRunResult, PathDetection, ParsedPrompt, RefModelConfig } from './types';
 
 /** Default preset name when none is specified. */
 export const DEFAULT_PRESET = 'default';
@@ -203,67 +203,103 @@ export async function runP1Fanout(
 
   // Filter out placeholder/pseudo models (e.g. VSCode's "Auto" selector).
   const PLACEHOLDER_NAMES = new Set(['auto', 'automatic', 'default', '']);
-  let candidates = allCandidates.filter(
+  const realCandidates = allCandidates.filter(
     (m) => !PLACEHOLDER_NAMES.has(m.name.toLowerCase().trim())
   );
 
-  // Honor user preference: if `moa.preferredModels` is configured,
-  // try to use those first (by substring match on name).
+  // ---------- Resolve ref configuration (priority order) ----------
+  // 1. moa.refModels (structured, set via "Moa: Configure Models" command)
+  // 2. moa.preferredModels (simple substring whitelist)
+  // 3. auto: first 5 real candidates
   const config = vscode.workspace.getConfiguration('moa');
+  const refModelsCfg: RefModelConfig[] = config.get<RefModelConfig[]>('refModels') ?? [];
   const preferred: string[] = config.get<string[]>('preferredModels') ?? [];
-  if (preferred.length > 0) {
-    const preferredMatches = candidates.filter((m) =>
+
+  let refsToUse: { model: vscode.LanguageModelChat; role: string; systemHint?: string }[] = [];
+
+  if (refModelsCfg.length > 0) {
+    // Match each configured role to an actual model by substring.
+    for (const cfg of refModelsCfg) {
+      const match = realCandidates.find((m) =>
+        m.name.toLowerCase().includes(cfg.model.toLowerCase())
+      );
+      if (match) {
+        refsToUse.push({ model: match, role: cfg.role, systemHint: cfg.systemHint });
+      } else {
+        stream.markdown(
+          `**[config]** Ref "${cfg.role}" → model "${cfg.model}" not found in available models, skipping.\n\n`
+        );
+      }
+    }
+    stream.progress(`[MoA] using moa.refModels config: ${refsToUse.length}/${refModelsCfg.length} matched`);
+  } else if (preferred.length > 0) {
+    // Fallback to preferredModels (simple substring whitelist).
+    const matches = realCandidates.filter((m) =>
       preferred.some((p) => m.name.toLowerCase().includes(p.toLowerCase()))
     );
-    if (preferredMatches.length > 0) {
-      candidates = preferredMatches;
-      stream.progress(`[MoA] using preferred models filter: ${preferred.join(', ')}`);
+    refsToUse = matches.slice(0, 3).map((m) => ({ model: m, role: m.name }));
+    stream.progress(`[MoA] using moa.preferredModels filter: ${preferred.join(', ')}`);
+  } else {
+    // Auto mode — take first 5 real candidates and probe.
+    stream.progress(
+      '[MoA] no `moa.refModels` or `moa.preferredModels` set — running Command Palette "Moa: Configure Models" is recommended.'
+    );
+  }
+
+  // If config yielded too few refs, fill from auto pool.
+  if (refsToUse.length < 3) {
+    const pool = realCandidates.filter((m) => !refsToUse.some((r) => r.model.id === m.id));
+    const fillCount = Math.min(5, pool.length);
+    for (let i = 0; i < fillCount && refsToUse.length < 5; i++) {
+      refsToUse.push({ model: pool[i], role: pool[i].name });
     }
   }
 
-  if (candidates.length === 0) {
+  if (refsToUse.length === 0) {
     throw new Error(
-      'No usable chat models available (all candidates are placeholders). ' +
-        'Install/activate at least one real LLM provider extension (e.g. GCMP, Copilot), ' +
-        'or set "moa.preferredModels" in settings.json.'
+      'No usable chat models available. Run "Moa: Configure Models" to set up models, ' +
+        'or check that at least one LLM provider extension (GCMP, Copilot) is active.'
     );
   }
 
-  // Try up to 5 candidates — we keep the first 3 that actually succeed.
-  // This handles the case where some registered models fail (e.g. expired subscription).
+  // Probe up to 5 refs sequentially — keep first 3 that succeed.
+  // This handles the "registered but subscription expired" case.
   const maxRefs = 3;
-  const probePool = candidates.slice(0, Math.min(5, candidates.length));
+  const probePool = refsToUse.slice(0, Math.min(5, refsToUse.length));
   stream.progress(
-    `[MoA] probing ${probePool.length} model(s): ${probePool.map((m) => m.name).join(', ')}`
+    `[MoA] probing ${probePool.length} model(s): ${probePool.map((r) => `${r.role}→${r.model.name}`).join(', ')}`
   );
 
-  const refPrompts: vscode.LanguageModelChatMessage[] = [
-    vscode.LanguageModelChatMessage.User(
-      `You are one of several reference advisors. Provide a concise (<=200 word) perspective on:\n\n${prompt}`
-    ),
-  ];
-
-  type RefResult = { model: vscode.LanguageModelChat; name: string; text: string };
+  type RefResult = {
+    model: vscode.LanguageModelChat;
+    name: string;
+    role: string;
+    text: string;
+  };
   const successes: RefResult[] = [];
   const failures: { name: string; msg: string }[] = [];
 
-  // Sequential probing (parallel is risky when many will fail — cascading 4xx/5xx).
-  for (const model of probePool) {
+  for (const ref of probePool) {
     if (successes.length >= maxRefs) break;
+    const hintPrefix = ref.systemHint ? `${ref.systemHint}\n\n` : '';
+    const refPrompts: vscode.LanguageModelChatMessage[] = [
+      vscode.LanguageModelChatMessage.User(
+        `${hintPrefix}You are one of several reference advisors (role: ${ref.role}). Provide a concise (<=200 word) perspective on:\n\n${prompt}`
+      ),
+    ];
     try {
-      const response = await model.sendRequest(refPrompts, {}, token);
+      const response = await ref.model.sendRequest(refPrompts, {}, token);
       let text = '';
       for await (const frag of response.text) {
         text += frag;
       }
-      stream.markdown(`**Ref [${model.name}]**:\n\n${text}\n\n---\n\n`);
-      successes.push({ model, name: model.name, text });
+      stream.markdown(`**Ref [${ref.role} / ${ref.model.name}]**:\n\n${text}\n\n---\n\n`);
+      successes.push({ model: ref.model, name: ref.model.name, role: ref.role, text });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Truncate long API error JSON to first 150 chars for readability.
       const shortMsg = msg.length > 150 ? msg.substring(0, 150) + '...' : msg;
-      stream.markdown(`**Ref [${model.name}]**: [skipped] ${shortMsg}\n\n---\n\n`);
-      failures.push({ name: model.name, msg });
+      stream.markdown(`**Ref [${ref.role} / ${ref.model.name}]**: [skipped] ${shortMsg}\n\n---\n\n`);
+      failures.push({ name: `${ref.role}/${ref.model.name}`, msg });
     }
   }
 
@@ -285,8 +321,15 @@ export async function runP1Fanout(
     };
   }
 
-  // Aggregator: pick from successful refs (prefer the first one that worked).
-  const aggregator = successes[0].model;
+  // Aggregator: prefer configured model, else first successful ref.
+  const aggCfg = config.get<{ model?: string; temperature?: number }>('aggregator');
+  let aggregator: vscode.LanguageModelChat = successes[0].model;
+  if (aggCfg?.model) {
+    const match = realCandidates.find((m) =>
+      m.name.toLowerCase().includes(aggCfg.model!.toLowerCase())
+    );
+    if (match) aggregator = match;
+  }
   stream.progress(
     `[MoA] aggregator: ${aggregator.name} (using ${successes.length}/${successes.length + failures.length} successful refs)`
   );

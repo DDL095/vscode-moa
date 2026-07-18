@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import { moaHandler } from './moaHandler';
+import { configureModels, listAvailableModels, testModels } from './moaConfig';
 
 const PARTICIPANT_ID = 'moa-bridge.moa';
 
@@ -24,18 +25,24 @@ export function activate(context: vscode.ExtensionContext): void {
       _context: vscode.ChatContext,
       _token: vscode.CancellationToken
     ): vscode.ProviderResult<vscode.ChatFollowup[]> {
-      // Default followups; the handler can also return its own per-request list.
       return [
-        { prompt: 'preset=fast 再试一次', label: '⚡ Fast preset' } as vscode.ChatFollowup,
-        { prompt: 'preset=academic 再试一次', label: '🎓 Academic preset' } as vscode.ChatFollowup,
+        { prompt: 'preset=fast 再试一次', label: 'Fast preset' } as vscode.ChatFollowup,
+        { prompt: 'preset=academic 再试一次', label: 'Academic preset' } as vscode.ChatFollowup,
       ];
     },
   };
 
   context.subscriptions.push(participant);
 
-  // Friendly activation log (visible in Extension Host output).
+  // ---------- Commands (accessible via Command Palette) ----------
+  context.subscriptions.push(
+    vscode.commands.registerCommand('moa.configureModels', configureModels),
+    vscode.commands.registerCommand('moa.listModels', listAvailableModels),
+    vscode.commands.registerCommand('moa.testModels', testModels)
+  );
+
   console.log('[moa-bridge] @moa participant registered (id=' + PARTICIPANT_ID + ')');
+  console.log('[moa-bridge] commands registered: moa.configureModels, moa.listModels, moa.testModels');
 }
 
 export function deactivate(): void {

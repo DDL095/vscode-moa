@@ -64,6 +64,29 @@ export interface ChatMessage {
 }
 
 /**
+ * A reference advisor role with its assigned model.
+ * Stored in `moa.refModels` setting (array).
+ */
+export interface RefModelConfig {
+  /** Display label for this advisor, e.g. "Technical", "Logical". */
+  role: string;
+  /** Substring to match against vscode.lm model name, e.g. "GLM-5.2". */
+  model: string;
+  /** Optional extra system-prompt hint prepended to the user prompt. */
+  systemHint?: string;
+}
+
+/**
+ * Aggregator model config.
+ */
+export interface AggregatorConfig {
+  /** Substring to match against vscode.lm model name. */
+  model: string;
+  /** Optional temperature (currently informational; vscode.lm doesn't expose per-call temp). */
+  temperature?: number;
+}
+
+/**
  * Re-export helper to keep imports tidy in other files.
  */
 export type { ChatParticipantToolToken };
