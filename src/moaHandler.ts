@@ -42,7 +42,12 @@ export const moaHandler: vscode.ChatRequestHandler = async (
   stream.progress("[MoA] starting (equal-mode, Hermes prompt)...");
 
   try {
-    const result = await runP1Fanout(userPrompt, stream, token);
+    const result = await runP1Fanout(
+      userPrompt,
+      stream,
+      token,
+      request.toolInvocationToken  // v0.8.0: needed for acting agent tool calls
+    );
     stream.progress(`[MoA] done (${result.elapsed.toFixed(1)}s, ${result.path})`);
     return {
       metadata: { command, path: result.path, elapsedSec: result.elapsed },

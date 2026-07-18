@@ -1,8 +1,8 @@
 {
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "description": "@moa chat participant — Equal-mode Mixture-of-Agents (Hermes style). v0.7.2: shows [vendor] in model display, removed dead preset/detectPath/scripts code.",
-  "version": "0.7.2",
+  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.0: Recon 与 L3 模型独立可配（通过 Configure Models Step 3/4 + 4/4 设置）；reconModel 空时 fallback 到 aggregator；l3Summarizer 空时禁用 L3。修复硬编码 modelId 的移植性问题。",
+  "version": "0.14.1",
   "publisher": "moa-bridge",
   "license": "MIT",
   "repository": {
@@ -17,7 +17,14 @@
     "Chat"
   ],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onLanguageModelTool:moa_analyze",
+    "onLanguageModelTool:moa_recon",
+    "onLanguageModelTool:moa_orchestrate",
+    "onLanguageModelTool:moa_continue",
+    "onLanguageModelTool:moa_finalize",
+    "onChatParticipant:moa-bridge.moa"
+  ],
   "contributes": {
     "chatParticipants": [
       {
@@ -52,7 +59,211 @@
         "command": "moa.configureModels",
         "title": "MoA: Configure Models",
         "category": "MoA",
-        "description": "Two-step flow: refs (checkbox multi-select) + aggregator (single-select). Shows all available vscode.lm models sorted by vendor; same-name models across vendors are disambiguated by [vendor] suffix. Stores m.id (unique) — fixes the same-name multi-pick bug."
+        "description": "v0.14.0: Four-step flow — (1/4) refs (checkbox multi-select, 2-8), (2/4) aggregator (single-select checkbox), (3/4) recon agent (single-select, default=aggregator), (4/4) L3 summarizer (single-select + 'Disable L3' option). All steps use checkbox UI for clarity of current selection."
+      },
+      {
+        "command": "moa.probeTools",
+        "title": "MoA: Probe Available Tools (Debug)",
+        "category": "MoA",
+        "description": "Lists all tools currently registered in vscode.lm.tools. Use this to check if Copilot/other extensions expose tools that MoA's acting agent could call."
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "moa_recon",
+        "displayName": "MoA Recon Subagent",
+        "tags": [
+          "moa",
+          "recon",
+          "file-collection",
+          "read-only"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "prompt"
+          ],
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "The recon task description. e.g. 'gather all code related to MoA recon pipeline'."
+            },
+            "scopeHint": {
+              "type": "string",
+              "description": "Optional: hint about what files/symbols to look at. Supports paths with line ranges, e.g. 'src/moaRunner.ts:120-200 src/types.ts'. The tool extracts path:line-line patterns and reads those exact ranges."
+            },
+            "includeWorkspaceTree": {
+              "type": "boolean",
+              "description": "Include the project tree in the result (default true). Useful for giving downstream tools a sense of structure."
+            },
+            "maxFiles": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 20,
+              "description": "Maximum number of files to read (default 8, max 20)."
+            }
+          },
+          "additionalProperties": false
+        },
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "moaRecon",
+        "icon": "$(search)",
+        "modelDescription": "Read-only recon subagent that gathers file contents relevant to a task and returns them as Markdown. Good for inspecting multiple files at once when you need broader context before deeper analysis. USE THIS before calling #moaAnalyze or #moaOrchestrate when the user's question references specific files or code — pass this tool's output as reconContext to ground the MoA analysis. If you only need a single file, prefer copilot_readFile directly.",
+        "userDescription": "MoA recon subagent — read-only file collection. Gathers relevant file contents for the main LLM to inspect or pass forward to moa_analyze.\n\nWorkflow (Hermes-style):\n1. When the user's question references specific files or code, call moa_recon FIRST with a scopeHint.\n2. moa_recon returns file contents as a structured Markdown tool result.\n3. Then call moa_analyze with reconContext=<the gathered content from step 2>.\n\nIf the user asks a general question without file references, skip moa_recon and call moa_analyze directly — MoA's internal Phase 0 recon will gather files itself."
+      },
+      {
+        "name": "moa_analyze",
+        "displayName": "MoA Multi-Perspective Analysis",
+        "tags": [
+          "moa",
+          "multi-model",
+          "analysis",
+          "code-review",
+          "research"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "prompt"
+          ],
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "The question or task to analyze. Pass the user's original question verbatim."
+            },
+            "forceDirect": {
+              "type": "boolean",
+              "description": "Optional: skip the multi-model consultation and use a single acting agent. Useful when MoA setup is broken or fast single-model analysis is preferred. Default false."
+            },
+            "maxReconRounds": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 5,
+              "description": "Optional: override the number of recon rounds (default 3). Lower = faster but less grounded; higher = more thorough but slower/costlier."
+            },
+            "collectRawFiles": {
+              "type": "boolean",
+              "description": "Optional: include a hint in the result to suggest reading source files directly. Default false."
+            },
+            "reconContext": {
+              "type": "string",
+              "description": "v0.10.2: Pre-collected context (file contents, grep results, etc.) that the calling LLM gathered via its own tool calls (e.g. copilot_readFile). When provided, MoA skips its internal Phase 0 recon and uses this directly as the ref prompt's RECON DATA block. Recommended: call copilot_readFile first to read the relevant file(s), then pass their concatenated contents here. This implements the Hermes-style subagent flow where recon is a separate tool the orchestrator decides to call."
+            },
+            "reconSources": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "v0.10.2: List of file paths that produced the reconContext (for logging/traceability). Example: ['src/moaRunner.ts', 'src/types.ts']."
+            }
+          },
+          "additionalProperties": false
+        },
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "moaAnalyze",
+        "icon": "$(multiple-windows)",
+        "modelDescription": "Run multi-perspective analysis on a hard question using multiple LLM advisors in parallel + an aggregator that synthesizes them. Good for single-shot questions needing multi-model reasoning: code review, complex debugging, design trade-offs, architectural decisions. For tasks needing iterative refinement across multiple rounds with recon passes, USE #moaOrchestrate instead — this tool is one-shot. For simple questions, answer directly; don't use this. Optional reconContext parameter accepts pre-gathered file contents (e.g. from #moaRecon or copilot_readFile) so refs can give grounded analysis.",
+        "userDescription": "Run the MoA Bridge 4-layer pipeline (ref fan-out → aggregator → acting agent) on a question and return the synthesized Markdown answer. Use this when the question requires grounded multi-perspective analysis (e.g. code review, complex debugging, multi-file refactoring). For simple questions, answer directly.\n\nRecommended workflow (Hermes-style subagent):\n1. Call moa_recon first to gather relevant file contents (it returns structured Markdown).\n2. Pass that content as reconContext=<markdown content> to moa_analyze.\n3. MoA refs see the pre-collected context and produce grounded analysis.\n\nAlternatively, call copilot_readFile yourself and pass the result as reconContext.\n\nIf you skip step 1 and pass only the prompt, MoA will run its own internal Phase 0 recon — but that uses a smaller model and may miss relevant files."
+      },
+      {
+        "name": "moa_orchestrate",
+        "displayName": "MoA Orchestrate (Start Loop)",
+        "tags": [
+          "moa",
+          "orchestration",
+          "iterative",
+          "hermes"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "task"
+          ],
+          "properties": {
+            "task": {
+              "type": "string",
+              "description": "The task to orchestrate through the iterative MoA loop. Should be the user's full original request, including any relevant context."
+            }
+          },
+          "additionalProperties": false
+        },
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "moaOrchestrate",
+        "icon": "$(rocket)",
+        "modelDescription": "Launch a multi-round Mixture-of-Agents orchestration loop for complex tasks that need iterative refinement. Good for: research with multiple unknowns, multi-file refactoring plans, design decisions with trade-offs, anything where a single MoA pass won't be enough. Each round runs N worker LLMs in parallel + an aggregator that fuses outputs and identifies gaps. When gaps need external info, you (the main agent) call #runSubagent to fill them and feed results back via #moaContinue. Loop stops at completeness ≥ 0.8 or 12 iterations, then you call #moaFinalize to get action items. USE THIS instead of #moaAnalyze when the task is hard enough to need 3+ rounds of refinement. For simple single-shot analysis, prefer #moaAnalyze.",
+        "userDescription": "Start a new iterative MoA orchestration loop (v0.12.0). The orchestrator runs worker LLMs + aggregator in a multi-round loop, persisting state to .moa_cache/<task_id>/. Each iteration may produce gaps that need recon; when that happens, the result tells you to call #runSubagent and then #moa_continue.\n\nUse this for complex tasks that require iterative refinement: research, multi-file refactoring plans, design decisions with trade-offs. Unlike moa_analyze (single-shot), this tool loops until completeness ≥ 0.8 or max 12 iterations.\n\nWorkflow:\n1. Call #moa_orchestrate(task) → get task_id + initial status\n2. Loop: if status='awaiting_recon', call #runSubagent with the provided prompt, then #moa_continue(task_id, subagent_result=<runSubagent output>); if status='running', just call #moa_continue(task_id)\n3. When status='finalized' or you want to stop, call #moa_finalize(task_id) → get action_items\n4. Execute action_items using your own tools (writeFile, execute, etc.)\n\nModels used: moa.refModels (workers) + moa.aggregator (aggregator/finalizer). Configure via 'Moa: Configure Models' command."
+      },
+      {
+        "name": "moa_continue",
+        "displayName": "MoA Continue (Next Iteration)",
+        "tags": [
+          "moa",
+          "orchestration",
+          "iteration"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "task_id"
+          ],
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "The task_id returned by #moa_orchestrate."
+            },
+            "subagent_result": {
+              "type": "object",
+              "description": "Optional: result from #runSubagent that fills the gaps identified in the previous iteration. Omit if no recon was needed (status='running').",
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "description": "The Markdown/text content returned by #runSubagent."
+                },
+                "source": {
+                  "type": "string",
+                  "description": "Optional: source label (e.g. '#runSubagent'). Defaults to '#runSubagent'."
+                }
+              },
+              "required": [
+                "content"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "moaContinue",
+        "icon": "$(sync)",
+        "modelDescription": "Advance an MoA orchestration loop by one iteration (started via #moaOrchestrate). Use this to drive the loop forward. Two modes:\n- If the previous status was 'awaiting_recon': you MUST first call #runSubagent with the gaps prompt provided in the previous result, then pass its output here as subagent_result.\n- If the previous status was 'running': just call this with task_id only (no subagent_result) to advance another round.\nContinue calling until status='finalized' or you decide to stop, then call #moaFinalize.",
+        "userDescription": "Advance the MoA orchestration loop by one iteration (v0.12.0). Run this after #moa_orchestrate to advance. If the previous status was 'awaiting_recon', you MUST have called #runSubagent first and pass its output as subagent_result. Otherwise, omit subagent_result to advance without new recon.\n\nThe result includes the current synthesis, completeness, gaps, and next-step instruction."
+      },
+      {
+        "name": "moa_finalize",
+        "displayName": "MoA Finalize (Action Items)",
+        "tags": [
+          "moa",
+          "orchestration",
+          "finalize"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "task_id"
+          ],
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "The task_id returned by #moa_orchestrate."
+            }
+          },
+          "additionalProperties": false
+        },
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "moaFinalize",
+        "icon": "$(check-all)",
+        "modelDescription": "Force-finalize an MoA orchestration loop and produce concrete action items. Use this when the loop has converged (previous status was 'finalized') OR when you want to stop early and get the current best answer. Returns action_items to execute: write_file (with target=path and full content), execute (target=shell command), create_roadmap (target=plan title), research_more (target=follow-up topic), inform_user (target=subject + message). After receiving action_items, execute them using your own tools (copilot_createFile for files, run_in_terminal for commands, etc.).",
+        "userDescription": "Force-finalize an MoA orchestration loop and produce action items (v0.12.0). Call this when the loop has converged (status='finalized') OR when you want to stop early. Returns a JSON-shaped Markdown with: summary, action_items[{type, target, content, rationale}], confidence, unresolved.\n\nAction item types: write_file (target=path, content=full text), execute (target=command), create_roadmap (target=title), research_more (target=topic), inform_user (target=subject).\n\nAfter receiving action_items, execute them using your own tools (writeFile, run_in_terminal, etc.)."
       }
     ],
     "configuration": {
@@ -65,11 +276,24 @@
           "items": {
             "type": "object",
             "properties": {
-              "role": { "type": "string", "description": "Display label (e.g. 'advisor_1'). Not injected into prompt." },
-              "model": { "type": "string", "description": "Substring to match vscode.lm model name, e.g. 'GLM-5.2'" },
-              "systemHint": { "type": "string", "description": "Deprecated in v2 (equal mode). Kept for backward compat, ignored at runtime.", "deprecationMessage": "Equal-mode MoA ignores per-ref systemHint. Use moa.sharedRefPrompt instead." }
+              "role": {
+                "type": "string",
+                "description": "Display label (e.g. 'advisor_1'). Not injected into prompt."
+              },
+              "model": {
+                "type": "string",
+                "description": "Substring to match vscode.lm model name, e.g. 'GLM-5.2'"
+              },
+              "systemHint": {
+                "type": "string",
+                "description": "Deprecated in v2 (equal mode). Kept for backward compat, ignored at runtime.",
+                "deprecationMessage": "Equal-mode MoA ignores per-ref systemHint. Use moa.sharedRefPrompt instead."
+              }
             },
-            "required": ["role", "model"]
+            "required": [
+              "role",
+              "model"
+            ]
           },
           "order": 1
         },
@@ -78,8 +302,14 @@
           "default": {},
           "description": "Aggregator (synthesizer) model. Use 'Moa: Configure Models' command to set interactively.",
           "properties": {
-            "model": { "type": "string", "description": "Substring to match vscode.lm model name" },
-            "temperature": { "type": "number", "description": "Informational only (vscode.lm doesn't expose per-call temp yet)." }
+            "model": {
+              "type": "string",
+              "description": "Substring to match vscode.lm model name"
+            },
+            "temperature": {
+              "type": "number",
+              "description": "Informational only (vscode.lm doesn't expose per-call temp yet)."
+            }
           },
           "order": 2
         },
@@ -94,6 +324,128 @@
           "default": "",
           "description": "Optional override for the shared prompt prepended to every ref query. If empty (recommended), uses the built-in Hermes _REFERENCE_SYSTEM_PROMPT ported from NousResearch/hermes-agent. All refs get the SAME prompt — diversity comes from model differences, not role assignment.",
           "order": 4
+        },
+        "moa.refDisplayMode": {
+          "type": "string",
+          "enum": [
+            "thinking",
+            "verbose"
+          ],
+          "default": "thinking",
+          "enumDescriptions": [
+            "Hermes-style: refs shown only as progress indicators ('Ref advisor_1 thinking...'). Detailed ref output goes to the 'MoA Bridge — Ref Output' panel. Ref content does NOT enter chat history — only the aggregator synthesis does. Matches Hermes' design where refs are side-channel advisory calls.",
+            "Legacy: refs stream inline as markdown in the chat response. Visible AND recorded in chat history. Use this if you want Copilot follow-ups to reference individual ref opinions."
+          ],
+          "description": "How to display reference advisor output in the chat UI. 'thinking' (default) keeps refs out of chat history (Hermes-style); 'verbose' shows them inline.",
+          "order": 5
+        },
+        "moa.enableActingAgent": {
+          "type": "boolean",
+          "default": true,
+          "description": "v0.8.0: Enable the 3-layer Hermes architecture. When true, the aggregator's output becomes guidance for an acting agent that can call tools (read_file, find_files, apply_patch, run_in_terminal, etc.) to actually accomplish the user's task. When false, falls back to v0.7.x 2-layer behavior (aggregator output IS the final answer). Requires copilot_* tools to be registered (default when GitHub Copilot Chat is active).",
+          "order": 6
+        },
+        "moa.enableRecon": {
+          "type": "boolean",
+          "default": true,
+          "description": "v0.9.0: Enable the recon phase (Phase 0). When true, a recon agent runs BEFORE ref fan-out to collect files relevant to the user's question (read_file, find_files, grep, get_errors, search_codebase). The collected raw context is injected into ref prompts so refs can give grounded analysis instead of guessing. When false, skips recon — refs see only workspace context (v0.8.0 behavior).",
+          "order": 7
+        },
+        "moa.maxReconRounds": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 5,
+          "description": "v0.9.0: Maximum number of recon rounds. Each round = 1 recon pass + N ref fan-out. If refs report 'sufficient=false' in their JSON output, the next recon round uses their 'missing' hints to fill gaps. Loop exits early when a majority of refs say sufficient=true. Hard cap at 5 to bound cost.",
+          "order": 8
+        },
+        "moa.reconContextChars": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 5000,
+          "description": "v0.9.0: Character budget for recon summary injected into ref prompts. Smaller = cheaper but refs see less context; larger = more grounded but slower + costlier. Default 30000 (~10 files of 3000 chars each).",
+          "order": 9
+        },
+        "moa.forceDirect": {
+          "type": "boolean",
+          "default": false,
+          "description": "v0.9.1: Skip the entire recon/ref/aggregator pipeline. The acting agent receives only the user prompt + workspace context and acts directly (no multi-model consultation). Useful when the user has had repeated multi-model failures and just wants a single competent model to handle the task with full tool access.",
+          "order": 10
+        },
+        "moa.maxReconIterations": {
+          "type": "number",
+          "default": 50,
+          "minimum": 4,
+          "maximum": 100,
+          "description": "v0.13.0: Recon agent 单次任务的最大工具调用迭代数（兜底硬上限）。默认 50。实际多数任务会在 LLM 自主判断 + 早停机制触发后更早收敛。配置项 moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated 控制主动早停。",
+          "order": 11
+        },
+        "moa.reconAllowTerminal": {
+          "type": "boolean",
+          "default": false,
+          "description": "v0.13.0: 允许 recon agent 使用 terminal 类工具（runInTerminal / sendToTerminal / killTerminal）。默认 false（安全为先）。Debug 工作流需要 recon 跑测试/编译时设为 true。注意：prompt 会指示 recon 避免破坏性命令（rm -rf / git push --force 等），但最终取决于模型遵循度。",
+          "order": 12
+        },
+        "moa.reconEarlyStopStagnant": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "v0.13.0: Recon 早停阈值 —— 连续 N 轮工具签名（工具名+输入摘要）完全相同 → 触发早停（防死循环）。默认 2。设大可让 recon 更'耐心'，设小可更激进省成本。",
+          "order": 13
+        },
+        "moa.reconEarlyStopSaturated": {
+          "type": "number",
+          "default": 200,
+          "minimum": 0,
+          "maximum": 5000,
+          "description": "v0.13.0: Recon 早停阈值 —— iterations > 5 后，单轮新增 capturedToolCalls 字符数 < 此值持续 N 轮（N 同 reconEarlyStopStagnant）→ 触发早停（信息饱和）。默认 200 字符。",
+          "order": 14
+        },
+        "moa.reconL3Threshold": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 10000,
+          "description": "v0.13.0: L3 孙代理触发阈值。当 recon 读到的单个文件内容超过此字符数且为代码文件（.ts/.js/.py 等）时，自动派 MiniMax-M3 孙代理做内容精选（保留关键函数）。默认 30000。",
+          "order": 15
+        },
+        "moa.reconL3MaxCalls": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 20,
+          "description": "v0.13.0: 单次 MoA 任务最多派多少个 L3 孙代理。超出后即使文件超大也降级为 L2 语义边界截断。设 0 完全禁用 L3。默认 5（兼顾效果与成本）。",
+          "order": 16
+        },
+        "moa.reconModel": {
+          "type": "object",
+          "default": { "model": "" },
+          "description": "v0.14.0: Recon agent 专用模型配置。model 字段为 vscode.lm 模型 ID（如 gcmp.zhipu:::GLM-5.2-CodingPlan）。空字符串 = fallback 到 aggregator 模型（保持 v0.13.x 行为）。通过 'Moa: Configure Models' 命令的 Step 3/4 设置。",
+          "properties": {
+            "model": {
+              "type": "string",
+              "default": "",
+              "description": "Recon 模型 ID。空 = 复用 aggregator（向后兼容）。"
+            },
+            "temperature": {
+              "type": "number",
+              "description": "保留字段（vscode.lm API 暂未使用）。"
+            }
+          },
+          "order": 17
+        },
+        "moa.l3Summarizer": {
+          "type": "object",
+          "default": { "model": "" },
+          "description": "v0.14.0: L3 孙代理（大文件精选器）模型配置。model 字段为 vscode.lm 模型 ID。空字符串 = 禁用 L3（所有大文件降级为 L2 语义边界截断）。推荐 MiniMax-M3 (TokenPlan)。通过 'Moa: Configure Models' 命令的 Step 4/4 设置。",
+          "properties": {
+            "model": {
+              "type": "string",
+              "default": "",
+              "description": "L3 模型 ID。空 = 禁用 L3。"
+            }
+          },
+          "order": 18
         }
       }
     }
@@ -106,10 +458,10 @@
     "test-compile": "tsc -p ./"
   },
   "devDependencies": {
-    "@types/vscode": "^1.95.0",
     "@types/node": "^18.0.0",
-    "typescript": "^5.3.0",
+    "@types/vscode": "^1.95.0",
     "ts-loader": "^9.5.0",
+    "typescript": "^5.3.0",
     "webpack": "^5.89.0",
     "webpack-cli": "^5.1.0"
   }

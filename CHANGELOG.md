@@ -5,6 +5,146 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-07-18
+
+### Fixed — Configure Models UX
+- **Single-select now actually shows checkmarks** (`moaConfig.ts`): VSCode `showQuickPick({ canPickMany: false })` silently ignores the `picked` field — checkmarks only render when `canPickMany: true`. Added `singlePickWithCheckbox<T>()` helper built on `createQuickPick + canSelectMany: true` with real-time `onDidChangeSelection` validation: 0 selected → `circle-slash` icon, 1 selected → `check` icon (confirm enabled), ≥2 selected → `warning` icon (confirm disabled with inline message "只能选一个模型…"). Three submit paths wired: Enter key, ✓ button click, `onDidAccept`.
+- **Configuration now persists to both User + Workspace tiers by default** — `saveConfiguration()` signature changed from `Promise<ConfigurationTarget | null>` to `Promise<boolean>`; iterates `[Global, Workspace]` targets writing refs/aggregator/reconModel/l3Summarizer to both. Eliminates the previous awkward "which tier?" prompt and the silent precedence issue where User tier cannot override Workspace tier.
+
+### Changed
+- All three Step 2/3/4 calls in the Configure Models flow migrated from `showQuickPick` to `singlePickWithCheckbox`.
+
+---
+
+## [0.14.0] - 2026-07-18
+
+### Added — Recon & L3 model independence
+- **`moa.reconModel`** config (`{ provider, model }` or empty): when non-empty, the recon phase uses this model instead of the aggregator. Empty value (default) falls back to aggregator — preserves v0.13.x behavior. Resolves the portability problem where `moaConfig.ts` hardcoded specific `modelId` strings.
+- **`moa.l3Summarizer`** config (`{ provider, model }` or empty): when non-empty, the L3 grandchild agent uses this model. **Empty value disables L3 entirely** (the recon phase runs without the L3 truncation layer) — previously the L3 model was hardcoded to `gcmp.minimax:::MiniMax-M3-Token-Plan`.
+- **Configure Models expanded to 4 steps**: Step 1 refs (multi-select) → Step 2 aggregator (single-select, pre-picks current) → Step 3 reconModel (single-select, includes a synthetic "= aggregator fallback" option) → Step 4 l3Summarizer (single-select, includes a synthetic "= disabled" option).
+- `FALLBACK_L3_MODEL_ID` constant retained in `l3Summarizer.ts` only as a defensive兜底; in practice empty config = disabled.
+
+### Changed
+- `resolveL3Model()` reads from `moa.l3Summarizer.model`; returns `null` when empty (caller skips L3).
+- Recon agent model resolution moved to Phase 0 entry; previously resolved inside the recon loop.
+
+---
+
+## [0.13.0] - 2026-07-18
+
+### Added — Recon capability upgrade
+- **Tool-name filter rewrite** (`moaReconTool.ts`): removed the `copilot_` prefix whitelist (too narrow — missed vendor-prefixed tools like `gcmp_*` and built-in `read_file`). Replaced with:
+  - **Hard blacklist** (24 patterns): write/edit/delete/run/exec/terminal/insert/replace/rename/paste/apply_patch/diff/create/save/move/install/uninstall/git/push/commit/stash etc. — matched via regex on tool name.
+  - **Soft blacklist** (3 patterns, configurable via `moa.reconBlockedTools`): terminal-related tools that are technically read-only but pollute recon context (`run_in_terminal`, `get_terminal_output`, `exec`).
+- **Early-stop heuristics** in the recon loop:
+  - *Stagnant*: 3 consecutive iterations with no new files added → stop.
+  - *Saturation*: recon summary exceeds `moa.reconContextChars` budget → stop.
+- **Max iterations lifted 8 → 50** (`moa.maxReconIterations`, default 50, hard cap 50). Old default of 8 was too aggressive for medium codebases.
+- **3-layer truncation** for oversized recon results:
+  - *L1 (small)*: summary < 30k chars → inject as-is.
+  - *L2 (semantic boundary)*: 30k–100k chars → truncate at the last complete tool-result block, preserving block boundaries.
+  - *L3 (grandchild agent)*: > 100k chars → spawn an L3 Summarizer agent (default MiniMax-M3) to produce a 5k-char digest, cached at `<workspace>/.moa_cache/l3_summaries/<sha1>.txt` (key = filePath + fileSize + userPrompt).
+- **`l3Summarizer.ts`** (new, ~300 LOC): L3 grandchild agent module — cache layer, prompt builder, model resolver, invoke wrapper.
+- **`Moa: Probe Recon Tools`** debug command: lists tools visible to the recon agent after filtering (for tuning the blacklist).
+
+### Changed
+- Recon agent system prompt rewritten to not hardcode tool names — references capabilities ("use the file-reading tool", "use the search tool") so the prompt survives VSCode/Copilot tool-name changes.
+
+---
+
+## [0.12.0] - 2026-07-18
+
+### Added — Iterative MoA orchestration (Hermes-style)
+- **3 new LM tools**: `moa_orchestrate`, `moa_continue`, `moa_finalize`. Exposes the MoA loop as composable VSCode LM tools so other agents (or the user via chat) can drive an iterative refinement loop.
+  - `#moa_orchestrate` — starts a new loop, returns `task_id`.
+  - `#moa_continue` — feeds subagent recon results back, runs one iteration; supports `deferredResultId` for resume semantics.
+  - `#moa_finalize` — force-stops the loop, extracts action items, writes `final.json`.
+- **State persistence to disk**: every iteration's recon input + ref outputs + aggregator verdict written to `<workspace>/.moa_cache/<task_id>/iteration_NNN/`. Survives main-session compaction.
+- **Convergence rules**: aggregator emits `completeness` score (0.0–1.0); loop auto-stops at `completeness ≥ 0.8` (COMPLETENESS_THRESHOLD) or 3 stalled iterations (CONVERGENCE_WINDOW).
+- **`moaOrchestrator.ts`** + **`moaOrchestrateTools.ts`** (new modules): orchestration state machine + the 3 tool implementations.
+
+### Fixed
+- LM tool registration: `modelDescription` + `toolReferenceName` fields now correctly populated (was causing tools to not appear in the Copilot Chat tool picker).
+- `callerReconContext` config-key bug: when the parent agent passed pre-collected context, the recon phase was ignoring it due to a typo'd config key.
+- Recon failure path: `reconBroken` flag now propagated correctly so refs fall back to workspace-context-only mode instead of crashing.
+
+---
+
+## [0.11.0] - 2026-07-18
+
+### Added — Standalone recon & analyze tools
+- **`moa_recon`** LM tool: standalone read-only recon — accepts a prompt + optional file list, returns a structured summary. Usable outside the `@moa` chat participant (e.g. from other agents, slash commands, or chat tool-use).
+- **`moa_analyze`** LM tool: single-shot multi-perspective analysis — runs N refs + 1 aggregator in one tool call, returns the fused analysis. For callers that want MoA reasoning without driving the loop themselves.
+- **`moaReconTool.ts`** + **`moaTool.ts`** (new modules): tool implementations + read-only tool filtering.
+- **`probeTools.ts`**: debugging helper that enumerates all registered `vscode.lm.tools` (replaces the inline probe code from v0.8.0).
+
+---
+
+## [0.10.0] - 2026-07-18
+
+### Changed — Subagent split
+- **Refs layer is now pure reasoning** — refs no longer receive `wsContextText` (the workspace snapshot). Only the recon phase reads workspace files; refs see only the recon summary. Eliminates the duplicate-context bug where refs were token-billed for both workspace snapshot and recon summary.
+- **Ref/acting separation** clarified: refs produce JSON `{sufficient, missing, analysis}` (pure reasoning, no tools); the acting agent (Layer 3) owns all tool calls and produces the final user-facing Markdown.
+- Recon agent system prompt rewritten — no longer hardcodes tool names; references tool capabilities ("file-reading tool", "search tool") so the prompt is robust to VSCode/Copilot tool-name churn.
+
+### Removed
+- `wsContextText` parameter from ref prompt template (was a no-op since v0.9.0 hotfix1 but still being computed and token-billed).
+
+---
+
+## [0.9.0] - 2026-07-18
+
+### Added — Recon phase (Phase 0) + Sufficiency gate (Phase 1.5)
+- **4-layer pipeline**: recon → ref fan-out → aggregator → acting agent. Recon collects files relevant to the user's question BEFORE refs run, so refs see grounded context instead of guessing.
+- **`moa.enableRecon`** (default: true): toggle the recon phase. When false, falls back to v0.8.0 behavior (refs see only workspace context).
+- **`moa.maxReconRounds`** (default: 3, max 5): cap for the multi-round recon loop. Each round = 1 recon pass + N ref fan-out + sufficiency check.
+- **`moa.reconContextChars`** (default: 30000): character budget for the recon summary injected into ref prompts.
+- **Sufficiency gate**: refs output JSON `{sufficient, missing, analysis}`. If a majority of refs say `sufficient=false`, the recon agent loops back with their `missing` hints as priority targets. Converges when majority says `sufficient=true` or `maxReconRounds` is hit.
+- **Read-only tool whitelist** (`actingAgent.ts`): recon only gets read-only tools (read_file, find_files, grep, get_errors, search_codebase, list_dir, list_code_usages, etc.). Write tools (apply_patch, insert_edit, replace_string, run_in_terminal, rename, write, create, delete, etc.) are blacklisted via regex.
+- **`runReconAgent()`** function in `actingAgent.ts`: thin wrapper around `runActingAgent` with `readOnly=true`, lower iteration cap (8 vs 12), recon-specific system prompt, and `captureToolResults=true` so the recon summary can be extracted.
+- **`extractReconSummary()`** + **`parseRefOutput()`** helpers in `moaRunner.ts`: build the recon summary text from captured tool calls, and parse ref JSON outputs (with graceful fallback when models don't emit valid JSON).
+
+### Changed
+- **Aggregator model resolution moved earlier** — now resolved before Phase 0 because recon reuses the aggregator model.
+- **Ref prompt extended** — refs now receive recon summary as additional context, and are required to output JSON-wrapped `{sufficient, missing, analysis}`. When recon is disabled, refs still output JSON (parsed for uniformity), but `sufficient` is ignored.
+- **Aggregator input parsing** — ref outputs are unwrapped from JSON before being joined for the aggregator; aggregator sees clean prose, not JSON scaffolding.
+- **Ref fan-out loop wrapped in `sufficiencyLoop`** — supports multi-round convergence instead of single-shot.
+
+### Fixed
+- Removed duplicate `const hasTools` declaration (renamed early check to `hasToolsEarly` in moaRunner.ts).
+
+### [0.9.0 hotfix1] - 2026-07-18
+
+### Changed — Project tree depth & recon precision
+- **Project tree depth lifted** (workspaceContext.ts): `depth=2/maxEntries=50/slice=15` → `depth=6/maxEntries=2000/slice=50`. Refs can now see `src/services/auth/login.ts` level nesting, not just `src/`. File entries show their size in KB so refs can prioritize.
+- **Oversized files (>1MB) excluded from tree listing** — refs don't need to see binary/asset paths as candidates.
+- **`recon` system prompt revised** — explicitly directs recon agent to use `read_file` with `startLine`/`endLine` parameters for large files (instead of reading whole files). When missing hints are present, gives a 3-shape interpretation guide (path:line-line / path / identifier → search query).
+
+### Added — Hint-based prefetch
+- **`parseMissingHint()`** — parses ref "missing" hints into `{filePath?, lineRange?, query?}` structures. Supports three shapes: `src/foo.ts:120-150` (line range), `src/foo.ts` (full file), `funcName` (search query).
+- **`prefetchFromHints()`** — for hints with explicit filePath, moaRunner calls `vscode.lm.invokeTool('copilot_readFile', ...)` directly. Bypasses the recon agent for high-priority, well-specified targets.
+- **Two-pass Phase 0**: prefetched hints are merged into the recon summary with `[prefetched hint N]` provenance marker; recon agent only handles query-only hints + new discoveries.
+- **`extractReconSummary()` signature extended** — now takes `prefetched: Map<number, string>` + `prefetchedHints: string[]`. Block ordering changed: prefetched first (highest priority), then captured recon calls.
+
+---
+
+## [0.8.0] - 2026-07-18 (unreleased in CHANGELOG, documented retroactively)
+
+### Added — 3-layer Hermes architecture
+- **Acting agent** (Layer 3): tool-calling loop that takes aggregator guidance + user prompt, calls copilot_* tools (read_file, apply_patch, run_in_terminal, etc.), and produces the FINAL user-facing Markdown answer.
+- **`moa.enableActingAgent`** (default: true): toggle Layer 3. When false, aggregator output IS the final answer (v0.7.x 2-layer behavior).
+- **`workspaceContext.ts`**: builds workspace snapshot (active editor + selection + open docs + project tree) injected into ref prompts.
+- **`Moa: Probe Available Tools`** debug command: lists all registered `vscode.lm.tools`.
+
+---
+
+## [0.7.3] - 2026-07-18
+
+### Added
+- **`moa.refDisplayMode`** config (default: `thinking`): controls how ref outputs appear in chat UI. `thinking` (Hermes-style) shows only progress indicators; `verbose` (legacy) streams refs inline as markdown.
+
+---
+
 ## [0.7.2] - 2026-07-18
 
 ### Changed

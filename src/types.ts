@@ -66,6 +66,46 @@ export interface AggregatorConfig {
 }
 
 /**
+ * v0.14.0: Recon agent 专用模型配置。
+ *
+ * 设计：
+ *   - 用户可通过 "Moa: Configure Models" Step 3/4 单独指定 recon 用的模型
+ *   - 留空（model=''）= fallback 到 aggregator 模型（保持 v0.13.x 行为）
+ *   - 推荐选工具调用稳定的模型（GLM-5.2 / DeepSeek-V4-Pro）
+ *
+ * 与 AggregatorConfig 字段一致（model + temperature），但 temperature 实际
+ * 未被 vscode.lm API 使用，仅保留以便未来扩展。
+ */
+export interface ReconConfig {
+  /**
+   * 模型 ID（vscode.lm 的 m.id，如 "gcmp.zhipu:::GLM-5.2-CodingPlan"）。
+   * 空字符串 = fallback 到 aggregator 模型（向后兼容 v0.13.x）。
+   */
+  model: string;
+  /** Optional temperature（暂未使用，预留扩展）。 */
+  temperature?: number;
+}
+
+/**
+ * v0.14.0: L3 孙代理（大文件精选器）模型配置。
+ *
+ * 设计：
+ *   - 用户可通过 "Moa: Configure Models" Step 4/4 单独指定 L3 用的模型
+ *   - 留空（model=''）= 完全禁用 L3，所有大文件走 L2 语义边界截断
+ *   - 默认推荐 MiniMax-M3（CLAUDE.md §2.4 两层嵌套规则要求 M3）
+ *
+ * 移植性：把 modelId 从硬编码常量（v0.13.0 的 DEFAULT_L3_MODEL_ID）
+ * 改为配置项，避免换环境后失效。
+ */
+export interface L3Config {
+  /**
+   * 模型 ID（vscode.lm 的 m.id）。
+   * 空字符串 = 禁用 L3（所有大文件降级到 L2 语义边界截断）。
+   */
+  model: string;
+}
+
+/**
  * Re-export helper to keep imports tidy in other files.
  */
 export type { ChatParticipantToolToken };

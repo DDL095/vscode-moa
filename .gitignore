@@ -33,3 +33,6 @@ coverage/
 # Cache
 .cache/
 .eslintcache
+
+# TSC debug output
+tsc_output.txt
