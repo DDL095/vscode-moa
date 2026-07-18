@@ -31,20 +31,20 @@ export const moaHandler: vscode.ChatRequestHandler = async (
 
   if (!userPrompt && command !== 'preset') {
     stream.markdown(
-      '🌀 **MoA Bridge** is ready. Type `@moa <your question>` to start a multi-perspective analysis.\n\n' +
+      '**[MoA Bridge]** ready. Type `@moa <your question>` to start a multi-perspective analysis.\n\n' +
         'Tip: prefix with `preset=<name>` to pick a preset, e.g. `@moa preset=fast 分析 ...`.'
     );
     return { metadata: { command, preset: presetName, path: 'noop' } };
   }
 
-  stream.progress(`🎯 MoA 启动（preset=${presetName}）…`);
+  stream.progress(`[MoA] starting (preset=${presetName})...`);
 
   const detection = await detectPath();
-  stream.progress(`📍 Path=${detection.path} (scripts: ${detection.scriptsDir || 'n/a'})`);
+  stream.progress(`[MoA] path=${detection.path} (scripts: ${detection.scriptsDir || 'n/a'})`);
 
   try {
     if (detection.path === 'P2b') {
-      stream.progress('🔄 调用 Hermes MoA（P2b wrapper）…');
+      stream.progress('[MoA] calling Hermes (P2b wrapper)...');
       const result = await runMoaWrapper(
         userPrompt || '(empty prompt)',
         presetName,
@@ -52,7 +52,7 @@ export const moaHandler: vscode.ChatRequestHandler = async (
         stream,
         token
       );
-      stream.progress(`✅ MoA 完成（${result.elapsed.toFixed(1)}s）`);
+      stream.progress(`[MoA] done (${result.elapsed.toFixed(1)}s)`);
       return {
         metadata: { command, preset: result.preset, path: result.path, elapsedSec: result.elapsed },
       };
@@ -60,9 +60,9 @@ export const moaHandler: vscode.ChatRequestHandler = async (
 
     if (detection.path === 'P1' || detection.path === 'unknown') {
       // P1 path uses vscode.lm models — works even if no PowerShell scripts present.
-      stream.progress('🔄 Fan-out via vscode.lm (P1 native)…');
+      stream.progress('[MoA] fan-out via vscode.lm (P1 native)...');
       const result = await runP1Fanout(userPrompt, presetName, stream, token);
-      stream.progress(`✅ MoA 完成（${result.elapsed.toFixed(1)}s, ${result.path}）`);
+      stream.progress(`[MoA] done (${result.elapsed.toFixed(1)}s, ${result.path})`);
       return {
         metadata: { command, preset: result.preset, path: result.path, elapsedSec: result.elapsed },
       };
@@ -70,7 +70,7 @@ export const moaHandler: vscode.ChatRequestHandler = async (
 
     // P2a — ACP — not implemented in skeleton.
     stream.markdown(
-      `⚠️ **P2a (ACP protocol) detected but not implemented in v0.1.0 skeleton.**\n\n` +
+      `**[Warning]** P2a (ACP protocol) detected but not implemented in v0.1.0 skeleton.\n\n` +
         `Please install the Hermes CLI and use **P2b** instead, or fall back to **P1** (native).\n\n` +
         `Detected scripts: \`${detection.scriptsDir}\``
     );
@@ -80,7 +80,7 @@ export const moaHandler: vscode.ChatRequestHandler = async (
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    stream.markdown(`❌ **MoA 失败**：${message}`);
+    stream.markdown(`**[Error]** MoA failed: ${message}`);
     return {
       metadata: { command, preset: presetName, path: detection.path },
       errorDetails: { message },
@@ -94,19 +94,19 @@ export const moaHandler: vscode.ChatRequestHandler = async (
 
 function buildHelpMarkdown(): string {
   return [
-    '## 🌉 MoA Bridge — Usage',
+    '## MoA Bridge - Usage',
     '',
     '**Trigger**: `@moa <your prompt>`',
     '',
-    '**Optional preset**: prefix with `preset=<name>` — available presets live in `moa-bridge/presets/` (`default`, `fast`, `academic`, `custom`).',
+    '**Optional preset**: prefix with `preset=<name>` — available presets live in `presets/` (`default`, `fast`, `academic`, `custom`).',
     '',
     '**Slash commands**:',
     '- `@moa /preset preset=<name> ...` — switch preset',
     '- `@moa /help` — show this help',
     '',
     '**Execution paths** (auto-detected):',
-    '- **P2b** — call `MoaWrapper.ps1` via `pwsh` (recommended when Hermes is installed)',
-    '- **P1** — native subagent simulation using `vscode.lm.selectChatModels`',
+    '- **P1** — native fan-out via `vscode.lm.selectChatModels` (default when no Hermes)',
+    '- **P2b** — call `MoaWrapper.ps1` via `pwsh` (when Hermes is installed)',
     '- **P2a** — ACP protocol (skeleton stub; needs formulahendry.acp-client)',
     '',
     '**Limitations (v0.1.0 skeleton)**:',

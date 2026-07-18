@@ -199,17 +199,28 @@ export async function runP1Fanout(
   const start = Date.now();
 
   // Pick any models the user has available.
-  const candidates = await vscode.lm.selectChatModels({});
+  const allCandidates = await vscode.lm.selectChatModels({});
+
+  // Filter out placeholder/pseudo models (e.g. VSCode's "Auto" selector)
+  // that cannot actually serve chat requests independently.
+  const PLACEHOLDER_NAMES = new Set(['auto', 'automatic', 'default', '']);
+  const candidates = allCandidates.filter(
+    (m) => !PLACEHOLDER_NAMES.has(m.name.toLowerCase().trim())
+  );
+
   if (candidates.length === 0) {
-    throw new Error('No chat models available — install/activate at least one LLM provider extension.');
+    throw new Error(
+      'No usable chat models available (all candidates are placeholders). ' +
+        'Install/activate at least one real LLM provider extension (e.g. GCMP, Copilot).'
+    );
   }
 
   const refs = candidates.slice(0, Math.min(3, candidates.length));
-  stream.progress(`🧠 Fan-out to ${refs.length} reference model(s)`);
+  stream.progress(`[MoA] fan-out to ${refs.length} reference model(s): ${refs.map((r) => r.name).join(', ')}`);
 
   const refPrompts: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(
-      `You are one of several reference advisors. Provide a concise (≤200 word) perspective on:\n\n${prompt}`
+      `You are one of several reference advisors. Provide a concise (<=200 word) perspective on:\n\n${prompt}`
     ),
   ];
 
@@ -221,11 +232,11 @@ export async function runP1Fanout(
         for await (const frag of response.text) {
           text += frag;
         }
-        stream.markdown(`**Ref [${model.name}]**: ${text}\n\n---\n\n`);
+        stream.markdown(`**Ref [${model.name}]**:\n\n${text}\n\n---\n\n`);
         return { model: model.name, text };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        stream.markdown(`**Ref [${model.name}]**: ⚠️ ${msg}\n\n---\n\n`);
+        stream.markdown(`**Ref [${model.name}]**: [error] ${msg}\n\n---\n\n`);
         return { model: model.name, text: `[error] ${msg}` };
       }
     })
@@ -233,7 +244,7 @@ export async function runP1Fanout(
 
   // Aggregator: first model plays the synthesizer role.
   const aggregator = refs[0];
-  stream.progress(`🎯 Aggregator: ${aggregator.name}`);
+  stream.progress(`[MoA] aggregator: ${aggregator.name}`);
 
   const aggMessages: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(
@@ -250,7 +261,7 @@ export async function runP1Fanout(
     stream.markdown(aggregated);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    stream.markdown(`⚠️ Aggregator failed: ${msg}`);
+    stream.markdown(`**[Aggregator error]**: ${msg}`);
   }
 
   return {
