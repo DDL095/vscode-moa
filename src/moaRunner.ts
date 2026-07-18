@@ -201,22 +201,41 @@ export async function runP1Fanout(
   // Pick any models the user has available.
   const allCandidates = await vscode.lm.selectChatModels({});
 
-  // Filter out placeholder/pseudo models (e.g. VSCode's "Auto" selector)
-  // that cannot actually serve chat requests independently.
+  // Filter out placeholder/pseudo models (e.g. VSCode's "Auto" selector).
   const PLACEHOLDER_NAMES = new Set(['auto', 'automatic', 'default', '']);
-  const candidates = allCandidates.filter(
+  let candidates = allCandidates.filter(
     (m) => !PLACEHOLDER_NAMES.has(m.name.toLowerCase().trim())
   );
+
+  // Honor user preference: if `moa.preferredModels` is configured,
+  // try to use those first (by substring match on name).
+  const config = vscode.workspace.getConfiguration('moa');
+  const preferred: string[] = config.get<string[]>('preferredModels') ?? [];
+  if (preferred.length > 0) {
+    const preferredMatches = candidates.filter((m) =>
+      preferred.some((p) => m.name.toLowerCase().includes(p.toLowerCase()))
+    );
+    if (preferredMatches.length > 0) {
+      candidates = preferredMatches;
+      stream.progress(`[MoA] using preferred models filter: ${preferred.join(', ')}`);
+    }
+  }
 
   if (candidates.length === 0) {
     throw new Error(
       'No usable chat models available (all candidates are placeholders). ' +
-        'Install/activate at least one real LLM provider extension (e.g. GCMP, Copilot).'
+        'Install/activate at least one real LLM provider extension (e.g. GCMP, Copilot), ' +
+        'or set "moa.preferredModels" in settings.json.'
     );
   }
 
-  const refs = candidates.slice(0, Math.min(3, candidates.length));
-  stream.progress(`[MoA] fan-out to ${refs.length} reference model(s): ${refs.map((r) => r.name).join(', ')}`);
+  // Try up to 5 candidates — we keep the first 3 that actually succeed.
+  // This handles the case where some registered models fail (e.g. expired subscription).
+  const maxRefs = 3;
+  const probePool = candidates.slice(0, Math.min(5, candidates.length));
+  stream.progress(
+    `[MoA] probing ${probePool.length} model(s): ${probePool.map((m) => m.name).join(', ')}`
+  );
 
   const refPrompts: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(
@@ -224,31 +243,57 @@ export async function runP1Fanout(
     ),
   ];
 
-  const refResponses = await Promise.all(
-    refs.map(async (model) => {
-      try {
-        const response = await model.sendRequest(refPrompts, {}, token);
-        let text = '';
-        for await (const frag of response.text) {
-          text += frag;
-        }
-        stream.markdown(`**Ref [${model.name}]**:\n\n${text}\n\n---\n\n`);
-        return { model: model.name, text };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        stream.markdown(`**Ref [${model.name}]**: [error] ${msg}\n\n---\n\n`);
-        return { model: model.name, text: `[error] ${msg}` };
-      }
-    })
-  );
+  type RefResult = { model: vscode.LanguageModelChat; name: string; text: string };
+  const successes: RefResult[] = [];
+  const failures: { name: string; msg: string }[] = [];
 
-  // Aggregator: first model plays the synthesizer role.
-  const aggregator = refs[0];
-  stream.progress(`[MoA] aggregator: ${aggregator.name}`);
+  // Sequential probing (parallel is risky when many will fail — cascading 4xx/5xx).
+  for (const model of probePool) {
+    if (successes.length >= maxRefs) break;
+    try {
+      const response = await model.sendRequest(refPrompts, {}, token);
+      let text = '';
+      for await (const frag of response.text) {
+        text += frag;
+      }
+      stream.markdown(`**Ref [${model.name}]**:\n\n${text}\n\n---\n\n`);
+      successes.push({ model, name: model.name, text });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Truncate long API error JSON to first 150 chars for readability.
+      const shortMsg = msg.length > 150 ? msg.substring(0, 150) + '...' : msg;
+      stream.markdown(`**Ref [${model.name}]**: [skipped] ${shortMsg}\n\n---\n\n`);
+      failures.push({ name: model.name, msg });
+    }
+  }
+
+  // All refs failed — graceful degradation.
+  if (successes.length === 0) {
+    stream.markdown(
+      `**[MoA degraded]** All ${failures.length} candidate model(s) failed. ` +
+        `This usually means expired/invalid subscriptions or unsupported models.\n\n` +
+        `**Troubleshooting**:\n` +
+        `- Open Command Palette → "GCMP: 设置辅助工具模型" to pick a valid model\n` +
+        `- Or set \`"moa.preferredModels": ["GLM-5.2", "DeepSeek-V4-Pro", "MiniMax-M3"]\` in settings.json\n` +
+        `- Failed models: ${failures.map((f) => f.name).join(', ')}\n\n`
+    );
+    return {
+      output: '[all refs failed]',
+      elapsed: (Date.now() - start) / 1000,
+      path: 'P1-degraded',
+      preset,
+    };
+  }
+
+  // Aggregator: pick from successful refs (prefer the first one that worked).
+  const aggregator = successes[0].model;
+  stream.progress(
+    `[MoA] aggregator: ${aggregator.name} (using ${successes.length}/${successes.length + failures.length} successful refs)`
+  );
 
   const aggMessages: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(
-      `You are an aggregator. Synthesize the following advisor perspectives into a single coherent answer (Markdown). Keep the strongest points from each, resolve conflicts explicitly, and end with a one-line recommendation.\n\nUser question:\n${prompt}\n\nAdvisor responses:\n${refResponses.map((r, i) => `[${i + 1}] ${r.model}:\n${r.text}`).join('\n\n')}`
+      `You are an aggregator. Synthesize the following advisor perspectives into a single coherent answer (Markdown). Keep the strongest points from each, resolve conflicts explicitly, and end with a one-line recommendation.\n\nUser question:\n${prompt}\n\nAdvisor responses:\n${successes.map((r, i) => `[${i + 1}] ${r.name}:\n${r.text}`).join('\n\n')}`
     ),
   ];
 
@@ -261,13 +306,17 @@ export async function runP1Fanout(
     stream.markdown(aggregated);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    stream.markdown(`**[Aggregator error]**: ${msg}`);
+    stream.markdown(
+      `**[Aggregator error]**: ${msg}\n\n` +
+        `---\n\n**Fallback** — showing the first ref response verbatim:\n\n${successes[0].text}`
+    );
+    aggregated = successes[0].text;
   }
 
   return {
     output: aggregated,
     elapsed: (Date.now() - start) / 1000,
-    path: 'P1',
+    path: successes.length >= 2 ? 'P1' : 'P1-partial',
     preset,
   };
 }

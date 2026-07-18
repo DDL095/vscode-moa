@@ -11,7 +11,7 @@ import type { ChatParticipantToolToken } from 'vscode';
  * - P2a: ACP protocol to Hermes (needs formulahendry.acp-client)
  * - P2b: Wrapper script call to Hermes (needs Hermes CLI installed)
  */
-export type MoaPath = 'P1' | 'P2a' | 'P2b' | 'unknown';
+export type MoaPath = 'P1' | 'P1-partial' | 'P1-degraded' | 'P2a' | 'P2b' | 'unknown';
 
 /**
  * Result of path detection (capability scan).

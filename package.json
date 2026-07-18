@@ -46,7 +46,39 @@
           }
         ]
       }
-    ]
+    ],
+    "configuration": {
+      "title": "MoA Bridge",
+      "properties": {
+        "moa.preferredModels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Preferred model name substrings (e.g. [\"GLM-5.2\", \"DeepSeek-V4-Pro\", \"MiniMax-M3\"]). When set, only models whose name contains one of these substrings are considered. Use this to skip placeholder/expired models.",
+          "order": 1
+        },
+        "moa.defaultPreset": {
+          "type": "string",
+          "default": "default",
+          "enum": ["default", "fast", "academic", "custom"],
+          "description": "Default preset to use when no preset is specified in the prompt.",
+          "order": 2
+        },
+        "moa.timeoutSec": {
+          "type": "number",
+          "default": 120,
+          "minimum": 10,
+          "description": "Per-call timeout in seconds.",
+          "order": 3
+        },
+        "moa.parallelRefs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Fan out reference advisors in parallel (may cause cascading 4xx/5xx when models have expired subscriptions).",
+          "order": 4
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
