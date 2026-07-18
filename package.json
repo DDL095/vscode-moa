@@ -1,9 +1,9 @@
 {
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.10: 作为会向工作区写文件的插件，新增 cacheReadme.ts 模块 —— l3Summarizer / moaOrchestrator / moaRunner 三处首次创建 .moa_cache/ 时自动写入 README.md（不覆盖用户已修改版），含目录结构说明、诊断指南、清理策略、.gitignore 建议、隐私说明。让用户在工作区直接看到这是什么、能否删除、出问题怎么排查，符合开源插件的自文档标准。",
-  "version": "0.14.10",
-  "publisher": "moa-bridge",
+  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.11: 改为正式 publisher dudali095 发布到 VSCode Marketplace。v0.14.10: 作为会向工作区写文件的插件，新增 cacheReadme.ts 模块 —— l3Summarizer / moaOrchestrator / moaRunner 三处首次创建 .moa_cache/ 时自动写入 README.md（不覆盖用户已修改版），含目录结构说明、诊断指南、清理策略、.gitignore 建议、隐私说明。让用户在工作区直接看到这是什么、能否删除、出问题怎么排查，符合开源插件的自文档标准。",
+  "version": "0.14.11",
+  "publisher": "dudali095",
   "license": "MIT",
   "repository": {
     "type": "git",

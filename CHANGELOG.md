@@ -5,6 +5,18 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.11] - 2026-07-19
+
+### Changed — Marketplace publish
+- **Publisher changed `moa-bridge` → `dudali095`** (official VSCode Marketplace publisher ID). First version published to the public Marketplace; all prior versions (v0.10.0 - v0.14.10) were GitHub Release only.
+- Functional code identical to v0.14.10 — no behavior changes. The bump is required because Marketplace requires unique `<publisher>.<name>` identifiers, and the previous placeholder publisher could not be used.
+
+### How users install
+- **From Marketplace (recommended)**: search "MoA Bridge" in VSCode Extensions panel, or `code --install-extension dudali095.moa-bridge`
+- **From GitHub Release**: download `moa-bridge-0.14.11.vsix` from https://github.com/DDL095/vscode-moa/releases, then `code --install-extension moa-bridge-0.14.11.vsix`
+
+---
+
 ## [0.14.10] - 2026-07-19
 
 ### Added — `.moa_cache/` discoverability & open-source friendliness
