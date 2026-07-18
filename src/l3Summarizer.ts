@@ -70,13 +70,6 @@ export interface L3SummarizeResult {
   elapsedMs: number;
 }
 
-/** 默认 L3 模型 ID（v0.14.0 前是硬编码常量；现在仅作为初始 fallback）
- *
- * v0.14.0: 实际使用时优先从 moa.l3Summarizer.model 配置项读取，
- * 仅在配置读取失败时用此常量兜底（理论上不会触发，因为空配置 = 禁用 L3）。
- */
-const FALLBACK_L3_MODEL_ID = 'gcmp.minimax:::MiniMax-M3-Token-Plan';
-
 /** 默认目标输出长度（字符）*/
 const DEFAULT_TARGET_CHARS = 10000;
 
@@ -216,7 +209,7 @@ export async function l3Summarize(opts: L3SummarizeOptions): Promise<L3Summarize
   }
 
   // 2. 拉模型 —— 用 selectChatModels 找匹配的，取第一个
-  //    modelId 可能是完整 ID（gcmp.minimax:::MiniMax-M3-Token-Plan）或子串
+  //    modelId 可能是完整 ID（vendor:::model 形式）或子串
   let model: vscode.LanguageModelChat | undefined;
   try {
     const candidates = await vscode.lm.selectChatModels({});

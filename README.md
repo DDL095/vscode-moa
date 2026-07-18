@@ -143,7 +143,7 @@ Recommended pairing:
 | Recon (Phase 0) | = aggregator (default) or DeepSeek-V4-Flash for speed |
 | L3 Summarizer | MiniMax-M3 (TokenPlan) — cheap, good at compression |
 
-The only hardcoded model ID in the codebase is a defensive fallback for L3 (`gcmp.minimax:::MiniMax-M3-Token-Plan` in `src/l3Summarizer.ts`); since v0.14.0 an empty `moa.l3Summarizer.model` disables L3 entirely, so this fallback never triggers in practice.
+MoA is fully vendor-agnostic — there are **no hardcoded model IDs** in the codebase. Every layer reads its model from the `moa.*` configuration namespace; empty values disable the layer (or fall back to aggregator, in the case of `moa.reconModel`).
 
 ## Configuration reference
 
