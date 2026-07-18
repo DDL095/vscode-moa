@@ -5,6 +5,56 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.10] - 2026-07-19
+
+### Added — `.moa_cache/` discoverability & open-source friendliness
+
+As a plugin that writes into the user's workspace, MoA now makes those writes **self-documenting** at the point of impact. Users no longer have to read the project README to figure out what `.moa_cache/` is, whether it's safe to delete, or how to diagnose problems from the artifacts.
+
+- **`src/cacheReadme.ts`** (new module, ~200 LOC): exports `ensureCacheReadme(cacheRoot)` and `buildCacheReadmeContent()`. Idempotent — writes only on first cache creation; never overwrites a user-modified README. Atomic write (tmp + rename) so concurrent reads never see a half-written file. Failures degrade silently to `console.warn` (never blocks the MoA pipeline).
+- **Three-point integration**: every code path that creates `.moa_cache/` now calls `ensureCacheReadme()`:
+  - `l3Summarizer.ts::getCacheDir()` — first L3 cache miss
+  - `moaOrchestrator.ts::getCacheRoot()` — first `#moa_orchestrate` invocation
+  - `moaRunner.ts::getReconDumpDir()` — first `@moa` recon dump
+- **Auto-generated README content** (`Cache README v1`) covers:
+  - *What this is* — intermediate artifacts, safe to delete, will regenerate
+  - *Directory layout* — tree with one-line purpose per subdir (recon/ l3_summaries/ `<task_id>/`)
+  - *Diagnostics* — how to find why an `@moa` output came out the way it did; how to identify 1213 errors from `Part Diagnostics` tables
+  - *Cleanup* — whole-directory delete, per-subdir delete table, how to extract useful content (e.g. copy a ref's analysis out) before deleting
+  - *.gitignore suggestion* — recommended entry + force-add escape hatch for tutorial authors
+  - *Configuration* — table of every `moa.*` setting that influences cache write behavior
+  - *Privacy* — local-only writes; what flows to LLM providers
+  - Bilingual (Chinese-primary, English key terms) — matches the project's existing comment style and reaches a wider audience
+
+### Changed
+- **Main `README.md`**: added "Local cache & workspace artifacts (v0.14.10+)" section with directory layout, `.gitignore` recommendation, and pointer to the auto-generated cache README. Updated Debugging section to reference it. File-layout diagram now lists `cacheReadme.ts`.
+
+### Motivation
+Open-source plugins that silently write into the user's workspace without leaving an in-place explanation force users to: (a) notice the directory exists, (b) search upstream docs, (c) guess whether it's safe to delete. This change closes that loop at the point of impact — the README lives *inside* `.moa_cache/` and is rewritten only when absent.
+
+---
+
+## [0.14.9] - 2026-07-19
+
+### Changed — Revert maxOutputTokens in favor of agent-judgment prompt
+- **Reverted v0.14.8's explicit `maxOutputTokens` setting** on ref/aggregator `sendRequest` calls. The explicit setting risked provider-compatibility issues (some providers reject unknown options, some silently cap, behavior varies). Reverted to `sendRequest(prompts, {}, token)` (empty options).
+- **Ref prompt** (`moaRunner.ts`): replaced hardcoded "ANALYSIS DEPTH REQUIREMENT" (2500-5000 words) with a new `=== OUTPUT DEPTH (agent judgment) ===` block. Teaches the LLM to self-calibrate based on question type:
+  - RESEARCH/LITERATURE questions → COMPREHENSIVE analysis (proportional to recon data richness)
+  - NARROW CODE questions → CONCISE and surgical
+  - Explicit anti-patterns (one-paragraph summaries when recon has 5+ aspects; hand-waving instead of naming specific genes/numbers; etc.)
+- **Aggregator prompt**: matching `=== OUTPUT DEPTH (agent judgment) ===` block — preserve refs' richness, don't over-summarize, address disagreements explicitly.
+- This approach is **provider-agnostic** (works the same across GLM/DeepSeek/MiniMax/Claude) and lets the LLM judge depth per-question rather than applying a one-size-fits-all token limit.
+
+---
+
+## [0.14.8] - 2026-07-19 [YANKED]
+
+### Changed — Explicit maxOutputTokens (reverted in v0.14.9)
+- Set explicit `maxOutputTokens` on ref/aggregator `sendRequest` to match each model's declared max (e.g. GLM-5.2 = 128000). Goal: fix observed asymmetry where refs consumed 90K+ input chars but produced only 1.7K-5.3K output chars.
+- **Reverted by user direction** in v0.14.9: "maxOutputTokens 显式设置我觉得不好，还是在 prompt 里 agent 化，让 LLM 更好的输出会更好，也能避免太冗余的内容，不要让这个内容与硬性设置影响到其他模型的输出，影响我做的插件的兼容性." Replaced with prompt-based agent-judgment depth control.
+
+---
+
 ## [0.14.1] - 2026-07-18
 
 ### Fixed — Configure Models UX

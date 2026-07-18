@@ -32,6 +32,10 @@
  */
 
 import * as vscode from 'vscode';
+// v0.14.7: 1213 outgoing dump 需要 fs + path
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 /**
  * Acting agent 最大工具调用迭代数（兜底硬上限，防止死循环）。
@@ -150,8 +154,23 @@ export interface ActingAgentResult {
    * v0.9.0: Captured tool calls (populated when captureToolResults=true).
    * Used by moaRunner to build the recon summary from recon's tool results.
    * Empty array when captureToolResults is false.
+   *
+   * v0.14.2 KEY INVARIANT: this array is APPEND-ONLY and never cleared on
+   * error. Even if sendRequest or the response stream crashes mid-iteration,
+   * all tool calls captured *before* the crash remain here. moaRunner relies
+   * on this to salvage partial recon content when the LLM API fails
+   * transiently (e.g. GLM 1213, DeepSeek 429, etc.).
    */
   capturedToolCalls: CapturedToolCall[];
+  /**
+   * v0.14.2: Non-empty if the agent exited due to an unrecoverable error
+   * (LLM API crash, stream exception, etc.). Empty/undefined = clean exit.
+   *
+   * When this is set, `capturedToolCalls` may still contain useful partial
+   * data — callers should check `capturedToolCalls.length > 0` before
+   * discarding the result.
+   */
+  error?: string;
 }
 
 /**
@@ -218,6 +237,98 @@ export interface CapturedToolCall {
   input: unknown;
   /** Plain-text representation of the tool result content. */
   resultText: string;
+  /**
+   * v0.14.6: Per-part diagnostic metadata. Records the constructor name
+   * of each content part + length, so dumpCapturedToolCall can surface
+   * what part types a tool actually returned (helps diagnose tools like
+   * copilot_fetchWebPage that return non-TextPart rich-content parts).
+   */
+  partDiagnostics?: Array<{ kind: string; length: number; source: string }>;
+}
+
+/**
+ * v0.14.6: Recursively extract text content from non-TextPart objects.
+ *
+ * Background: copilot_fetchWebPage (and similar Copilot built-in tools)
+ * return content parts that are NOT LanguageModelTextPart — they are
+ * rich-content / PromptTSX parts whose JSON.stringify output is a deeply
+ * nested tree ($mid / value / node / ctor / ctorName / children...).
+ * Naively JSON.stringifying such parts floods recon content with structural
+ * noise, burying the actual text (abstracts, page content) inside a
+ * `text` field many levels deep.
+ *
+ * Strategy (in priority order):
+ *   1. Direct string field: value / text / content / markdown
+ *   2. Recursive descent: walk `children` arrays and nested `value`/`node`
+ *      objects, collecting every leaf `text` field. This matches the
+ *      Copilot rich-content tree shape: `{value:{node:{children:[{children:[{text:"..."}]}]}}}`.
+ *   3. Fallback: return empty text + a diagnostic source string (the JSON
+ *      is NOT inlined into resultText — it would pollute downstream
+ *      reasoning; dumpCapturedToolCall records it separately for diagnosis).
+ *
+ * @returns Extracted text + source descriptor for diagnostics.
+ */
+function extractTextFromNonTextPart(obj: unknown): { text: string; source: string } {
+  if (obj === null || obj === undefined) {
+    return { text: '', source: 'null' };
+  }
+  if (typeof obj === 'string') {
+    return { text: obj, source: 'string' };
+  }
+  if (typeof obj !== 'object') {
+    return { text: String(obj), source: typeof obj };
+  }
+
+  const o = obj as Record<string, unknown>;
+
+  // 1. Direct string field (priority order: value > text > content > markdown)
+  for (const field of ['value', 'text', 'content', 'markdown']) {
+    const v = o[field];
+    if (typeof v === 'string' && v.length > 0) {
+      return { text: v, source: `.${field}` };
+    }
+  }
+
+  // 2. Recursive descent: collect all leaf `.text` fields in the tree.
+  //    Covers Copilot rich-content tree: {value:{node:{children:[...]}}, children:[...]}
+  const texts: string[] = [];
+  const seen = new WeakSet<object>();  // guard against cycles
+
+  const collect = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return;
+    if (seen.has(node as object)) return;
+    seen.add(node as object);
+
+    const n = node as Record<string, unknown>;
+
+    // Leaf text — collect if it's a non-empty string.
+    // Use a strict check: node must NOT have `children` (avoid duplicating
+    // container-level text that's just a label).
+    if (typeof n.text === 'string' && n.text.length > 0 && !Array.isArray(n.children)) {
+      texts.push(n.text);
+    }
+
+    if (Array.isArray(n.children)) {
+      for (const child of n.children) collect(child);
+    }
+
+    // Nested single-child wrappers: value/node/content/markdown that hold objects.
+    for (const field of ['value', 'node', 'content']) {
+      const child = n[field];
+      if (child && typeof child === 'object') collect(child);
+    }
+  };
+
+  collect(o);
+
+  if (texts.length > 0) {
+    return { text: texts.join('\n'), source: `recursive-text(${texts.length} leaves)` };
+  }
+
+  // 3. Fallback: no text extracted. Do NOT inline JSON into resultText —
+  //    return empty text + diagnostic source (dumpCapturedToolCall will
+  //    record the JSON separately under "## Result (raw fallback)").
+  return { text: '', source: 'no-text-extracted' };
 }
 
 /**
@@ -288,6 +399,18 @@ export async function runActingAgent(
   let finalOutput = '';
   const capturedToolCalls: CapturedToolCall[] = [];
 
+  // v0.14.2: Error state — if the loop exits due to an unrecoverable error,
+  // this captures the message. The function NEVER throws; instead it returns
+  // a partial result with `error` set and `capturedToolCalls` populated
+  // with whatever was collected before the crash. moaRunner can then salvage
+  // the partial recon content instead of discarding everything.
+  let loopError: string | undefined;
+
+  // v0.14.2: Guard against double-retry on transient errors. The first
+  // transient failure (1213/429/network) triggers a single retry; if the
+  // retry also fails, we exit with the error rather than looping forever.
+  let transientRetried = false;
+
   // v0.13.0: 早停状态变量（仅 recon 模式启用）
   // - lastToolSignature: 上一轮工具调用集合的 hash，用于检测重复
   // - consecutiveStagnant: 连续"原地踏步"轮数
@@ -305,45 +428,223 @@ export async function runActingAgent(
   while (iterations < maxIter) {
     if (token.isCancellationRequested) break;
 
-    let response: vscode.LanguageModelChatResponse;
+    // ── v0.14.2: sendRequest + stream 全部包进 try ────────────────────
+    // 原设计：sendRequest 在 try 内，但 `for await (response.stream)` 在 try 外。
+    // 这导致 GLM 的 1213 错误（在 stream 中途返回）直接冒泡到 moaRunner，
+    // 整段 capturedToolCalls 被丢弃。
+    //
+    // 现设计：sendRequest 和 stream 同在一个 try 内；任何异常都捕获，
+    // transient 错误（1213/429/network）首次重试一次，再次失败或非 transient
+    // 则 set loopError 并 break。capturedToolCalls 保留所有已收集的内容。
+    //
+    // 同时：recon 模式（readOnly=true）现在也支持 transient retry ——
+    // 去掉了原来的 `!readOnly` 条件，因为 recon 是最需要保护的场景。
+    let response: vscode.LanguageModelChatResponse | null = null;
+    let iterationText = '';
+    const toolCalls: vscode.LanguageModelToolCallPart[] = [];
+
     try {
       response = await actingModel.sendRequest(
         messages,
         { tools, toolMode: vscode.LanguageModelChatToolMode.Auto },
         token
       );
+
+      // v0.14.2: stream 现在也在 try 内 —— GLM 1213 / DeepSeek 429 等错误
+      // 会在 stream 中途异步抛出，必须在这里捕获。
+      for await (const part of response.stream) {
+        if (part instanceof vscode.LanguageModelTextPart) {
+          iterationText += part.value;
+        } else if (part instanceof vscode.LanguageModelToolCallPart) {
+          toolCalls.push(part);
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // v0.9.1 defensive: distinguish transient (network/1213/rate-limit)
-      // from structural errors. Transient → wait + retry once. Structural →
-      // break out and let outer code (moaRunner) fall back to aggregator.
       const isTransient = /1213|429|500|502|503|504|timeout|ETIMEDOUT|ECONNRESET|rate.?limit/i.test(msg);
-      if (isTransient && iterations === 0 && !readOnly) {
-        // First iteration only — retry transient errors once before giving up.
-        stream.progress(`[${progressPrefix}] transient error on first send: ${msg.substring(0, 100)} — retrying in 800ms...`);
+      // v0.14.6: 1213 是 provider SDK 层"prompt 参数异常"错误（典型于 GLM）。
+      // 重试同样的 messages + tools schema 不会改变结果，反而浪费 token + 时间。
+      // 直接跳过重试，进入诊断流程。
+      const is1213 = /1213/.test(msg);
+
+      // v0.14.2: 去掉了 `!readOnly` 条件 —— recon 模式也重试。
+      // 只重试一次（transientRetried guard），且只在首次迭代（避免污染已建立的工具链）。
+      // v0.14.6: 1213 跳过重试（schema 不兼容重试无意义）。
+      if (isTransient && !is1213 && iterations === 0 && !transientRetried) {
+        transientRetried = true;
+        stream.progress(
+          `[${progressPrefix}] transient error on first iteration: ${msg.substring(0, 100)} ` +
+          `— retrying in 800ms (attempt 2/2)...`
+        );
         await new Promise((r) => setTimeout(r, 800));
         continue;  // Re-enter while loop, iterations stays at 0.
       }
-      if (finalOutput.length === 0) {
-        // No output yet — fallback to aggregator guidance directly.
-        stream.markdown(`**[${progressPrefix} ${readOnly ? 'recon' : 'acting'} agent error]**: ${msg}\n\n---\n\n**Fallback** — showing aggregator guidance:\n\n${aggregatorGuidance}`);
-      } else {
-        stream.markdown(`\n\n**[${progressPrefix} ${readOnly ? 'recon' : 'acting'} agent error after partial output]**: ${msg}`);
+
+      // v0.14.6: 1213 专门诊断 —— dump messages + tools schema 概要，
+      // 附加到 loopError 末尾（PARTIAL RECOVERY 路径会落盘到 refChannel）。
+      let diagnosticSuffix = '';
+      if (is1213) {
+        const msgSummary = messages.map((m, i) => {
+          let size = 0;
+          let partCount = 0;
+          const content = (m as { content?: unknown }).content;
+          if (Array.isArray(content)) {
+            for (const part of content) {
+              partCount++;
+              if (part && typeof part === 'object') {
+                const p = part as { value?: unknown; text?: unknown };
+                if (typeof p.value === 'string') size += p.value.length;
+                else if (typeof p.text === 'string') size += p.text.length;
+                else size += 200;  // 非文本 part 估算
+              } else if (typeof part === 'string') {
+                size += part.length;
+              }
+            }
+          }
+          const role = (m as { role?: unknown }).role;
+          return `  msg[${i}] role=${String(role)} parts=${partCount} size~${size}`;
+        }).join('\n');
+
+        const toolsSummary = tools.map((t) => {
+          const schema = t.inputSchema ? JSON.stringify(t.inputSchema) : '';
+          const hasAdvanced = /\$ref|oneOf|anyOf|allOf/.test(schema);
+          const hasRecursive = /"items":\s*\{\s*"\$ref"/.test(schema);
+          const flags =
+            (hasAdvanced ? '+ADV' : '') +
+            (hasRecursive ? '+RECURSE' : '');
+          return `  ${t.name} schemaSize=${schema.length}${flags}`;
+        }).join('\n');
+
+        diagnosticSuffix =
+          `\n\n--- 1213 DIAGNOSTICS ---\n` +
+          `Error class: provider SDK rejected prompt or tools schema.\n` +
+          `Likely causes (in order of probability):\n` +
+          `  1. A tool's inputSchema uses features the provider SDK can't serialize\n` +
+          `     ($ref, oneOf, anyOf, recursive items). See tools summary below —\n` +
+          `     any tool flagged +ADV or +RECURSE is suspect.\n` +
+          `  2. Provider-specific tool calling limitation (some providers reject\n` +
+          `     tool arrays with too many entries, or schemas above a size cap).\n` +
+          `  3. Provider rejects system-prompt-as-user-message pattern.\n\n` +
+          `Messages summary (${messages.length} message(s)):\n${msgSummary}\n\n` +
+          `Tools summary (${tools.length} tool(s)):\n${toolsSummary}\n\n` +
+          `SUGGESTION: switch moa.reconModel to a different provider (e.g. DeepSeek-V4)\n` +
+          `to confirm whether the issue is provider-specific.`;
+
+        stream.progress(
+          `[${progressPrefix}] 1213 SDK error — diagnostics appended to error log. ` +
+          `${messages.length} msgs, ${tools.length} tools. ` +
+          `Likely tool schema incompatibility — see PARTIAL RECOVERY log.`
+        );
+
+        // v0.14.7: 完整 dump outgoing messages 到磁盘，用于精确定位 1213 根因。
+        // 文件路径：${os.tmpdir()}/moa_1213_dump/outgoing_<timestamp>.json
+        // 内容：每条 message 的 content parts（含 ctor name / keys / innerContent
+        // 元数据），每个 tool 的 inputSchema + $ref/oneOf 标记。
+        try {
+          const dumpDir = path.join(os.tmpdir(), 'moa_1213_dump');
+          if (!fs.existsSync(dumpDir)) fs.mkdirSync(dumpDir, { recursive: true });
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          const dumpFile = path.join(dumpDir, `outgoing_${ts}.json`);
+
+          const msgsDump = messages.map((m, i) => {
+            const content = (m as { content?: unknown }).content;
+            const role = (m as { role?: unknown }).role;
+            return {
+              idx: i,
+              role: String(role),
+              content: Array.isArray(content)
+                ? content.map((p: unknown, j: number) => {
+                    const part = p as Record<string, unknown>;
+                    const ctor = (part as { constructor?: { name?: string } })?.constructor?.name ?? typeof p;
+                    const entry: Record<string, unknown> = {
+                      partIdx: j,
+                      ctor,
+                      keys: part && typeof part === 'object' ? Object.keys(part).slice(0, 15) : [],
+                    };
+                    if (typeof part.value === 'string') {
+                      entry.valuePreview = part.value.substring(0, 300);
+                      entry.valueLength = part.value.length;
+                    }
+                    if (typeof part.text === 'string') {
+                      entry.textPreview = part.text.substring(0, 300);
+                      entry.textLength = part.text.length;
+                    }
+                    if (typeof part.callId === 'string') entry.callId = part.callId;
+                    if (typeof part.name === 'string') entry.name = part.name;
+                    // ToolResultPart 内层 content（关键诊断点：是否为空数组）
+                    if (Array.isArray(part.content)) {
+                      entry.innerContentType = 'array';
+                      entry.innerContentLength = part.content.length;
+                      entry.innerContent = (part.content as unknown[]).map((ic: unknown, k: number) => {
+                        const inner = ic as Record<string, unknown>;
+                        const innerCtor = (inner as { constructor?: { name?: string } })?.constructor?.name ?? typeof ic;
+                        const innerEntry: Record<string, unknown> = {
+                          innerIdx: k,
+                          ctor: innerCtor,
+                        };
+                        if (typeof inner.value === 'string') {
+                          innerEntry.valuePreview = (inner.value as string).substring(0, 200);
+                        }
+                        if (typeof inner.text === 'string') {
+                          innerEntry.textPreview = (inner.text as string).substring(0, 200);
+                        }
+                        return innerEntry;
+                      });
+                    }
+                    return entry;
+                  })
+                : typeof content === 'string'
+                  ? [{ asString: content.substring(0, 500) }]
+                  : [],
+            };
+          });
+
+          const toolsDump = tools.map((t) => {
+            const schemaStr = t.inputSchema ? JSON.stringify(t.inputSchema) : '';
+            return {
+              name: t.name,
+              schemaSize: schemaStr.length,
+              hasRef: /\$ref/.test(schemaStr),
+              hasOneOf: /oneOf/.test(schemaStr),
+              hasAnyOf: /anyOf/.test(schemaStr),
+              hasAllOf: /allOf/.test(schemaStr),
+              hasRecursiveItems: /"items":\s*\{\s*"\$ref"/.test(schemaStr),
+              schemaPreview: schemaStr.substring(0, 500),
+            };
+          });
+
+          const dump = {
+            timestamp: ts,
+            error: msg,
+            modelId: actingModel.id,
+            iterations,
+            capturedToolCallsCount: capturedToolCalls.length,
+            toolsCount: tools.length,
+            tools: toolsDump,
+            messagesCount: messages.length,
+            messages: msgsDump,
+            note: 'This dump captures the OUTGOING request that triggered 1213. Key things to check: 1) any message with empty content array (indicates a ToolResultPart got empty innerContent — path A confirmed). 2) Any tool with hasRef/hasOneOf/hasRecursiveItems=true (path C confirmed). 3) If all clean → likely GLM server-side bug with thinking + tool_results combination (path B).',
+          };
+
+          fs.writeFileSync(dumpFile, JSON.stringify(dump, null, 2), 'utf8');
+          diagnosticSuffix += `\n\nOutgoing request dumped to: ${dumpFile}`;
+        } catch (dumpErr) {
+          const dumpMsg = dumpErr instanceof Error ? dumpErr.message : String(dumpErr);
+          diagnosticSuffix += `\n\nDump failed: ${dumpMsg}`;
+        }
+      }
+
+      // 非 transient，或已重试过 —— 记录 error 并 break（保留已 captured 内容）。
+      loopError = msg + diagnosticSuffix;
+      stream.progress(
+        `[${progressPrefix}] ${readOnly ? 'recon' : 'acting'} agent error after ${capturedToolCalls.length} ` +
+        `captured tool call(s): ${msg.substring(0, 120)}`
+      );
+      if (finalOutput.length === 0 && !readOnly) {
+        stream.markdown(`**[${progressPrefix} agent error]**: ${msg}\n\n---\n\n**Fallback** — showing aggregator guidance:\n\n${aggregatorGuidance}`);
       }
       finalOutput += `\n\n[error: ${msg}]`;
       break;
-    }
-
-    // Collect text + tool calls from this iteration.
-    let iterationText = '';
-    const toolCalls: vscode.LanguageModelToolCallPart[] = [];
-
-    for await (const part of response.stream) {
-      if (part instanceof vscode.LanguageModelTextPart) {
-        iterationText += part.value;
-      } else if (part instanceof vscode.LanguageModelToolCallPart) {
-        toolCalls.push(part);
-      }
     }
 
     // If model emitted text AND no tool calls, this is the final answer.
@@ -399,30 +700,82 @@ export async function runActingAgent(
         );
 
         // Capture plain-text representation of the result (for recon summary).
-        if (captureResults) {
-          let resultText = '';
-          for (const c of result.content) {
-            if (c instanceof vscode.LanguageModelTextPart) {
-              resultText += c.value;
-            } else {
-              // Non-text parts (JSON etc.) — stringify as best-effort.
-              try {
-                resultText += JSON.stringify(c);
-              } catch {
-                resultText += `[non-text part: ${String(c)}]`;
-              }
+        // v0.14.7: 同时规范化 result.content，确保透传给 ToolResultPart 的 parts 都是
+        // TextPart / ImagePart（GCMP LY 函数能处理的类型）。
+        //
+        // 背景：copilot_fetchWebPage 等 Copilot 内置工具返回 PromptTSX 富文本 part，
+        // 这些 part 不是 LanguageModelTextPart。原代码直接透传 raw result.content
+        // 给 ToolResultPart，导致 GCMP LY 函数处理时落入"未知 part 类型"分支，
+        // 静默丢弃 → tool_result.content = [] → 第二轮 sendRequest 时 GLM /api/anthropic
+        // 兼容层校验失败，返回 code:1213 "未正常接收到 prompt 参数"。
+        //
+        // 修复策略：复用 extractTextFromNonTextPart 把未知 part 转成 TextPart，
+        // 确保每个 tool_result 至少有 1 个 TextPart。
+        //
+        // 类型说明：result.content 是 vscode.LMToolResult['content']，类型是
+        // LanguageModelTextPart | LanguageModelImagePart 等的并集。ImagePart 在
+        // 公开 @types/vscode 类型定义中可能未导出，但运行时存在 —— 这里用 ctor.name
+        // 字符串判断，不依赖类型系统。
+        let resultText = '';
+        const partDiagnostics: Array<{ kind: string; length: number; source: string }> = [];
+        const normalizedContent: (vscode.LanguageModelTextPart | Record<string, unknown>)[] = [];
+
+        for (const c of result.content) {
+          const partCtorName = (c as { constructor?: { name?: string } })?.constructor?.name;
+          if (c instanceof vscode.LanguageModelTextPart) {
+            resultText += c.value;
+            normalizedContent.push(c);
+            partDiagnostics.push({ kind: 'TextPart', length: c.value.length, source: '.value' });
+          } else if (partCtorName === 'LanguageModelImagePart' || partCtorName === 'ImagePart') {
+            // ImagePart 在 @types/vscode 中可能未导出为 public 类型，
+            // 但运行时存在且 GCMP LY 函数有专门分支处理。保留原样。
+            normalizedContent.push(c as Record<string, unknown>);
+            partDiagnostics.push({ kind: 'ImagePart', length: 0, source: 'image' });
+          } else {
+            // v0.14.6: 非 TextPart 智能提取 —— 递归收集 .text / .value 字段，
+            // 避免 copilot_fetchWebPage 等工具的 JSON 序列化噪音淹没真实内容。
+            const kind = partCtorName ?? typeof c;
+            const extracted = extractTextFromNonTextPart(c);
+            if (extracted.text.length > 0) {
+              resultText += extracted.text;
+              // v0.14.7: 关键修复 —— 把提取出来的文本包成新的 TextPart，
+              // 替换原始的未知 part 类型。这样 GCMP LY 函数处理时不再落入
+              // "未知 part" 分支被静默丢弃。
+              normalizedContent.push(new vscode.LanguageModelTextPart(extracted.text));
             }
+            // 即使没提取到文本也记录诊断（kind + source 帮助排查）
+            partDiagnostics.push({ kind, length: extracted.text.length, source: extracted.source });
           }
+        }
+
+        // v0.14.7: 极端兜底 —— 如果规范化后 normalizedContent 为空（所有 part 都
+        // 是未知类型且 extractTextFromNonTextPart 都没提取到），强制塞一个占位
+        // TextPart，避免 ToolResultPart.content=[] 触发 GLM 1213。
+        if (normalizedContent.length === 0) {
+          const placeholder = `[tool ${call.name} returned ${result.content.length} part(s) but none could be converted to text]`;
+          normalizedContent.push(new vscode.LanguageModelTextPart(placeholder));
+          resultText = placeholder;
+          partDiagnostics.push({ kind: 'Placeholder', length: placeholder.length, source: 'fallback' });
+        }
+
+        if (captureResults) {
           capturedToolCalls.push({
             name: call.name,
             input: call.input,
             resultText,
+            partDiagnostics,
           });
         }
 
         // Add tool result as a User message with ToolResultPart.
         // The callId must match the original ToolCallPart.callId.
-        const resultPart = new vscode.LanguageModelToolResultPart(call.callId, result.content);
+        // v0.14.7: 使用 normalizedContent 而非 raw result.content，避免 GLM 1213。
+        // 类型断言：normalizedContent 元素是 TextPart 或被保留的 ImagePart（透传），
+        // 都是 LanguageModelToolResultPart 接受的类型。
+        const resultPart = new vscode.LanguageModelToolResultPart(
+          call.callId,
+          normalizedContent as vscode.LanguageModelTextPart[]
+        );
         const resultMsg = vscode.LanguageModelChatMessage.User('');
         resultMsg.content.push(resultPart);
         messages.push(resultMsg);
@@ -516,6 +869,9 @@ export async function runActingAgent(
     toolCallsFailed,
     hitIterationCap,
     capturedToolCalls,  // v0.9.0: always returned; empty if captureToolResults=false
+    // v0.14.2: 如果 loop 因错误退出，记录 error。即使有 error，
+    // capturedToolCalls 仍可能含有 partial 内容 —— 调用方应检查 length。
+    error: loopError,
   };
 }
 
@@ -541,99 +897,135 @@ export interface ReconResult {
 /**
  * Recon-only system prompt.
  *
- * v0.13.0 重要变更：去工具名硬编码，按"能力"描述工具。
+ * v0.13.0: 去工具名硬编码，按"能力"描述工具。
+ * v0.14.2: 大幅强化 —— recon 不再"克制"，对研究类问题主动拉摘要/详情。
+ *          核心变化：
+ *          - 区分任务类型（代码 vs 研究），研究任务主动深化
+ *          - 对每条文献/资源，主动调用 extract_content 类工具拉摘要正文
+ *          - refs 上下文负担极低（单轮无历史），可以塞 50-100k 内容
+ *          - recon 自己也是单轮无历史，可以放心多调工具
  *
  * 设计哲学：
- *   - Recon 是 agent，应该自己读 tool.description 决定用哪个，而不是被告诉"用 copilot_X"
- *   - 写死工具名（copilot_readProjectStructure / copilot_grep 等）会破坏移植性：
- *     换了 MCP 供应商、用户禁用 Copilot、新装第三方扩展，硬编码就失效
- *   - 正确做法是描述"你需要什么样的能力"，让 LLM 自己从可用工具列表里挑
- *
- * 工具发现机制：VSCode 会把所有可用工具的 name + description + inputSchema
- * 注入到 LLM 上下文，recon 自己看就行。
- *
- * 关键设计点：
- *   - 明确禁止 analysis/answers —— recon 只收集信息
- *   - 鼓励使用任何 read-only 工具（本地 + web + MCP）
- *   - 输出通过 captureToolResults 捕获，不进 chat history
- *   - missingHints 非空时优先填补这些缺口
+ *   - Recon 是 agent，应该自己读 tool.description 决定用哪个
+ *   - recon + refs 都是"单轮无对话历史"的轻上下文场景
+ *   - 现代 LLM 都是 1M 上下文，refs 拿到 50k 完全无压力
+ *   - 信息越丰富，refs 分析质量越高
  */
 function buildReconSystemPrompt(missingHints?: string[]): string {
   const base = [
     'You are the RECON agent in a Mixture of Agents (MoA) pipeline.',
-    'Your role is strictly INFORMATION COLLECTION — you do NOT analyze, summarize, or answer the user\'s question.',
+    '',
+    '# Your role',
+    '',
+    'You are the SOLE information gatekeeper for downstream stages:',
+    '  - Reference advisors (refs) are pure reasoning — they see ONLY what you collect.',
+    '  - Refs cannot call tools, browse, or access files.',
+    '  - The aggregator and acting agent build on refs\' analysis.',
+    '',
+    'Your job: gather information rich enough that refs can give GROUNDED, DETAILED analysis.',
+    'You do NOT analyze or answer — you gather. Quality of downstream analysis depends entirely on you.',
+    '',
+    '# Downstream capacity (why you should not be conservative)',
+    '',
+    '  - Refs are single-turn (no chat history accumulation).',
+    '  - Modern LLMs handle 100K-1M tokens. Refs can easily process 50-200KB of recon data.',
+    '  - Your own context is also single-turn — feel free to call many tools.',
+    '  - More relevant information = richer downstream analysis.',
+    '',
+    'Bottom line: do NOT ration information. If a resource looks relevant, fetch it in full.',
     '',
     '# Available capabilities',
     '',
-    'You have access to a variety of READ-ONLY tools registered in the current VSCode session.',
-    'These may include (but are not limited to):',
-    '  - Local file system: project tree, directory listing, file finding, text search, file reading',
-    '  - Code intelligence: compile/lint errors, symbol usages, code search',
-    '  - Web capabilities (when MCP/GCMP extensions provide them):',
-    '    web search, academic search, web page fetching, content extraction',
-    '  - External knowledge APIs: chemical/biological/genomic databases, etc.',
+    'You have access to READ-ONLY tools registered in the current VSCode session.',
+    'Read each tool\'s description to understand its capability. Common categories include:',
     '',
-    'IMPORTANT: Do NOT assume specific tool names. Read the tool list yourself and pick by capability.',
-    'If a capability you need is missing (e.g. no web search tool available), skip that path gracefully.',
+    '  - **Local file system**: project tree, directory listing, file reading (with line ranges),',
+    '    text search, code intelligence (errors, usages, symbol lookup).',
+    '  - **Web & knowledge capabilities** (when MCP/GCMP extensions provide them):',
+    '    * General web search, academic search, news search',
+    '    * Specialist databases: PubMed, arXiv, bioRxiv, Semantic Scholar, OpenAlex, Crossref',
+    '    * Content extraction from URLs (DOI, PMID, arXiv ID, journal pages)',
+    '    * Domain APIs: UniProt, ChEMBL, gnomAD, GTEx, Ensembl, etc.',
+    '    * General web page fetching (for blog posts, documentation, tutorials)',
     '',
-    '# Your role in the pipeline',
+    'Use BOTH local and web tools as appropriate for the question. Many questions benefit',
+    'from combining code context (local) with external references (web).',
     '',
-    'Downstream reference advisors are pure reasoning layer — they see ONLY what you collect, not the workspace.',
-    'You are the SOLE information source for the entire MoA pipeline.',
-    '  - If you don\'t collect it, refs can\'t reason about it.',
-    '  - If you collect irrelevant noise, refs get distracted.',
-    '  - Quality and relevance over quantity.',
+    'Do NOT hardcode tool names. Pick by CAPABILITY — read descriptions and choose.',
     '',
-    '# Decision framework (adapt to the actual question)',
+    '# Judge the question, then gather accordingly',
     '',
-    'Judge the nature of the user\'s question, then decide what to gather:',
+    'You decide what kind of context this question needs. Some patterns:',
     '',
-    '  1. CODE / WORKSPACE question (e.g. "refactor this module", "find this bug")',
-    '     → Use project structure tools first to understand layout, then targeted',
-    '       search to locate relevant code, then file reading tools with line ranges',
-    '       to read specific sections. Avoid reading whole large files.',
+    '  - **Code/workspace focus**: "refactor X", "find bug in Y", "how does Z work in my code"',
+    '    → Gather code structure + relevant files (with line ranges for large files) + symbol usages.',
     '',
-    '  2. RESEARCH / LITERATURE question (e.g. "analyze hibernation biology")',
-    '     → Judge whether refs need external grounding:',
-    '       - If web/academic search tools are available AND the question needs',
-    '         latest data (papers, APIs, news): use them to gather 2-4 key sources.',
-    '       - If the question is about general knowledge refs already have:',
-    '         return immediately with no tool calls. Refs can reason directly.',
+    '  - **Research/literature focus**: "analyze X mechanism", "review Y topic", "what is known about Z"',
+    '    → Gather literature: search → fetch abstracts/full text for each relevant paper.',
     '',
-    '  3. MIXED question (e.g. "research X then apply to my code")',
-    '     → Gather both: code context + relevant external references.',
-    '       Keep external content concise (cite source, ~2-5KB per source).',
+    '  - **Conceptual**: "what is X?", "compare A vs B"',
+    '    → If X/A/B are stable general knowledge refs already know: minimal gathering needed.',
+    '    → If they involve recent research, specific data, or live APIs: gather like research.',
     '',
-    '  4. CONCEPTUAL / ABSTRACT question (e.g. "what is X?", "compare A vs B")',
-    '     → Do NOT call any tools. Return empty output. Refs handle this best.',
+    '  - **Mixed**: "apply paper X to my code", "is this approach industry-standard?"',
+    '    → Combine: external references + local code context.',
     '',
-    '# Adaptive behaviors (use judgment, don\'t follow rigidly)',
+    '  - **Data lookup**: "what\'s the expression of gene X in tissue Y?"',
+    '    → Use domain databases (GTEx, etc.) to fetch actual records, not just IDs.',
     '',
-    '  - For large files: prefer line-range reads over whole-file reads to save tokens.',
-    '    Most file reading tools accept startLine/endLine or similar parameters.',
-    '  - For ambiguous references (function names, class names): locate first with',
-    '    search/grep, then read the specific definition + surrounding context.',
-    '  - For multi-file investigations: use project structure tools once at the start,',
-    '    then targeted searches — avoid listing the same directory twice.',
-    '  - For web content: prefer API-based search tools over browser automation.',
-    '    If you accidentally trigger a browser tool, stop — that path is for acting agent.',
+    'These are examples, not exhaustive categories. Use judgment.',
     '',
-    '# Stop conditions (any one triggers exit)',
+    '# What counts as "good" recon content',
     '',
-    '  - You\'ve gathered enough relevant context for refs to reason → stop.',
-    '  - The question is conceptual → return immediately (no tool calls).',
-    '  - You can\'t find relevant files after 2-3 discovery attempts → stop,',
-    '    refs will work with whatever you have or flag gaps in their JSON output.',
-    '  - You notice yourself calling the same tool with the same input repeatedly',
-    '    (you\'re stuck) → stop and let refs flag what\'s still missing.',
+    'The goal is INFORMATION SUBSTANCE, not a specific byte count.',
+    '',
+    'GOOD recon content has:',
+    '  - Full text or abstracts of relevant resources (not just identifiers/titles)',
+    '  - Specific data points, numbers, quotes — the kind refs can cite',
+    '  - Clear provenance (source URL, paper title, file:line)',
+    '  - Coverage of the main aspects the question asks about',
+    '',
+    'BAD recon content (avoid):',
+    '  - A bare list of identifiers (PMIDs, DOIs, file paths) with no actual content',
+    '    — refs cannot reason about an ID. Always fetch the actual abstract/text.',
+    '  - One-sentence summaries of resources you didn\'t actually open',
+    '  - The first search result page when deeper content is available',
+    '',
+    '# Aggressive gathering patterns',
+    '',
+    'When a resource looks relevant, fetch it in depth:',
+    '  - Found a relevant paper? Get its abstract, and if available, key full-text sections.',
+    '  - Found a relevant doc page? Fetch the actual content, not just the URL.',
+    '  - Found a relevant file? Read the actual code, not just list the path.',
+    '  - Found a database record? Get the full record fields, not just the ID.',
+    '',
+    'For research questions with multiple relevant sources, fetch ALL of them — don\'t stop at 2-3.',
+    'For recent developments, prioritize web/preprint sources over stale textbook knowledge.',
+    '',
+    '# Iteration awareness',
+    '',
+    'This may be round 1 of N. If you\'re given "missing hints" (below), prioritize filling',
+    'those specific gaps first. Otherwise, gather broadly on round 1 — refs will flag',
+    'gaps and the next round will target them.',
+    '',
+    '# Stop conditions',
+    '',
+    'Stop when ANY of these is true:',
+    '  - You\'ve gathered substantive content covering the question\'s main aspects.',
+    '  - Additional searches return mostly duplicates of what you have.',
+    '  - You\'ve tried 2-3 different search angles without finding new relevant material.',
+    '  - You notice yourself repeating the same tool call with the same input.',
+    '',
+    'Do NOT stop just because you have "a list" — refs need the actual content, not pointers.',
     '',
     '# Output protocol',
     '',
-    'Do NOT produce a final answer or summary in text.',
-    'Your tool calls themselves are the output — their results are captured automatically',
-    'and fed to downstream stages.',
+    'Do NOT produce a final answer or textual summary.',
+    'Your tool calls themselves are the output — their results are captured automatically.',
     '',
-    'Match the language of the user\'s question when deciding what to read/search.',
+    'Match the language of the user\'s question for search queries',
+    '(Chinese question → can search in English for broader coverage, then prefer',
+    'Chinese sources when quality is equivalent).',
   ];
 
   if (missingHints && missingHints.length > 0) {

@@ -1,14 +1,27 @@
 {
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.0: Recon 与 L3 模型独立可配（通过 Configure Models Step 3/4 + 4/4 设置）；reconModel 空时 fallback 到 aggregator；l3Summarizer 空时禁用 L3。修复硬编码 modelId 的移植性问题。",
-  "version": "0.14.1",
+  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.10: 作为会向工作区写文件的插件，新增 cacheReadme.ts 模块 —— l3Summarizer / moaOrchestrator / moaRunner 三处首次创建 .moa_cache/ 时自动写入 README.md（不覆盖用户已修改版），含目录结构说明、诊断指南、清理策略、.gitignore 建议、隐私说明。让用户在工作区直接看到这是什么、能否删除、出问题怎么排查，符合开源插件的自文档标准。",
+  "version": "0.14.10",
   "publisher": "moa-bridge",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/local/vscode-moa"
+    "url": "https://github.com/DDL095/vscode-moa.git"
   },
+  "homepage": "https://github.com/DDL095/vscode-moa#readme",
+  "bugs": {
+    "url": "https://github.com/DDL095/vscode-moa/issues"
+  },
+  "keywords": [
+    "mixture-of-agents",
+    "moa",
+    "copilot",
+    "multi-model",
+    "ai",
+    "llm",
+    "agentic"
+  ],
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -361,9 +374,8 @@
         },
         "moa.reconContextChars": {
           "type": "number",
-          "default": 30000,
-          "minimum": 5000,
-          "description": "v0.9.0: Character budget for recon summary injected into ref prompts. Smaller = cheaper but refs see less context; larger = more grounded but slower + costlier. Default 30000 (~10 files of 3000 chars each).",
+          "default": 500000,
+          "description": "v0.14.5 [DEPRECATED — 不再作上限]: 仅作为审计指标记录到 meta.json。原 v0.13.0 用于总字符预算截断，v0.14.5 起完全不再截断 —— refs 单轮无历史 + 1M 上下文模型可以消化任意大小；如果 recon 真爆了说明检索方向出问题（噪声过多），是 LLM 该处理的不是工程层该截断的。保留此配置仅为向后兼容。",
           "order": 9
         },
         "moa.forceDirect": {
@@ -404,9 +416,9 @@
         },
         "moa.reconL3Threshold": {
           "type": "number",
-          "default": 30000,
-          "minimum": 10000,
-          "description": "v0.13.0: L3 孙代理触发阈值。当 recon 读到的单个文件内容超过此字符数且为代码文件（.ts/.js/.py 等）时，自动派 MiniMax-M3 孙代理做内容精选（保留关键函数）。默认 30000。",
+          "default": 200000,
+          "minimum": 50000,
+          "description": "v0.14.4: L3 孙代理触发阈值。单个文件超过此字符数且为代码文件时，才派 L3 做内容精选（保留关键函数）。v0.14.4 默认从 60k 提升到 200k —— 现代 LLM 1M 上下文，绝大多数文件无需精选。只有真正巨型文件（如生成的 schema、minified bundle）才需要 L3。",
           "order": 15
         },
         "moa.reconL3MaxCalls": {
@@ -416,6 +428,13 @@
           "maximum": 20,
           "description": "v0.13.0: 单次 MoA 任务最多派多少个 L3 孙代理。超出后即使文件超大也降级为 L2 语义边界截断。设 0 完全禁用 L3。默认 5（兼顾效果与成本）。",
           "order": 16
+        },
+        "moa.reconL3TargetChars": {
+          "type": "number",
+          "default": 50000,
+          "minimum": 5000,
+          "description": "v0.14.4: L3 孙代理对单个大文件精选后的目标输出长度（字符）。默认 50k —— v0.14.3 是 10k，过度压缩。1M 上下文模型完全可以消化 50k 的精选结果。",
+          "order": 17
         },
         "moa.reconModel": {
           "type": "object",
@@ -432,7 +451,7 @@
               "description": "保留字段（vscode.lm API 暂未使用）。"
             }
           },
-          "order": 17
+          "order": 18
         },
         "moa.l3Summarizer": {
           "type": "object",
@@ -445,7 +464,7 @@
               "description": "L3 模型 ID。空 = 禁用 L3。"
             }
           },
-          "order": 18
+          "order": 19
         }
       }
     }

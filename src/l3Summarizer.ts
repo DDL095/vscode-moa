@@ -70,8 +70,10 @@ export interface L3SummarizeResult {
   elapsedMs: number;
 }
 
-/** 默认目标输出长度（字符）*/
-const DEFAULT_TARGET_CHARS = 10000;
+/** 默认目标输出长度（字符）。
+ * v0.14.4: 从 10k 提升到 50k —— 1M 上下文模型完全能消化，避免过度压缩。
+ * 仅作为 fallback，实际优先读 moa.reconL3TargetChars 配置。 */
+const DEFAULT_TARGET_CHARS = 50000;
 
 /**
  * 计算 L3 缓存 key（filePath + fileSize + userPrompt 的 SHA1）。
@@ -91,13 +93,25 @@ function computeCacheKey(filePath: string, fullContent: string, userPrompt: stri
 /**
  * 取得缓存目录路径：<workspace>/.moa_cache/l3_summaries/
  * 如果 workspace 不可用，退回 os.tmpdir()。
+ *
+ * v0.14.10: 创建 .moa_cache/ 时顺便写入 README.md（仅首次，已存在不覆盖）。
  */
 function getCacheDir(): string {
   const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const base = ws ?? require('os').tmpdir();
-  const dir = path.join(base, '.moa_cache', 'l3_summaries');
+  const cacheRoot = path.join(base, '.moa_cache');
+  const dir = path.join(cacheRoot, 'l3_summaries');
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
+    // v0.14.10: 首次创建 .moa_cache/ 时同步写入 README
+    if (ws) {
+      try {
+        const { ensureCacheReadme } = require('./cacheReadme');
+        ensureCacheReadme(cacheRoot);
+      } catch {
+        // cacheReadme 模块加载失败不阻塞主流程
+      }
+    }
   }
   return dir;
 }
@@ -181,13 +195,15 @@ function buildL3Prompt(opts: L3SummarizeOptions): string {
  * @throws 不抛异常 —— 所有错误都捕获后返回 null。
  */
 export async function l3Summarize(opts: L3SummarizeOptions): Promise<L3SummarizeResult | null> {
-  const target = opts.targetChars ?? DEFAULT_TARGET_CHARS;
+  // v0.14.3: target 优先级：opts > moa.reconL3TargetChars 配置 > DEFAULT_TARGET_CHARS 兜底
+  const config = vscode.workspace.getConfiguration('moa');
+  const configuredTarget = config.get<number>('reconL3TargetChars');
+  const target = opts.targetChars ?? configuredTarget ?? DEFAULT_TARGET_CHARS;
 
   // v0.14.0: 从配置读取模型 ID（opts.modelId 优先，否则读 moa.l3Summarizer.model）
   let modelId = opts.modelId;
   if (!modelId) {
-    const cfg = vscode.workspace.getConfiguration('moa');
-    const l3Cfg = cfg.get<{ model?: string }>('l3Summarizer');
+    const l3Cfg = config.get<{ model?: string }>('l3Summarizer');
     modelId = l3Cfg?.model ?? '';
   }
 

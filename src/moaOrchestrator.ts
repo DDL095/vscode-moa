@@ -103,6 +103,13 @@ async function getCacheRoot(): Promise<string> {
   }
   const root = path.join(ws.uri.fsPath, '.moa_cache');
   await fs.mkdir(root, { recursive: true });
+  // v0.14.10: 首次创建 .moa_cache/ 时同步写入 README（已存在不覆盖）
+  try {
+    const { ensureCacheReadme } = require('./cacheReadme');
+    ensureCacheReadme(root);
+  } catch {
+    // 模块加载失败不阻塞主流程
+  }
   return root;
 }
 

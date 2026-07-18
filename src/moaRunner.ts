@@ -16,6 +16,8 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
 import type { MoaPath, MoaRunResult, RefModelConfig } from './types';
 import { buildWorkspaceContext } from './workspaceContext';
 import { runActingAgent, runReconAgent } from './actingAgent';
@@ -110,6 +112,22 @@ export async function runP1Fanout(
 ): Promise<MoaRunResult> {
   const start = Date.now();
 
+  // v0.14.3: 初始化 recon dump（落盘 audit + 给 acting agent 后续读取）
+  const startedAt = new Date();
+  const taskSha = computeTaskSha(prompt, startedAt);
+  const dumpDir = getReconDumpDir(taskSha);
+  const dumpMetaState: ReconDumpMeta = {
+    taskSha,
+    prompt,
+    startedAt: startedAt.toISOString(),
+    reconRoundsUsed: 0,
+    refCount: 0,
+    totalChars: 0,
+  };
+  if (dumpDir) {
+    stream.progress(`[MoA] recon dump: .moa_cache/recon/${taskSha}/`);
+  }
+
   // Pick any models the user has available.
   const allCandidates = await vscode.lm.selectChatModels({});
 
@@ -160,40 +178,68 @@ export async function runP1Fanout(
   );
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Built-in reference advisor system prompt (Hermes `_REFERENCE_SYSTEM_PROMPT`).
-  // Source: https://github.com/NousResearch/hermes-agent/blob/main/agent/moa_loop.py
+  // Built-in reference advisor system prompt.
   //
-  // All refs share this SAME system prompt (equal-mode MoA). Diversity comes
-  // from the underlying model differences (GLM vs DeepSeek vs MiniMax), NOT
-  // from role assignment. The prompt reframes each ref as an advisory analyst
-  // that produces private guidance for the aggregator — not a final user-facing
-  // answer. This avoids the failure mode where refs refuse ("I can't access
-  // tools/files") or try to call tools they don't have.
+  // v0.14.2: 大幅松绑研究/学术任务的约束。
   //
-  // The trailing "Match the language of the user's question" line ensures refs
-  // follow the user's language (Chinese question → Chinese advice).
+  // 核心变化：
+  //   - 区分 CODE 任务 vs RESEARCH 任务（运行时检测）
+  //   - CODE 任务保持严格"只看 recon data"（防止编造 API）
+  //   - RESEARCH 任务允许 refs 动用训练知识补充分析（明确分层标注）
+  //   - 不再硬性禁止"基于训练知识的推论"——LLM 的训练知识本身是有价值的
+  //
+  // 设计哲学：
+  //   - refs 单轮无历史，上下文负担极低，可以塞 50-100KB
+  //   - 现代 LLM 训练知识丰富，完全禁止使用反而是浪费
+  //   - 关键是分层：recon data vs 训练知识要明确标注
+  //   - 让 aggregator 来做最终判断（aggregator 会综合多个 refs 的观点）
   // ─────────────────────────────────────────────────────────────────────────
   const SHARED_REF_PROMPT_DEFAULT = [
-    'You are a reference advisor in a Mixture of Agents (MoA) process. You are NOT the acting agent and you do NOT execute anything: you cannot call tools, run commands, browse, or access files, repositories, or URLs, and you should not try to or apologize for being unable to. A separate aggregator model will synthesize your advice with other advisors and produce the final response.',
+    'You are a reference advisor in a Mixture of Agents (MoA) process. You are NOT the acting agent and you do NOT execute anything: you cannot call tools, run commands, browse, or access files. A separate aggregator model will synthesize your advice with other advisors and produce the final response.',
     '',
-    'v0.12.5 ARCHITECTURE: You are a PURE REASONING LAYER. You see ONLY:',
-    '  - This system prompt',
-    '  - The RECON DATA block (collected by a separate recon agent)',
-    '  - The user question',
-    'You do NOT see the workspace, open files, or project tree. The recon agent',
-    'has already decided what information is relevant — your job is to reason',
-    'about THAT information, not request more.',
+    '## Your context',
     '',
-    'Your job is to give your most intelligent analysis of the user\'s question: understand the goal, reason about the problem, and advise on what the answer should be. Surface the best approach, concrete reasoning, likely pitfalls and risks, and anything that might be missed or gotten wrong. Assume any referenced files, URLs, or systems exist and reason about them from the context given rather than asking for access.',
+    'You see three things:',
+    '  1. This system prompt.',
+    '  2. The RECON DATA block — everything the recon agent collected for this question.',
+    '  3. The user question.',
     '',
-    'If the RECON DATA block is empty or insufficient for grounded analysis:',
-    '  - For research/conceptual questions: reason abstractly, no "missing" needed.',
-    '  - For code-specific questions: list SPECIFIC files/symbols/ranges you need',
-    '    in the "missing" field. The recon agent will collect them next round.',
+    'The recon agent has already judged what is relevant and gathered it for you.',
+    'You do NOT see the workspace, open files, or project tree directly — recon did that work.',
     '',
-    'Respond with your advice directly — no preamble, no disclaimers about tools or access. Your response is private guidance handed to the aggregator, not an answer shown to the user.',
+    '## Your job',
     '',
-    'Match the language of the user\'s question (Chinese question → answer in Chinese, English question → answer in English).',
+    'Give your most intelligent analysis of the user\'s question:',
+    '  - Use the RECON DATA as your primary grounding (it was collected for you).',
+    '  - Combine it with your own training knowledge when that adds value.',
+    '  - Surface the best answer, concrete reasoning, pitfalls, and anything missed.',
+    '  - Disagree with the framing if appropriate.',
+    '',
+    '## Source labeling (when mixing recon + training)',
+    '',
+    'When you state a non-obvious fact, mark where it came from:',
+    '  - "[recon: ...]" — from the RECON DATA block',
+    '  - "[training: ...]" — from your training data',
+    '  - "[inference: ...]" — your logical deduction',
+    '',
+    'This helps the aggregator weigh sources and lets the user verify claims.',
+    'For plainly obvious statements no label is needed.',
+    '',
+    '## If recon data seems insufficient',
+    '',
+    'You have two options depending on the question:',
+    '  - For questions where your training knowledge can credibly fill the gap:',
+    '    proceed with training knowledge, labeled. Provide your best analysis.',
+    '  - For questions that absolutely need specific files/data you don\'t see:',
+    '    set sufficient=false and list SPECIFIC items in "missing" (file paths,',
+    '    symbols, paper IDs, data points). The recon agent will fetch them next round.',
+    '',
+    'Use your judgment — don\'t reflexively flag missing for everything.',
+    '',
+    'Respond with your advice directly — no preamble, no disclaimers about tools.',
+    'Your response is private guidance to the aggregator, not a user-facing answer.',
+    '',
+    'Match the language of the user\'s question (Chinese question → Chinese advice).',
   ].join('\n');
   const sharedRefPrompt =
     config.get<string>('sharedRefPrompt') ?? SHARED_REF_PROMPT_DEFAULT;
@@ -326,7 +372,12 @@ export async function runP1Fanout(
   const enableRecon = config.get<boolean>('enableRecon') ?? true;
   const maxReconRoundsRaw = config.get<number>('maxReconRounds') ?? 3;
   const maxReconRounds = Math.max(1, Math.min(5, maxReconRoundsRaw));
-  const reconContextChars = Math.max(5000, config.get<number>('reconContextChars') ?? 30000);
+  // v0.14.5: reconContextChars 不再作上限 —— 只读取用于 meta 审计。
+  // 原设计假设下游 LLM 上下文紧张，但 refs 单轮无历史 + 1M 上下文模型，
+  // 即使 recon 收集到 1MB+ 也应该原样传递。
+  // 如果 recon 真的爆了，说明检索方向出问题（噪声过多）——
+  // 这是 LLM 应该意识到并处理的，不是靠截断救场。
+  const reconContextChars = config.get<number>('reconContextChars') ?? 500000;
   const hasToolsEarly = vscode.lm.tools.filter((t) => t.name.startsWith('copilot_')).length > 0;
   const canRecon = enableRecon && hasToolsEarly && !!toolInvocationToken;
   const effectiveMaxRounds = canRecon ? maxReconRounds : 1;
@@ -357,10 +408,9 @@ export async function runP1Fanout(
   let reconRoundsUsed = 0;
 
   // If caller provided reconContext, prep it as the initial summary.
+  // v0.14.5: 不再截断 —— 上层 agent 传多少全量注入 refs。
   if (callerReconContext && callerReconContext.trim().length > 0) {
-    reconSummary = callerReconContext.length > reconContextChars
-      ? callerReconContext.substring(0, reconContextChars) + '\n... (truncated)'
-      : callerReconContext;
+    reconSummary = callerReconContext;
     if (refChannel) {
       refChannel.appendLine(
         `--- Using caller-supplied reconContext (${callerReconContext.length} chars ` +
@@ -398,9 +448,15 @@ export async function runP1Fanout(
         );
       }
 
+      // v0.14.2: 重构异常处理 —— runReconAgent 现在永不 throw，
+      // 但仍保留 catch 做兜底防御。关键变化：
+      //   1. 即使 recon.raw.error 非空，也尝试 extractReconSummary
+      //   2. 只要 capturedToolCalls 有内容，就保住 partial recon
+      //   3. extractReconSummary 自身异常也单独 catch
+      let recon: Awaited<ReturnType<typeof runReconAgent>> | null = null;
       try {
         // v0.14.0: recon 用独立的 reconModel（fallback 到 aggregator）
-        const recon = await runReconAgent(
+        recon = await runReconAgent(
           reconModel,
           prompt,
           toolInvocationToken!,
@@ -416,21 +472,96 @@ export async function runP1Fanout(
               .filter((s) => s.length > 0);
           })()
         );
-        const newReconSummary = await extractReconSummary(
-          recon.raw.capturedToolCalls,
-          prefetched,
-          missingHints ?? [],
-          reconContextChars,
-          prompt,
-          toolInvocationToken
+      } catch (err) {
+        // v0.14.2: runReconAgent 内部已全 catch，这里几乎是 dead code，
+        // 但保留作为最后防线。在这种情况下，capturedToolCalls 不可得。
+        const msg = err instanceof Error ? err.message : String(err);
+        stream.progress(
+          `[MoA] Phase 0: recon round ${round} CRASHED UNEXPECTEDLY (${msg.substring(0, 100)}) — ` +
+          `disabling further recon, refs will run without recon data`
         );
+        if (refChannel) {
+          refChannel.appendLine(`--- Recon round ${round} CRASHED (defensive catch — this should not happen, please report) ---`);
+          refChannel.appendLine(msg);
+          refChannel.appendLine('');
+        }
+        reconBroken = true;
+        recon = null;
+      }
 
-        // v0.9.1 defensive: If recon produced nothing useful, fall back
-        // gracefully. "Useful" = at least one tool succeeded OR a prefetch
-        // got content. Otherwise we'd be wasting ref tokens on empty context.
-        const reconWasUseful =
-          recon.raw.toolCallsSucceeded > 0 || prefetched.size > 0;
-        if (newReconSummary.trim() === '(no recon data captured)' || !reconWasUseful) {
+      if (recon) {
+        const hasPartialContent = recon.raw.capturedToolCalls.length > 0 || prefetched.size > 0;
+        const reconError = recon.raw.error;
+
+        // v0.14.2: 即使有 error，只要 capturedToolCalls 有内容就尝试 extract
+        // 这是修复"1213 错误时整段丢弃"的关键。
+        let newReconSummary = '';
+        if (hasPartialContent) {
+          try {
+            newReconSummary = await extractReconSummary(
+              recon.raw.capturedToolCalls,
+              prefetched,
+              missingHints ?? [],
+              reconContextChars,
+              prompt,
+              toolInvocationToken
+            );
+          } catch (extractErr) {
+            // extractReconSummary 自身异常（如 L3 孙代理 crash）—— 不丢弃已 captured 的原始内容
+            const extractMsg = extractErr instanceof Error ? extractErr.message : String(extractErr);
+            stream.progress(
+              `[MoA] Phase 0: extractReconSummary FAILED (${extractMsg.substring(0, 100)}) — ` +
+              `falling back to raw captured content`
+            );
+            // Fallback: 直接拼接原始 capturedToolCalls（不做 L1/L2/L3 处理）
+            // v0.14.5: 不截断 —— 原样全量拼接
+            newReconSummary = recon.raw.capturedToolCalls
+              .map((c) => `=== [${c.name}] ===\n${c.resultText}`)
+              .join('\n\n');
+          }
+        }
+
+        const reconWasUseful = newReconSummary.length > 100 || prefetched.size > 0;
+
+        if (reconError && reconWasUseful) {
+          // v0.14.2 新路径：recon 中途出错但保住了 partial 内容
+          stream.progress(
+            `[MoA] Phase 0: recon round ${round} hit error but RECOVERED ${newReconSummary.length} chars ` +
+            `from ${recon.raw.capturedToolCalls.length} captured call(s) — refs will use partial recon. ` +
+            `Error: ${reconError.substring(0, 80)}`
+          );
+          if (refChannel) {
+            // v0.14.6: 完整 dump error（含 1213 诊断后缀），不再 substring(150)
+            refChannel.appendLine(
+              `--- Recon round ${round} PARTIAL RECOVERY (error below, full) ---`
+            );
+            refChannel.appendLine(
+              `Recovered ${newReconSummary.length} chars from ${recon.raw.capturedToolCalls.length} ` +
+              `captured tool call(s) + ${prefetched.size} prefetched hint(s). ` +
+              `${recon.raw.toolCallsSucceeded} ok / ${recon.raw.toolCallsFailed} failed.`
+            );
+            refChannel.appendLine('=== ERROR (full) ===');
+            refChannel.appendLine(reconError);
+            refChannel.appendLine('=== END ERROR ===');
+            const preview = newReconSummary.length > 2000
+              ? newReconSummary.substring(0, 2000) + '\n... (truncated in log)'
+              : newReconSummary;
+            refChannel.appendLine(preview);
+            refChannel.appendLine('');
+          }
+          reconSummary = newReconSummary;
+          reconRoundsUsed = round;
+          // 有 partial 内容时也 set reconBroken，避免下一轮再 trigger 同样的 error
+          reconBroken = true;
+          // v0.14.3: 落盘 capturedToolCalls + 完整 recon summary
+          if (dumpDir) {
+            recon.raw.capturedToolCalls.forEach((c, i) => dumpCapturedToolCall(dumpDir, i, c));
+            dumpFullRecon(dumpDir, reconSummary);
+            dumpMetaState.reconRoundsUsed = reconRoundsUsed;
+            dumpMetaState.totalChars = reconSummary.length;
+          }
+        } else if (newReconSummary.trim() === '(no recon data captured)' || !reconWasUseful) {
+          // 真的没有任何内容 —— 与原 v0.9.1 行为一致
           stream.progress(
             `[MoA] Phase 0: recon round ${round} produced no usable content ` +
             `(${recon.raw.toolCallsSucceeded} ok / ${recon.raw.toolCallsFailed} failed, ` +
@@ -438,18 +569,23 @@ export async function runP1Fanout(
           );
           if (refChannel) {
             refChannel.appendLine(`--- Recon round ${round}: NO USEFUL CONTENT — disabling further recon, refs will run without recon data ---`);
+            if (reconError) {
+              refChannel.appendLine(`Underlying error: ${reconError}`);
+            }
             refChannel.appendLine('');
           }
-          // v0.12.5 BUGFIX: Don't break the sufficiencyLoop!
-          // Previously this break skipped ref fan-out entirely.
-          // Now: mark recon broken so subsequent rounds skip Phase 0,
-          // but ref fan-out (Phase 1) still runs in THIS round.
           reconBroken = true;
-          // Don't update reconSummary (keep empty); refs will see no recon data.
-          // Continue to Phase 1 below — refs reason about the question directly.
         } else {
+          // 完全成功路径（原 v0.9.0 行为）
           reconSummary = newReconSummary;
           reconRoundsUsed = round;
+          // v0.14.3: 落盘 capturedToolCalls + 完整 recon summary
+          if (dumpDir) {
+            recon.raw.capturedToolCalls.forEach((c, i) => dumpCapturedToolCall(dumpDir, i, c));
+            dumpFullRecon(dumpDir, reconSummary);
+            dumpMetaState.reconRoundsUsed = reconRoundsUsed;
+            dumpMetaState.totalChars = reconSummary.length;
+          }
 
           if (refChannel) {
             refChannel.appendLine(
@@ -464,16 +600,6 @@ export async function runP1Fanout(
             refChannel.appendLine('');
           }
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        stream.progress(`[MoA] Phase 0: recon FAILED (${msg.substring(0, 100)}) — disabling further recon, refs will run without recon data`);
-        if (refChannel) {
-          refChannel.appendLine(`--- Recon round ${round} FAILED — disabling further recon, refs will still run ---`);
-          refChannel.appendLine(msg);
-          refChannel.appendLine('');
-        }
-        // v0.12.5 BUGFIX: Don't break! Mark recon broken and let ref fan-out run.
-        reconBroken = true;
       }
     }
 
@@ -524,7 +650,34 @@ export async function runP1Fanout(
         '- "missing": when sufficient=false, list SPECIFIC items (file paths, symbol names,',
         '            line ranges, etc.) — the recon agent will collect them in the next round.',
         '- "analysis": your full analysis. ALWAYS provide this, even if sufficient=false.',
-        '             This is what the aggregator will synthesize into the final answer.'
+        '             This is what the aggregator will synthesize into the final answer.',
+        '',
+        '=== OUTPUT DEPTH (agent judgment) ===',
+        'You are an expert advisor. Calibrate your output depth to the question:',
+        '',
+        '- For RESEARCH/LITERATURE questions (mechanism review, multi-dimensional analysis,',
+        '  "what is X", comparative synthesis): produce a COMPREHENSIVE analysis covering',
+        '  every dimension the user asked about. The recon agent gathered rich context for',
+        '  you — USE IT. If recon data has 50K+ chars of literature, your analysis should',
+        '  proportionally unpack that richness, not compress it into a brief.',
+        '',
+        '- For NARROW CODE questions (specific bug, single function, quick lookup):',
+        '  be CONCISE and surgical. No padding.',
+        '',
+        '- Judge by the question, not by a fixed length. A "review hibernation mechanisms"',
+        '  question deserves 10x the depth of a "what does config.timeout do" question.',
+        '',
+        'Anti-patterns to AVOID on research questions:',
+        '  - One-paragraph summaries when recon data has 5+ distinct aspects',
+        '  - Listing paper titles without extracting their actual findings',
+        '  - Hand-waving ("many factors are involved") instead of naming specific genes/',
+        '    pathways/numbers from the recon data',
+        '  - Stopping at 2-3 sentences per subtopic when the user asked for systematic coverage',
+        '',
+        'Structure with ## subheadings for each major dimension the user requested.',
+        'Cite specific recon data points with [recon: ...] labels.',
+        'Include your training knowledge with [training: ...] labels when it adds value.',
+        'Match the language of the user\'s question.'
       );
 
       const refPrompts: vscode.LanguageModelChatMessage[] = [
@@ -535,6 +688,9 @@ export async function runP1Fanout(
         stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} thinking (round ${round})...`);
       }
 
+      // v0.14.9: 不显式设置 maxOutputTokens（避免 provider 兼容性问题）。
+      // 改为通过 prompt agent 化引导 LLM 自己判断输出深度。
+      // 见上方 ANALYSIS DEPTH REQUIREMENT 块。
       try {
         const response = await ref.model.sendRequest(refPrompts, {}, token);
         let text = '';
@@ -550,6 +706,10 @@ export async function runP1Fanout(
           stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} done (${text.length} chars, round ${round})`);
         }
         successes.push({ model: ref.model, name: ref.model.name, label: ref.label, text });
+        // v0.14.3: 落盘 ref 输出
+        if (dumpDir) {
+          dumpRefOutput(dumpDir, successes.length - 1, ref.label, ref.model.name, text, round);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const shortMsg = msg.length > 150 ? msg.substring(0, 150) + '...' : msg;
@@ -732,6 +892,22 @@ export async function runP1Fanout(
         '',
         'Match the language of the user\'s question (Chinese question → answer in Chinese, English question → answer in English).',
         '',
+        '=== OUTPUT DEPTH (agent judgment) ===',
+        'Calibrate your synthesis depth to the question type:',
+        '',
+        '- RESEARCH/LITERATURE questions (reviews, mechanism analysis, "what is X"):',
+        '  Produce a COMPREHENSIVE synthesis that preserves the richness of the refs.',
+        '  When refs collectively offer 50K+ chars of grounded analysis, compressing',
+        '  to a 2-paragraph brief DESTROYS value. Unpack the depth, preserve citations,',
+        '  structure with ## subheadings for each dimension.',
+        '',
+        '- NARROW CODE questions: be concise and surgical.',
+        '',
+        '- Preserve specific citations, gene names, pathways, numbers from refs.',
+        '- Do NOT over-summarize — the user asked a rich question and refs gave rich answers.',
+        '- If refs disagree on a point, address the disagreement explicitly with reasoning.',
+        '- Use Markdown headings (## / ###), tables, and lists where they add clarity.',
+        '',
         '=== ORIGINAL USER QUESTION ===',
         prompt,
         '',
@@ -743,6 +919,7 @@ export async function runP1Fanout(
 
   let aggregated = '';
   try {
+    // v0.14.9: 不显式设置 maxOutputTokens，靠 prompt 引导输出深度
     const aggResponse = await aggregator.sendRequest(aggMessages, {}, token);
     for await (const frag of aggResponse.text) {
       aggregated += frag;
@@ -751,6 +928,12 @@ export async function runP1Fanout(
     const msg = err instanceof Error ? err.message : String(err);
     // Aggregator failed — fall back to first ref verbatim as guidance.
     aggregated = `(aggregator failed: ${msg})\n\nFallback guidance from first advisor:\n${successes[0].text}`;
+  }
+
+  // v0.14.3: 落盘 aggregator 输出
+  if (dumpDir) {
+    dumpAggregator(dumpDir, aggregated);
+    dumpMetaState.refCount = successes.length;
   }
 
   // Write aggregated guidance to OutputChannel (for transparency) — it is
@@ -863,6 +1046,13 @@ export async function runP1Fanout(
       stream.progress('[MoA] no toolInvocationToken — showing aggregator output directly');
     }
     stream.markdown(aggregated);
+  }
+
+  // v0.14.3: 落盘 final + 完成 meta
+  if (dumpDir) {
+    dumpFinal(dumpDir, finalOutput);
+    dumpMetaState.finishedAt = new Date().toISOString();
+    dumpMeta(dumpDir, dumpMetaState);
   }
 
   return {
@@ -1038,11 +1228,19 @@ async function extractReconSummary(
 ): Promise<string> {
   if (captured.length === 0 && prefetched.size === 0) return '(no recon data captured)';
 
-  // v0.13.0: 从配置读取 L3 阈值与单任务最大 L3 调用次数
+  // v0.14.5: 完全无上限 —— maxChars 参数保留但仅用于审计/meta，不再做任何截断。
+  //
+  // 设计哲学：
+  //   - refs 单轮无历史 + 1M 上下文模型，即使 5MB 内容也能消化
+  //   - 如果 recon 收集到的内容真的"过大"，那说明检索方向出问题（噪声过多）
+  //     —— 这是 LLM 应该从内容本身判断并处理的，不是工程层强行截断
+  //   - 截断会丢掉关键信息，比"内容多"的代价大得多
+  //
+  // L3 孙代理仍然保留（默认 200k 触发），但那是"精选"而非"截断" ——
+  // L3 把巨型文件的完整内容用 LLM 智能压缩成关键片段，质量远高于硬切。
   const config = vscode.workspace.getConfiguration('moa');
-  const l3Threshold = config.get<number>('reconL3Threshold') ?? 30000;
+  const l3Threshold = config.get<number>('reconL3Threshold') ?? 200000;
   const l3MaxCalls = config.get<number>('reconL3MaxCalls') ?? 5;
-  const smallThreshold = 5000;  // L1 阈值（小于此值不截断）
 
   // v0.14.0: 检查 L3 是否被禁用（moa.l3Summarizer.model 为空 = 禁用）
   const l3Cfg = config.get<{ model?: string }>('l3Summarizer');
@@ -1050,43 +1248,26 @@ async function extractReconSummary(
 
   let l3CallsUsed = 0;
   const blocks: string[] = [];
-  let total = 0;
-  const perBlockCap = Math.min(maxChars / 3, 10000);
+  let total = 0;  // 仅用于审计统计
 
   /**
-   * 加入一个 block，按剩余预算截断。
-   * 返回 true 表示成功加入，false 表示预算已满。
+   * v0.14.5: 加入一个 block，**永不截断**。
+   * total 仅用于审计统计（写入 meta.json），不影响逻辑。
    */
-  function addBlock(header: string, content: string): boolean {
-    if (total >= maxChars) return false;
+  function addBlock(header: string, content: string): void {
     const block = `${header}\n${content}`;
-    const trimmedBlock = block.length > perBlockCap
-      ? truncateAtSemanticBoundary(block, perBlockCap)
-      : block;
-    if (total + trimmedBlock.length > maxChars) {
-      const remaining = maxChars - total;
-      if (remaining > 100) {
-        blocks.push(truncateAtSemanticBoundary(trimmedBlock, remaining));
-        total = maxChars;
-      }
-      return false;
-    }
-    blocks.push(trimmedBlock);
-    total += trimmedBlock.length + 2;
-    return true;
+    blocks.push(block);
+    total += block.length + 2;
   }
 
   // 1. Prefetched hints (highest priority).
   for (const [hintNum, content] of prefetched.entries()) {
     const hintText = prefetchedHints[hintNum - 1] ?? `hint ${hintNum}`;
-    const ok = addBlock(`=== [prefetched hint ${hintNum}: ${hintText}] ===`, content);
-    if (!ok) break;
+    addBlock(`=== [prefetched hint ${hintNum}: ${hintText}] ===`, content);
   }
 
   // 2. Captured tool calls.
   for (const call of captured) {
-    if (total >= maxChars) break;
-
     // 尝试从工具 input 中提取路径（用于 L3 触发判断）
     let pathHint = '';
     if (call.input && typeof call.input === 'object') {
@@ -1103,51 +1284,45 @@ async function extractReconSummary(
       ? `=== [recon: ${call.name}: ${pathHint}] ===`
       : `=== [recon: ${call.name}] ===`;
 
-    // v0.13.0: 三层截断策略 —— 针对单个工具调用的结果文本
-    //   L1: resultText < 5KB → 直接加入（绝大多数 grep/list 结果走这条）
-    //   L2: 5KB ≤ resultText < l3Threshold → addBlock 内部按语义边界截断
-    //   L3: resultText ≥ l3Threshold 且为代码文件 → 调 M3 孙代理精选
+    // v0.14.5: 只有"超大代码文件"才走 L3 精选，其余原样保留
     let contentForBlock: string;
     const contentLen = call.resultText.length;
 
-    if (contentLen < smallThreshold) {
-      // L1: 小内容，直接走 addBlock（addBlock 会处理总预算）
-      contentForBlock = call.resultText;
-    } else if (contentLen < l3Threshold) {
-      // L2: 中等内容，仍走 addBlock，但 addBlock 内部用语义边界截断
-      contentForBlock = call.resultText;
-    } else {
-      // L3 候选：超大内容 + 代码文件
-      // v0.14.0: l3Disabled 时不触发 L3（直接走 L2）
-      const shouldL3 = !l3Disabled && pathHint &&
-        shouldTriggerL3(pathHint, contentLen, l3Threshold) &&
-        l3CallsUsed < l3MaxCalls;
+    // L3 触发条件（全部满足）：
+    //   1. 内容超过 l3Threshold（默认 200k —— 真正的大文件）
+    //   2. 是代码文件（shouldTriggerL3 检查扩展名）
+    //   3. L3 未被禁用
+    //   4. 未达 l3MaxCalls 上限
+    //   5. 有 pathHint（L3 需要文件路径做缓存 key）
+    const shouldL3 = !l3Disabled && pathHint &&
+      contentLen >= l3Threshold &&
+      shouldTriggerL3(pathHint, contentLen, l3Threshold) &&
+      l3CallsUsed < l3MaxCalls;
 
-      if (shouldL3) {
-        // 派 M3 孙代理（异步，不阻塞其他 block）
-        try {
-          const { l3Summarize } = await import('./l3Summarizer');
-          const l3Result = await l3Summarize({
-            filePath: pathHint,
-            fullContent: call.resultText,
-            userPrompt,
-            toolInvocationToken,
-          });
-          if (l3Result) {
-            l3CallsUsed++;
-            contentForBlock = `${l3Result.summary}\n\n<!-- L3 source: ${l3Result.source}, ${l3Result.elapsedMs}ms, cached=${l3Result.fromCache} -->`;
-          } else {
-            // L3 失败 → fallback L2
-            contentForBlock = truncateAtSemanticBoundary(call.resultText, perBlockCap);
-          }
-        } catch {
-          // L3 异常 → fallback L2
-          contentForBlock = truncateAtSemanticBoundary(call.resultText, perBlockCap);
+    if (shouldL3) {
+      // 派 L3 孙代理精选（智能压缩，保留关键函数）
+      try {
+        const { l3Summarize } = await import('./l3Summarizer');
+        const l3Result = await l3Summarize({
+          filePath: pathHint,
+          fullContent: call.resultText,
+          userPrompt,
+          toolInvocationToken,
+        });
+        if (l3Result) {
+          l3CallsUsed++;
+          contentForBlock = `${l3Result.summary}\n\n<!-- L3 source: ${l3Result.source}, ${l3Result.elapsedMs}ms, cached=${l3Result.fromCache} -->`;
+        } else {
+          // L3 失败 → 原样保留
+          contentForBlock = call.resultText;
         }
-      } else {
-        // 不触发 L3（非代码文件 / 已达 L3 上限 / 无路径）→ L2 语义边界截断
-        contentForBlock = truncateAtSemanticBoundary(call.resultText, perBlockCap);
+      } catch {
+        // L3 异常 → 原样保留
+        contentForBlock = call.resultText;
       }
+    } else {
+      // 默认路径：原样保留
+      contentForBlock = call.resultText;
     }
 
     addBlock(header, contentForBlock);
@@ -1213,5 +1388,190 @@ function parseRefOutput(text: string): RefParsed {
       parseFailed: true,
     };
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.14.3: Recon 落盘机制
+//
+// 目的：
+//   1. 完整 recon 成果留档（debug / audit / replay）
+//   2. 每个 capturedToolCall 独立保存（便于后续优化处理）
+//   3. ref 输出与 aggregator 输出落盘（端到端 trace）
+//   4. acting agent 可读取完整内容做后续工具调用
+//
+// 目录结构（每个 MoA 任务一个 sha1 目录）：
+//   <workspace>/.moa_cache/recon/<sha1>/
+//     meta.json                  # 任务元信息
+//     00_full_recon.md           # 注入 refs 的完整 recon summary
+//     01_captured/               # recon agent 的每个工具调用
+//       001_<toolname>.md
+//       002_<toolname>.md
+//     02_ref_outputs/            # 每个 ref 的输出
+//       ref1_<label>.md
+//     03_aggregator.md           # aggregator 输出
+//     04_final.md                # 最终输出
+// ─────────────────────────────────────────────────────────────────────────
+
+interface ReconDumpMeta {
+  taskSha: string;
+  prompt: string;
+  startedAt: string;
+  finishedAt?: string;
+  reconRoundsUsed: number;
+  refCount: number;
+  totalChars: number;
+}
+
+/**
+ * 计算 recon dump 的 SHA1（基于 prompt + 启动时间秒级）。
+ * 同一秒内同 prompt 视为同一任务（极端情况再叠加随机后缀）。
+ */
+function computeTaskSha(prompt: string, startedAt: Date): string {
+  const crypto = require('crypto');
+  const hash = crypto.createHash('sha1');
+  hash.update(prompt);
+  hash.update('|');
+  hash.update(startedAt.toISOString().substring(0, 19));  // 秒级
+  return hash.digest('hex').substring(0, 12);
+}
+
+/**
+ * 取得 recon dump 目录路径。如果 workspace 不可用，返回 null（不落盘）。
+ *
+ * v0.14.10: 创建 .moa_cache/ 时顺便写入 README.md（仅首次，已存在不覆盖）。
+ */
+function getReconDumpDir(taskSha: string): string | null {
+  const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!ws) return null;
+  const cacheRoot = path.join(ws, '.moa_cache');
+  const dir = path.join(cacheRoot, 'recon', taskSha);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(path.join(dir, '01_captured'), { recursive: true });
+    fs.mkdirSync(path.join(dir, '02_ref_outputs'), { recursive: true });
+    // v0.14.10: 首次创建 .moa_cache/ 时同步写入 README
+    try {
+      const { ensureCacheReadme } = require('./cacheReadme');
+      ensureCacheReadme(cacheRoot);
+    } catch {
+      // 模块加载失败不阻塞主流程
+    }
+  }
+  return dir;
+}
+
+/**
+ * 安全写文件（best-effort，失败不影响主流程）。
+ */
+function safeWrite(filePath: string, content: string): void {
+  try {
+    fs.writeFileSync(filePath, content, 'utf8');
+  } catch (err) {
+    console.warn(`[MoA recon dump] failed to write ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * Dump 一个 capturedToolCall 到独立 md 文件。
+ * 文件名格式：NNN_<toolname>.md（NNN = 3 位序号）
+ *
+ * v0.14.6: 增加 part 元数据 dump，便于诊断工具返回的 part 类型分布。
+ * 特别是对 copilot_fetchWebPage 这类返回非 TextPart 富文本的工具，
+ * partDiagnostics 能直接显示 "5 个 PromptTSXPart，共 32000 字符，全部从
+ * recursive-text 提取" 之类的信息。
+ */
+function dumpCapturedToolCall(
+  dumpDir: string,
+  index: number,
+  call: CapturedToolCall
+): void {
+  const safeToolName = call.name.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 40);
+  const fileName = `${String(index + 1).padStart(3, '0')}_${safeToolName}.md`;
+  const filePath = path.join(dumpDir, '01_captured', fileName);
+
+  const inputStr = typeof call.input === 'string'
+    ? call.input
+    : (() => { try { return JSON.stringify(call.input, null, 2); } catch { return String(call.input); } })();
+
+  const sections = [
+    `# Captured Tool Call ${index + 1}: ${call.name}`,
+    '',
+    '## Input',
+    '```json',
+    inputStr,
+    '```',
+    '',
+    `## Result (${call.resultText.length} chars)`,
+    call.resultText,
+  ];
+
+  // v0.14.6: 追加 part 元数据诊断
+  if (call.partDiagnostics && call.partDiagnostics.length > 0) {
+    sections.push(
+      '',
+      '## Part Diagnostics',
+      '',
+      '| # | kind | source | length |',
+      '|---|------|--------|--------|',
+    );
+    call.partDiagnostics.forEach((p, i) => {
+      sections.push(`| ${i + 1} | ${p.kind} | ${p.source} | ${p.length} |`);
+    });
+    const totalExtracted = call.partDiagnostics.reduce((s, p) => s + p.length, 0);
+    const nonTextParts = call.partDiagnostics.filter((p) => p.kind !== 'TextPart').length;
+    sections.push(
+      '',
+      `**Summary**: ${call.partDiagnostics.length} part(s), ${nonTextParts} non-TextPart, ` +
+      `${totalExtracted} chars extracted (resultText=${call.resultText.length}).`,
+    );
+  }
+
+  safeWrite(filePath, sections.join('\n'));
+}
+
+/**
+ * Dump 完整的 recon summary（注入 refs 的内容）。
+ */
+function dumpFullRecon(dumpDir: string, reconSummary: string): void {
+  safeWrite(path.join(dumpDir, '00_full_recon.md'), reconSummary);
+}
+
+/**
+ * Dump 一个 ref 的输出。
+ */
+function dumpRefOutput(
+  dumpDir: string,
+  index: number,
+  label: string,
+  modelName: string,
+  text: string,
+  round: number
+): void {
+  const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 30);
+  const safeModel = modelName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 30);
+  const fileName = `ref${index + 1}_${safeLabel}_${safeModel}_r${round}.md`;
+  const content = [
+    `# Ref ${index + 1}: ${label} / ${modelName} (round ${round})`,
+    '',
+    text,
+  ].join('\n');
+  safeWrite(path.join(dumpDir, '02_ref_outputs', fileName), content);
+}
+
+/**
+ * Dump aggregator 与 final 输出。
+ */
+function dumpAggregator(dumpDir: string, aggregated: string): void {
+  safeWrite(path.join(dumpDir, '03_aggregator.md'), aggregated);
+}
+
+function dumpFinal(dumpDir: string, finalOutput: string): void {
+  safeWrite(path.join(dumpDir, '04_final.md'), finalOutput);
+}
+
+/**
+ * Dump 任务元信息（最后调用，会更新 finishedAt）。
+ */
+function dumpMeta(dumpDir: string, meta: ReconDumpMeta): void {
+  safeWrite(path.join(dumpDir, 'meta.json'), JSON.stringify(meta, null, 2));
 }
 
