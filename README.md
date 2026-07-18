@@ -4,39 +4,122 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![VSCode](https://img.shields.io/badge/VSCode-1.95+-blue.svg)](https://code.visualstudio.com)
-[![Release](https://img.shields.io/badge/release-v0.14.1-blue.svg)](https://github.com/DDL095/vscode-moa/releases/tag/v0.14.1)
+[![Marketplace](https://img.shields.io/badge/Marketplace-dudali095.moa--bridge-green.svg)](https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge)
+[![Release](https://img.shields.io/badge/release-v0.14.12-blue.svg)](https://github.com/DDL095/vscode-moa/releases/tag/v0.14.12)
 
 ## What it does
 
-`@moa <your question>` runs a multi-model fan-out directly in Copilot Chat:
+`@moa <your question>` runs a multi-model fan-out directly in Copilot Chat. Two entry points, two loop shapes:
+
+### Path A — `@moa` chat participant (default, fast)
 
 ```
 user prompt
    │
    ▼
-[Phase 0] Recon agent (read-only tools) ── collects relevant files / symbols
-   │
-   ▼
-[Phase 1] N reference advisors (parallel) ── each produces {sufficient, missing, analysis}
-   │                ↺ sufficiency loop (maxReconRounds, default 3)
-   ▼
-[Phase 2] Aggregator ── fuses ref outputs into guidance + completeness score
-   │
-   ▼
-[Phase 3] Acting agent (tool-calling) ── executes the plan (read_file / apply_patch / run_in_terminal / …) and produces the final Markdown answer
+╔══════════════════════════════════════════════════╗
+║       sufficiencyLoop  (moa.maxReconRounds, default 3)       ║
+║                                                  ║
+║  [Phase 0]  Recon agent  (read-only tool calls)  ║
+║              ↓ collects files / symbols / web    ║
+║  [Phase 1]  N reference advisors  (parallel)     ║
+║              ↓ each emits {sufficient, missing, analysis}  ║
+║  [Phase 1.5] Sufficiency gate                    ║
+║              │                                   ║
+║              └── NO (majority insufficient) ─────┄──→ collects missing hints, loops back to Phase 0
+                  │ YES
+                  ▼
+[Phase 2]  Aggregator  →  fused guidance + completeness score
+              │
+              ▼
+[Phase 3]  Acting agent  (multi-turn tool-calling loop, default cap 12 iters)
+              ↓ read_file / apply_patch / run_in_terminal / …
+              │
+              ▼
+final Markdown answer to user
 ```
+
+**Currently no feedback path exist after Phase 3.** Once refs say "sufficient" the loop exits and never returns to Phase 0 — even if the acting agent discovers it needs more context. See [Roadmap: closed-loop MoA](#roadmap-closed-loop-moa-v0150) below.
+
+### Path B — `#moa_orchestrate` / `#moa_continue` / `#moa_finalize` LM tools (Hermes-style, full closed loop)
+
+For tasks that need iterative refinement across many rounds (research, multi-file refactoring, design trade-off analysis), drive the loop manually from chat or from another agent:
+
+```
+#moa_orchestrate prompt="..."   →   returns task_id
+        │
+        ▼
+╔══════════════════════════════════════════════════╗
+║            Hermes iteration loop                 ║
+║    (MAX_ITER=12, completeness ≥ 0.8 → converge)  ║
+║                                                  ║
+║  aggregator emits next_action:                   ║
+║    ├─ "recon_needed"        → #moa_continue with subagent recon result  ║
+║    ├─ "need_more_analysis"  → another iteration (no new recon)          ║
+║    └─ "finalize"            → break                                     ║
+║                                                  ║
+║  convergence check:                              ║
+║    completeness ≥ 0.8        → done             ║
+║    3 stalled iterations      → done             ║
+║    iteration ≥ MAX_ITER (12) → forced finalize  ║
+╚══════════════════════════════════════════════════╝
+        │
+        ▼
+#moa_finalize   →   action_items + summary + unresolved gaps
+```
+
+State persists to `<workspace>/.moa_cache/<task_id>/` so the loop survives main-session compaction. See [moaOrchestrator.ts](src/moaOrchestrator.ts) for the full state machine.
+
+### Roadmap: closed-loop MoA (v0.15.0+)
+
+**The missing piece**: Path A's acting agent cannot currently request more recon. The design goal is **fully LLM-driven loop control** — no hard thresholds, no hard iteration caps; the LLM itself decides when to converge.
+
+Planned design (subject to refinement):
+
+```
+            ┌── recon → refs ⇄ sufficiency ── aggregator ── acting ─┐
+            │              ↑                              │           │
+            │              │                              ↓           │
+            │              └── [NEEDS_MORE_RECON] ─────────┘           │
+            │                                                            │
+            └──────── [CONVERGED] / [USER_INTERRUPT] / [BUDGET] ───────┘
+```
+
+- **Signal mechanism (dual-channel, defense in depth)**:
+  - `moa_request_more_recon` LM tool (acting / aggregator invoke explicitly)
+  - `<MOA_STATUS>NEEDS_MORE_RECON|CONVERGED</MOA_STATUS>` structured output block (zero tool overhead)
+- **Default mode**: LLM-judged. A simple "what does config.timeout do" question converges in 1 outer loop; a "design a refactoring plan for the auth module" question may run 3-5 outer loops. The LLM picks.
+- **Hard guarantees (to prevent runaway)**:
+  - Total char budget across all outer loops (default ~500K chars)
+  - Hard iteration cap (default 5 outer loops)
+  - Convergence detection: consecutive rounds with >80% similar `missing` hints → forced converge
+
+Track progress in [issue #1](https://github.com/DDL095/vscode-moa/issues) (to be created).
 
 Each layer is independently configurable and can be toggled. See [Architecture](#architecture) below.
 
 ## Install
 
-### Option A — from GitHub Release (recommended)
+### Option A — from VSCode Marketplace (recommended)
 
-1. Download `moa-bridge-0.14.1.vsix` from the [latest release](https://github.com/DDL095/vscode-moa/releases/tag/v0.14.1).
-2. `code --install-extension moa-bridge-0.14.1.vsix`
+1. Open the Extensions panel (`Ctrl+Shift+X`)
+2. Search **"MoA Bridge"**
+3. Click Install
+
+Or command line:
+```powershell
+code --install-extension dudali095.moa-bridge
+```
+
+Marketplace page: https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge
+
+### Option B — from GitHub Release
+
+1. Download the latest `moa-bridge-<version>.vsix` from the [releases page](https://github.com/DDL095/vscode-moa/releases).
+2. `code --install-extension moa-bridge-<version>.vsix`
 3. Reload VSCode.
 
-### Option B — from source
+### Option C — from source
 
 ```powershell
 git clone https://github.com/DDL095/vscode-moa.git

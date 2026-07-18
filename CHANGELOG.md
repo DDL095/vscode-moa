@@ -5,6 +5,23 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.13] - 2026-07-19
+
+### Changed — README rewrite: clear loop shapes + roadmap
+
+User feedback: the original `What it does` flow diagram suggested a one-shot linear pipeline, hiding the existing loop mechanisms and giving no signal about the planned closed-loop direction. Rewrote to make the actual behavior explicit.
+
+- **`@moa` chat participant path** — now clearly shows the `sufficiencyLoop` spans Phase 0 ↔ Phase 1 ↔ Phase 1.5 (the original diagram put the loop arrow inside Phase 1, which was misleading). Explicitly notes that **no feedback paths exist after Phase 3** in the current implementation.
+- **`#moa_orchestrate` tool path** — documented as a separate entry point with a full Hermes iteration loop (`MAX_ITER=12`, `completeness ≥ 0.8` convergence, `next_action: recon_needed | need_more_analysis | finalize`).
+- **New Roadmap section** — sketches the v0.15.0+ design goal of fully LLM-driven closed-loop control: acting agent can request more recon via dual-channel signaling (`moa_request_more_recon` LM tool + `<MOA_STATUS>` structured output), default mode is LLM-judged (simple questions converge in 1 loop, complex ones run 3-5), with hard budget/iteration guarantees to prevent runaway.
+
+### Added
+- Marketplace badge in README header.
+- Install section now lists Marketplace as Option A (recommended); GitHub Release moved to Option B; source build is Option C.
+- Release badge updated to v0.14.12.
+
+---
+
 ## [0.14.12] - 2026-07-19
 
 ### Fixed — Relative path resolution in recon/acting agent tool calls

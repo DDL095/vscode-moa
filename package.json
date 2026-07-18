@@ -1,8 +1,8 @@
 {
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.12: 修复 recon/acting agent 用相对路径调用 copilot_readFile 等工具时全部 ENOENT 的 bug。根因：VSCode copilot_* 工具用 process.cwd()（VSCode 可执行文件目录）解析相对路径，而不是 workspace root。修复：在 invokeTool 调用前增加路径规范化层（normalizeToolInput），对 input.filePath/path/includePattern 等字段做相对→绝对转换，智能匹配多 workspace folder 名称（如 'GSEAlens/man/foo.Rd' 自动匹配名为 'GSEAlens' 的 workspace folder）。同时 recon system prompt 加路径处理提示，鼓励 LLM 用绝对路径。",
-  "version": "0.14.12",
+  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.13: README 大改 —— What it does 章节现在清楚画出两条路径的循环形态（@moa 的 sufficiencyLoop + #moa_orchestrate 的完整 Hermes 迭代闭环），新增 Roadmap 章节（v0.15+ 计划：acting → recon 反馈闭环，完全 LLM 主导的循环控制）。同时加 Marketplace badge、Install 改为 Marketplace 优先、修正 release badge 到 v0.14.12。",
+  "version": "0.14.13",
   "publisher": "dudali095",
   "license": "MIT",
   "repository": {
