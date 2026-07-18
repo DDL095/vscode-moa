@@ -94,8 +94,6 @@ Planned design (subject to refinement):
   - Hard iteration cap (default 5 outer loops)
   - Convergence detection: consecutive rounds with >80% similar `missing` hints → forced converge
 
-Track progress in [issue #1](https://github.com/DDL095/vscode-moa/issues) (to be created).
-
 Each layer is independently configurable and can be toggled. See [Architecture](#architecture) below.
 
 ## Install
