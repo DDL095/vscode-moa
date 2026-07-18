@@ -6,7 +6,7 @@
 
 import * as vscode from 'vscode';
 import { moaHandler } from './moaHandler';
-import { configureModels, listAvailableModels, testModels } from './moaConfig';
+import { configureModels } from './moaConfig';
 
 const PARTICIPANT_ID = 'moa-bridge.moa';
 
@@ -18,31 +18,21 @@ export function activate(context: vscode.ExtensionContext): void {
   const iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'moa-icon.png');
   participant.iconPath = iconPath;
 
-  // Optional: surface an "I am MoA" badge while processing.
-  participant.followupProvider = {
-    provideFollowups(
-      _result: vscode.ChatResult,
-      _context: vscode.ChatContext,
-      _token: vscode.CancellationToken
-    ): vscode.ProviderResult<vscode.ChatFollowup[]> {
-      return [
-        { prompt: 'preset=fast 再试一次', label: 'Fast preset' } as vscode.ChatFollowup,
-        { prompt: 'preset=academic 再试一次', label: 'Academic preset' } as vscode.ChatFollowup,
-      ];
-    },
-  };
+  // No followupProvider — preset feature was removed in v0.7.2 (never actually
+  // worked: parsePrompt extracted preset name but runP1Fanout ignored it).
 
   context.subscriptions.push(participant);
 
   // ---------- Commands (accessible via Command Palette) ----------
+  // v0.7.1: trimmed to 1 command. List/Probe/ProbeAll all removed — the user
+  // does precise model selection via Configure Models, which shows all
+  // available models in its checkbox picker anyway.
   context.subscriptions.push(
-    vscode.commands.registerCommand('moa.configureModels', configureModels),
-    vscode.commands.registerCommand('moa.listModels', listAvailableModels),
-    vscode.commands.registerCommand('moa.testModels', testModels)
+    vscode.commands.registerCommand('moa.configureModels', configureModels)
   );
 
   console.log('[moa-bridge] @moa participant registered (id=' + PARTICIPANT_ID + ')');
-  console.log('[moa-bridge] commands registered: moa.configureModels, moa.listModels, moa.testModels');
+  console.log('[moa-bridge] command registered: configureModels');
 }
 
 export function deactivate(): void {

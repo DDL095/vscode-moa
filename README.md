@@ -2,8 +2,6 @@
 
 **Mixture-of-Agents chat participant for VSCode Copilot** — Trigger multi-LLM fan-out (3 reference advisors + 1 aggregator) directly from `@moa` in Copilot Chat.
 
-English | [中文](./README.zh-cn.md)
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![VSCode](https://img.shields.io/badge/VSCode-1.95+-blue.svg)](https://code.visualstudio.com)
 

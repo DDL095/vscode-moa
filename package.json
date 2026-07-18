@@ -1,10 +1,14 @@
 {
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "description": "@moa chat participant — Mixture-of-Agents multi-perspective analysis via PowerShell MoA scripts",
-  "version": "0.1.0",
+  "description": "@moa chat participant — Equal-mode Mixture-of-Agents (Hermes style). v0.7.2: shows [vendor] in model display, removed dead preset/detectPath/scripts code.",
+  "version": "0.7.2",
   "publisher": "moa-bridge",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/local/vscode-moa"
+  },
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -23,10 +27,6 @@
         "description": "Trigger Mixture-of-Agents multi-perspective analysis",
         "isSticky": true,
         "commands": [
-          {
-            "name": "preset",
-            "description": "Switch preset (default/fast/academic/custom)"
-          },
           {
             "name": "help",
             "description": "Show MoA Bridge usage"
@@ -52,19 +52,7 @@
         "command": "moa.configureModels",
         "title": "MoA: Configure Models",
         "category": "MoA",
-        "description": "Interactive setup: pick how many ref advisors, assign a model + role to each."
-      },
-      {
-        "command": "moa.listModels",
-        "title": "MoA: List Available Models",
-        "category": "MoA",
-        "description": "Show all chat models currently registered with vscode.lm."
-      },
-      {
-        "command": "moa.testModels",
-        "title": "MoA: Probe Models (Ping Test)",
-        "category": "MoA",
-        "description": "Send a tiny 'PONG' request to each registered model to detect expired/invalid subscriptions."
+        "description": "Two-step flow: refs (checkbox multi-select) + aggregator (single-select). Shows all available vscode.lm models sorted by vendor; same-name models across vendors are disambiguated by [vendor] suffix. Stores m.id (unique) — fixes the same-name multi-pick bug."
       }
     ],
     "configuration": {
@@ -73,13 +61,13 @@
         "moa.refModels": {
           "type": "array",
           "default": [],
-          "description": "Reference advisor roles. Each item: {role, model, systemHint?}. Use 'Moa: Configure Models' command to set this interactively.",
+          "description": "Reference advisor models (equal-mode MoA). Each item: {role, model}. All refs share the same prompt (moa.sharedRefPrompt); `role` is a display label only, NOT a role specialization. Use 'Moa: Configure Models' command to set this interactively.",
           "items": {
             "type": "object",
             "properties": {
-              "role": { "type": "string", "description": "Display label, e.g. 'Technical' or 'Skeptical'" },
+              "role": { "type": "string", "description": "Display label (e.g. 'advisor_1'). Not injected into prompt." },
               "model": { "type": "string", "description": "Substring to match vscode.lm model name, e.g. 'GLM-5.2'" },
-              "systemHint": { "type": "string", "description": "Optional extra system-prompt hint prepended to user prompt." }
+              "systemHint": { "type": "string", "description": "Deprecated in v2 (equal mode). Kept for backward compat, ignored at runtime.", "deprecationMessage": "Equal-mode MoA ignores per-ref systemHint. Use moa.sharedRefPrompt instead." }
             },
             "required": ["role", "model"]
           },
@@ -95,32 +83,17 @@
           },
           "order": 2
         },
-        "moa.preferredModels": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": [],
-          "description": "Fallback model name substrings (used only when moa.refModels is empty).",
-          "order": 3
-        },
-        "moa.defaultPreset": {
-          "type": "string",
-          "default": "default",
-          "enum": ["default", "fast", "academic", "custom"],
-          "description": "Default preset to use when no preset is specified in the prompt.",
-          "order": 4
-        },
-        "moa.timeoutSec": {
-          "type": "number",
-          "default": 120,
-          "minimum": 10,
-          "description": "Per-call timeout in seconds.",
-          "order": 5
-        },
         "moa.parallelRefs": {
           "type": "boolean",
           "default": false,
           "description": "Fan out reference advisors in parallel (may cause cascading 4xx/5xx when models have expired subscriptions).",
-          "order": 6
+          "order": 3
+        },
+        "moa.sharedRefPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for the shared prompt prepended to every ref query. If empty (recommended), uses the built-in Hermes _REFERENCE_SYSTEM_PROMPT ported from NousResearch/hermes-agent. All refs get the SAME prompt — diversity comes from model differences, not role assignment.",
+          "order": 4
         }
       }
     }

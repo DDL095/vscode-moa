@@ -1,16 +1,20 @@
 /**
  * MoA ChatRequestHandler — the brain of the @moa participant.
  *
+ * v0.7.2: simplified. Only the P1 native path (vscode.lm) is wired up — the
+ * P2a/P2b/detectPath/preset/scripts paths are all removed because they were
+ * either unimplemented (P2a), unused (P2b needed Hermes which we replaced
+ * with native in v0.3.0), or dead code (preset was parsed but ignored at
+ * runtime).
+ *
  * Lifecycle per request:
- *   1. Parse prompt → extract preset + slash command.
- *   2. Detect execution path (P1 / P2a / P2b) from filesystem.
- *   3. Dispatch to the right runner (P1 native / P2b wrapper).
- *   4. Stream progress + final Markdown into the chat response stream.
- *   5. Surface followup suggestions and metadata.
+ *   1. Extract slash command (only `/help` is supported).
+ *   2. Fan out refs via vscode.lm, aggregate, stream Markdown.
+ *   3. Return ChatResult with metadata.
  */
 
-import * as vscode from 'vscode';
-import { detectPath, parsePrompt, runMoaWrapper, runP1Fanout } from './moaRunner';
+import * as vscode from "vscode";
+import { runP1Fanout } from "./moaRunner";
 
 export const moaHandler: vscode.ChatRequestHandler = async (
   request: vscode.ChatRequest,
@@ -18,100 +22,60 @@ export const moaHandler: vscode.ChatRequestHandler = async (
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken
 ): Promise<vscode.ChatResult> => {
-  const { presetName, userPrompt, command } = parsePrompt(
-    request.prompt,
-    request.command ?? ''
-  );
+  const command = request.command ?? "";
+  const userPrompt = request.prompt?.trim() ?? "";
 
-  // Slash command shortcuts.
-  if (command === 'help') {
+  // Slash command shortcut.
+  if (command === "help") {
     stream.markdown(buildHelpMarkdown());
-    return { metadata: { command, preset: presetName, path: 'help' } };
+    return { metadata: { command, path: "help" } };
   }
 
-  if (!userPrompt && command !== 'preset') {
+  if (!userPrompt) {
     stream.markdown(
-      '**[MoA Bridge]** ready. Type `@moa <your question>` to start a multi-perspective analysis.\n\n' +
-        'Tip: prefix with `preset=<name>` to pick a preset, e.g. `@moa preset=fast 分析 ...`.'
+      "**[MoA Bridge]** ready. Type `@moa <your question>` to start a multi-perspective analysis.\n\n" +
+        "Setup: Command Palette → `Moa: Configure Models` to pick your reference advisors and aggregator."
     );
-    return { metadata: { command, preset: presetName, path: 'noop' } };
+    return { metadata: { command, path: "noop" } };
   }
 
-  stream.progress(`[MoA] starting (preset=${presetName})...`);
-
-  const detection = await detectPath();
-  stream.progress(`[MoA] path=${detection.path} (scripts: ${detection.scriptsDir || 'n/a'})`);
+  stream.progress("[MoA] starting (equal-mode, Hermes prompt)...");
 
   try {
-    if (detection.path === 'P2b') {
-      stream.progress('[MoA] calling Hermes (P2b wrapper)...');
-      const result = await runMoaWrapper(
-        userPrompt || '(empty prompt)',
-        presetName,
-        detection,
-        stream,
-        token
-      );
-      stream.progress(`[MoA] done (${result.elapsed.toFixed(1)}s)`);
-      return {
-        metadata: { command, preset: result.preset, path: result.path, elapsedSec: result.elapsed },
-      };
-    }
-
-    if (detection.path === 'P1' || detection.path === 'unknown') {
-      // P1 path uses vscode.lm models — works even if no PowerShell scripts present.
-      stream.progress('[MoA] fan-out via vscode.lm (P1 native)...');
-      const result = await runP1Fanout(userPrompt, presetName, stream, token);
-      stream.progress(`[MoA] done (${result.elapsed.toFixed(1)}s, ${result.path})`);
-      return {
-        metadata: { command, preset: result.preset, path: result.path, elapsedSec: result.elapsed },
-      };
-    }
-
-    // P2a — ACP — not implemented in skeleton.
-    stream.markdown(
-      `**[Warning]** P2a (ACP protocol) detected but not implemented in v0.1.0 skeleton.\n\n` +
-        `Please install the Hermes CLI and use **P2b** instead, or fall back to **P1** (native).\n\n` +
-        `Detected scripts: \`${detection.scriptsDir}\``
-    );
+    const result = await runP1Fanout(userPrompt, stream, token);
+    stream.progress(`[MoA] done (${result.elapsed.toFixed(1)}s, ${result.path})`);
     return {
-      metadata: { command, preset: presetName, path: detection.path },
-      errorDetails: { message: 'P2a path not implemented in skeleton' },
+      metadata: { command, path: result.path, elapsedSec: result.elapsed },
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     stream.markdown(`**[Error]** MoA failed: ${message}`);
     return {
-      metadata: { command, preset: presetName, path: detection.path },
+      metadata: { command, path: "error" },
       errorDetails: { message },
     };
   }
 };
 
-// NOTE: Followups are surfaced via `participant.followupProvider` (configured
-// in extension.ts). The handler itself returns plain ChatResult without a
-// `followups` field — that field doesn't exist on ChatResult in @types/vscode.
-
 function buildHelpMarkdown(): string {
   return [
-    '## MoA Bridge - Usage',
-    '',
-    '**Trigger**: `@moa <your prompt>`',
-    '',
-    '**Optional preset**: prefix with `preset=<name>` — available presets live in `presets/` (`default`, `fast`, `academic`, `custom`).',
-    '',
-    '**Slash commands**:',
-    '- `@moa /preset preset=<name> ...` — switch preset',
-    '- `@moa /help` — show this help',
-    '',
-    '**Execution paths** (auto-detected):',
-    '- **P1** — native fan-out via `vscode.lm.selectChatModels` (default when no Hermes)',
-    '- **P2b** — call `MoaWrapper.ps1` via `pwsh` (when Hermes is installed)',
-    '- **P2a** — ACP protocol (skeleton stub; needs formulahendry.acp-client)',
-    '',
-    '**Limitations (v0.1.0 skeleton)**:',
-    '- P2a path is not implemented',
-    '- No streaming token-level progress from `vscode.lm` (only per-model turn boundaries)',
-    '- No preset hot-reload — restart the extension after editing `presets/*.json`',
-  ].join('\n');
+    "## MoA Bridge — Usage",
+    "",
+    "**Trigger**: `@moa <your question>`",
+    "",
+    "**Setup**: Command Palette → `Moa: Configure Models` to pick reference advisors (multi-select) and aggregator (single-select).",
+    "",
+    "**How it works (equal-mode MoA, Hermes style)**:",
+    "1. All reference advisors share the same Hermes `_REFERENCE_SYSTEM_PROMPT` — diversity comes from model differences (e.g. GLM vs DeepSeek vs MiniMax), not role assignment.",
+    "2. Each ref produces private advisory analysis (not a user-facing answer).",
+    "3. The aggregator synthesizes the refs into the final response.",
+    "",
+    "**Slash command**: `@moa /help` — show this help",
+    "",
+    "**Configuration (settings.json)**:",
+    "- `moa.refModels`: array of `{role, model}` where `model` is the unique `m.id` from vscode.lm (e.g. `gcmp.zhipu:::glm-5.2`).",
+    "- `moa.aggregator`: `{model, temperature}` where `model` is also an `m.id`.",
+    "- `moa.sharedRefPrompt`: optional override for the Hermes ref prompt (leave empty for built-in).",
+    "- `moa.parallelRefs`: fan out refs in parallel (may cascade failures when subscriptions expire).",
+  ].join("\n");
 }

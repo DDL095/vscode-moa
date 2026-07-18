@@ -15,172 +15,22 @@
  * it requires a separate "ACP client" extension to be running.
  */
 
-import { spawn } from 'child_process';
-import * as path from 'path';
 import * as vscode from 'vscode';
-import type { MoaPath, MoaRunResult, PathDetection, ParsedPrompt, RefModelConfig } from './types';
-
-/** Default preset name when none is specified. */
-export const DEFAULT_PRESET = 'default';
+import type { MoaPath, MoaRunResult, RefModelConfig } from './types';
 
 /**
- * Find the moa-bridge root directory by walking up from the extension location
- * until a directory containing both `scripts/MoaWrapper.ps1` and `presets/`
- * is found. Falls back to a sibling `moa-bridge` directory next to the
- * extension's parent.
- */
-export async function detectPath(): Promise<PathDetection> {
-  // Prefer the first opened workspace folder (typical layout in dev).
-  const wsFolders = vscode.workspace.workspaceFolders;
-  let candidateRoot: string | undefined;
-
-  if (wsFolders && wsFolders.length > 0) {
-    candidateRoot = wsFolders[0].uri.fsPath;
-  } else {
-    // Fallback: derive from extension location (`<root>/vscode-extension/dist`).
-    const extPath = vscode.extensions.getExtension('moa-bridge.moa-bridge')?.extensionPath;
-    if (extPath) {
-      candidateRoot = path.resolve(extPath, '..', '..');
-    }
-  }
-
-  if (!candidateRoot) {
-    return {
-      path: 'unknown',
-      workspaceRoot: '',
-      scriptsDir: '',
-      presetsDir: '',
-      capabilities: {},
-    };
-  }
-
-  const scriptsDir = path.join(candidateRoot, 'moa-bridge', 'scripts');
-  const presetsDir = path.join(candidateRoot, 'moa-bridge', 'presets');
-
-  // Naive capability check: does MoaWrapper.ps1 exist?
-  const wrapperExists = await pathExists(path.join(scriptsDir, 'MoaWrapper.ps1'));
-  const simExists = await pathExists(path.join(scriptsDir, 'MoaSim.ps1'));
-  const acpExists = await pathExists(path.join(scriptsDir, 'MoaAcp.ps1'));
-
-  let detected: MoaPath = 'unknown';
-  if (wrapperExists) {
-    detected = 'P2b';
-  } else if (simExists) {
-    detected = 'P1';
-  } else if (acpExists) {
-    detected = 'P2a';
-  }
-
-  return {
-    path: detected,
-    workspaceRoot: candidateRoot,
-    scriptsDir,
-    presetsDir,
-    capabilities: {
-      hasMoaWrapper: wrapperExists,
-      hasMoaSim: simExists,
-      hasMoaAcp: acpExists,
-    },
-  };
-}
-
-/**
- * Strip `preset=<name> ` prefix and slash-command prefix from the user prompt.
+ * Format a model for display in chat output: "Name [vendor]".
  *
- * Supported forms:
- *   - "preset=academic 分析 xxx"
- *   - "preset=fast"
- *   - "@moa preset=default 分析 xxx"
- */
-export function parsePrompt(rawPrompt: string, slashCommand: string): ParsedPrompt {
-  let prompt = rawPrompt.trim();
-  const command = slashCommand ?? '';
-
-  let presetName = DEFAULT_PRESET;
-
-  const presetMatch = prompt.match(/^preset\s*=\s*([a-zA-Z0-9_\-\.]+)\s*/i);
-  if (presetMatch) {
-    presetName = presetMatch[1];
-    prompt = prompt.slice(presetMatch[0].length).trim();
-  }
-
-  return { presetName, userPrompt: prompt, command };
-}
-
-/**
- * Run MoA via the P2b wrapper script.
+ * v0.7.2: vendor suffix is critical when multiple vendors register the same
+ * model name (e.g. "GLM-5.2 (CodingPlan)" exists under both gcmp.zhipu and
+ * gcmp.volcengine). Without it the user can't tell which instance is
+ * actually being called — this caused real misconfiguration in v0.7.0.
  *
- * Streams stdout lines into the chat response stream as Markdown so the user
- * sees progress incrementally. Errors from the script are surfaced verbatim.
+ * If vendor is missing/empty, falls back to just the name.
  */
-export function runMoaWrapper(
-  prompt: string,
-  preset: string,
-  detection: PathDetection,
-  stream: vscode.ChatResponseStream,
-  token: vscode.CancellationToken
-): Promise<MoaRunResult> {
-  return new Promise((resolve, reject) => {
-    if (detection.path !== 'P2b') {
-      reject(new Error(`P2b requested but wrapper script not found at ${detection.scriptsDir}`));
-      return;
-    }
-
-    const script = path.join(detection.scriptsDir, 'MoaWrapper.ps1');
-    const args = [
-      '-NoProfile',
-      '-File',
-      script,
-      '-Prompt', prompt,
-      '-Preset', preset,
-    ];
-
-    const start = Date.now();
-    stream.progress(`🚀 spawn pwsh MoaWrapper.ps1 (preset=${preset})`);
-
-    const child = spawn('pwsh', args, {
-      cwd: detection.workspaceRoot,
-      env: process.env,
-      windowsHide: true,
-    });
-
-    let stdoutBuf = '';
-    let stderrBuf = '';
-
-    child.stdout.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8');
-      stdoutBuf += text;
-      // Echo progress lines (anything before the final aggregated Markdown
-      // ends with a sentinel like "__MOA_END__" — see MoaWrapper.ps1 contract).
-      stream.markdown(text);
-    });
-
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderrBuf += chunk.toString('utf8');
-      stream.markdown(`\`\`\`\n${chunk.toString('utf8')}\n\`\`\`\n`);
-    });
-
-    token.onCancellationRequested(() => {
-      child.kill();
-      reject(new Error('MoA cancelled by user'));
-    });
-
-    child.on('error', (err) => reject(err));
-
-    child.on('close', (code) => {
-      const elapsed = (Date.now() - start) / 1000;
-      if (code !== 0) {
-        reject(new Error(`MoaWrapper.ps1 exited with code ${code}\nstderr: ${stderrBuf}`));
-        return;
-      }
-      resolve({
-        output: stdoutBuf,
-        elapsed,
-        path: 'P2b',
-        preset,
-      });
-    });
-  });
+function formatModel(m: { name: string; vendor?: string }): string {
+  const v = (m.vendor ?? '').trim();
+  return v ? `${m.name} [${v}]` : m.name;
 }
 
 /**
@@ -192,7 +42,6 @@ export function runMoaWrapper(
  */
 export async function runP1Fanout(
   prompt: string,
-  preset: string,
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken
 ): Promise<MoaRunResult> {
@@ -207,84 +56,86 @@ export async function runP1Fanout(
     (m) => !PLACEHOLDER_NAMES.has(m.name.toLowerCase().trim())
   );
 
-  // ---------- Resolve ref configuration (priority order) ----------
-  // 1. moa.refModels (structured, set via "Moa: Configure Models" command)
-  // 2. moa.preferredModels (simple substring whitelist)
-  // 3. auto: first 5 real candidates
+  // ---------- Resolve ref configuration ----------
+  // v0.7.0: Look up by m.id (unique) first; fall back to m.name substring
+  // for backward compat with configs saved by v0.6.x or earlier. This handles
+  // the "same model name under multiple vendors" case correctly — only the
+  // exact-id match wins.
   const config = vscode.workspace.getConfiguration('moa');
   const refModelsCfg: RefModelConfig[] = config.get<RefModelConfig[]>('refModels') ?? [];
-  const preferred: string[] = config.get<string[]>('preferredModels') ?? [];
 
-  let refsToUse: { model: vscode.LanguageModelChat; role: string; systemHint?: string }[] = [];
+  const refsToUse: { model: vscode.LanguageModelChat; label: string }[] = [];
 
-  if (refModelsCfg.length > 0) {
-    // Match each configured role to an actual model by substring.
-    for (const cfg of refModelsCfg) {
-      const match = realCandidates.find((m) =>
-        m.name.toLowerCase().includes(cfg.model.toLowerCase())
+  for (const cfg of refModelsCfg) {
+    // Primary: exact match on m.id (v0.7.0 saved configs).
+    let match = realCandidates.find((m) => (m.id ?? '') === cfg.model);
+    // Fallback: substring match on m.name (v0.6.x compat — picks the FIRST match).
+    if (!match) {
+      match = realCandidates.find((m) => m.name.toLowerCase().includes(cfg.model.toLowerCase()));
+    }
+    if (match) {
+      refsToUse.push({ model: match, label: cfg.role || match.name });
+    } else {
+      stream.markdown(
+        `**[config]** Ref "${cfg.role || cfg.model}" → model "${cfg.model}" not found in available models, skipping.\n\n`
       );
-      if (match) {
-        refsToUse.push({ model: match, role: cfg.role, systemHint: cfg.systemHint });
-      } else {
-        stream.markdown(
-          `**[config]** Ref "${cfg.role}" → model "${cfg.model}" not found in available models, skipping.\n\n`
-        );
-      }
-    }
-    stream.progress(`[MoA] using moa.refModels config: ${refsToUse.length}/${refModelsCfg.length} matched`);
-  } else if (preferred.length > 0) {
-    // Fallback to preferredModels (simple substring whitelist).
-    const matches = realCandidates.filter((m) =>
-      preferred.some((p) => m.name.toLowerCase().includes(p.toLowerCase()))
-    );
-    refsToUse = matches.slice(0, 3).map((m) => ({ model: m, role: m.name }));
-    stream.progress(`[MoA] using moa.preferredModels filter: ${preferred.join(', ')}`);
-  } else {
-    // Auto mode — take first 5 real candidates and probe.
-    stream.progress(
-      '[MoA] no `moa.refModels` or `moa.preferredModels` set — running Command Palette "Moa: Configure Models" is recommended.'
-    );
-  }
-
-  // If config yielded too few refs, fill from auto pool.
-  if (refsToUse.length < 3) {
-    const pool = realCandidates.filter((m) => !refsToUse.some((r) => r.model.id === m.id));
-    const fillCount = Math.min(5, pool.length);
-    for (let i = 0; i < fillCount && refsToUse.length < 5; i++) {
-      refsToUse.push({ model: pool[i], role: pool[i].name });
     }
   }
+  stream.progress(`[MoA] using moa.refModels: ${refsToUse.length}/${refModelsCfg.length} matched`);
 
   if (refsToUse.length === 0) {
     throw new Error(
-      'No usable chat models available. Run "Moa: Configure Models" to set up models, ' +
-        'or check that at least one LLM provider extension (GCMP, Copilot) is active.'
+      'No usable reference models. Run "Moa: Configure Models" to set up refs, ' +
+        'or check that your configured model substrings match real vscode.lm model names.'
     );
   }
-
-  // Probe up to 5 refs sequentially — keep first 3 that succeed.
-  // This handles the "registered but subscription expired" case.
-  const maxRefs = 3;
-  const probePool = refsToUse.slice(0, Math.min(5, refsToUse.length));
+  // Cap at 8 refs max (safety valve; UI also caps at 8).
+  const MAX_REFS = 8;
+  const probePool = refsToUse.length > MAX_REFS ? refsToUse.slice(0, MAX_REFS) : refsToUse;
   stream.progress(
-    `[MoA] probing ${probePool.length} model(s): ${probePool.map((r) => `${r.role}→${r.model.name}`).join(', ')}`
+    `[MoA] probing ${probePool.length} model(s): ${probePool.map((r) => `${r.label}→${formatModel(r.model)}`).join(', ')}`
   );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Built-in reference advisor system prompt (Hermes `_REFERENCE_SYSTEM_PROMPT`).
+  // Source: https://github.com/NousResearch/hermes-agent/blob/main/agent/moa_loop.py
+  //
+  // All refs share this SAME system prompt (equal-mode MoA). Diversity comes
+  // from the underlying model differences (GLM vs DeepSeek vs MiniMax), NOT
+  // from role assignment. The prompt reframes each ref as an advisory analyst
+  // that produces private guidance for the aggregator — not a final user-facing
+  // answer. This avoids the failure mode where refs refuse ("I can't access
+  // tools/files") or try to call tools they don't have.
+  //
+  // The trailing "Match the language of the user's question" line ensures refs
+  // follow the user's language (Chinese question → Chinese advice).
+  // ─────────────────────────────────────────────────────────────────────────
+  const SHARED_REF_PROMPT_DEFAULT = [
+    'You are a reference advisor in a Mixture of Agents (MoA) process. You are NOT the acting agent and you do NOT execute anything: you cannot call tools, run commands, browse, or access files, repositories, or URLs, and you should not try to or apologize for being unable to. A separate aggregator model will synthesize your advice with other advisors and produce the final response.',
+    '',
+    'Your job is to give your most intelligent analysis of the user\'s question: understand the goal, reason about the problem, and advise on what the answer should be. Surface the best approach, concrete reasoning, likely pitfalls and risks, and anything that might be missed or gotten wrong. Assume any referenced files, URLs, or systems exist and reason about them from the context given rather than asking for access.',
+    '',
+    'Respond with your advice directly — no preamble, no disclaimers about tools or access. Your response is private guidance handed to the aggregator, not an answer shown to the user.',
+    '',
+    'Match the language of the user\'s question (Chinese question → answer in Chinese, English question → answer in English).',
+  ].join('\n');
+  const sharedRefPrompt =
+    config.get<string>('sharedRefPrompt') ?? SHARED_REF_PROMPT_DEFAULT;
 
   type RefResult = {
     model: vscode.LanguageModelChat;
     name: string;
-    role: string;
+    label: string;
     text: string;
   };
   const successes: RefResult[] = [];
   const failures: { name: string; msg: string }[] = [];
 
   for (const ref of probePool) {
-    if (successes.length >= maxRefs) break;
-    const hintPrefix = ref.systemHint ? `${ref.systemHint}\n\n` : '';
+    // Equal-mode: same Hermes-style system prompt for every ref.
     const refPrompts: vscode.LanguageModelChatMessage[] = [
       vscode.LanguageModelChatMessage.User(
-        `${hintPrefix}You are one of several reference advisors (role: ${ref.role}). Provide a concise (<=200 word) perspective on:\n\n${prompt}`
+        `${sharedRefPrompt}\n\n=== USER QUESTION ===\n${prompt}`
       ),
     ];
     try {
@@ -293,50 +144,86 @@ export async function runP1Fanout(
       for await (const frag of response.text) {
         text += frag;
       }
-      stream.markdown(`**Ref [${ref.role} / ${ref.model.name}]**:\n\n${text}\n\n---\n\n`);
-      successes.push({ model: ref.model, name: ref.model.name, role: ref.role, text });
+      stream.markdown(`**Ref [${ref.label} / ${formatModel(ref.model)}]**:\n\n${text}\n\n---\n\n`);
+      successes.push({ model: ref.model, name: ref.model.name, label: ref.label, text });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const shortMsg = msg.length > 150 ? msg.substring(0, 150) + '...' : msg;
-      stream.markdown(`**Ref [${ref.role} / ${ref.model.name}]**: [skipped] ${shortMsg}\n\n---\n\n`);
-      failures.push({ name: `${ref.role}/${ref.model.name}`, msg });
+      stream.markdown(`**Ref [${ref.label} / ${formatModel(ref.model)}]**: [skipped] ${shortMsg}\n\n---\n\n`);
+      failures.push({ name: `${ref.label}/${ref.model.name}`, msg });
     }
   }
 
   // All refs failed — graceful degradation.
   if (successes.length === 0) {
     stream.markdown(
-      `**[MoA degraded]** All ${failures.length} candidate model(s) failed. ` +
+      `**[MoA degraded]** All ${failures.length} configured ref(s) failed. ` +
         `This usually means expired/invalid subscriptions or unsupported models.\n\n` +
         `**Troubleshooting**:\n` +
-        `- Open Command Palette → "GCMP: 设置辅助工具模型" to pick a valid model\n` +
-        `- Or set \`"moa.preferredModels": ["GLM-5.2", "DeepSeek-V4-Pro", "MiniMax-M3"]\` in settings.json\n` +
-        `- Failed models: ${failures.map((f) => f.name).join(', ')}\n\n`
+        `- Run "Moa: Probe Models (Smart)" to see which models still work\n` +
+        `- Then run "Moa: Configure Models" to pick working ones\n` +
+        `- Failed: ${failures.map((f) => f.name).join(', ')}\n\n`
     );
     return {
       output: '[all refs failed]',
       elapsed: (Date.now() - start) / 1000,
       path: 'P1-degraded',
-      preset,
     };
   }
 
   // Aggregator: prefer configured model, else first successful ref.
+  // v0.7.0: same lookup logic as refs — m.id first, substring fallback.
   const aggCfg = config.get<{ model?: string; temperature?: number }>('aggregator');
   let aggregator: vscode.LanguageModelChat = successes[0].model;
   if (aggCfg?.model) {
-    const match = realCandidates.find((m) =>
-      m.name.toLowerCase().includes(aggCfg.model!.toLowerCase())
-    );
+    let match = realCandidates.find((m) => (m.id ?? '') === aggCfg.model);
+    if (!match) {
+      match = realCandidates.find((m) => m.name.toLowerCase().includes(aggCfg.model!.toLowerCase()));
+    }
     if (match) aggregator = match;
   }
   stream.progress(
-    `[MoA] aggregator: ${aggregator.name} (using ${successes.length}/${successes.length + failures.length} successful refs)`
+    `[MoA] aggregator: ${formatModel(aggregator)} (using ${successes.length}/${successes.length + failures.length} successful refs)`
   );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Aggregator prompt (Hermes `aggregate_moa_context` synth_prompt, adapted).
+  // Source: https://github.com/NousResearch/hermes-agent/blob/main/agent/moa_loop.py
+  //
+  // Adapted for VSCode's 2-layer @moa: in Hermes, the aggregator produces
+  // "guidance for the acting agent". In VSCode, @moa IS the terminal, so the
+  // aggregator's output is the final user-facing answer. We keep Hermes's
+  // emphasis on next steps, tool-use strategy, risks, and disagreements, but
+  // frame it as a direct response (not "context for another agent").
+  //
+  // Reference outputs are joined using Hermes's exact format:
+  //   "Reference {idx} — {label}:\n{text}"
+  // ─────────────────────────────────────────────────────────────────────────
+  const joined = successes
+    .map((r, i) => `Reference ${i + 1} — ${r.label} (${r.name}):\n${r.text}`)
+    .join('\n\n');
 
   const aggMessages: vscode.LanguageModelChatMessage[] = [
     vscode.LanguageModelChatMessage.User(
-      `You are an aggregator. Synthesize the following advisor perspectives into a single coherent answer (Markdown). Keep the strongest points from each, resolve conflicts explicitly, and end with a one-line recommendation.\n\nUser question:\n${prompt}\n\nAdvisor responses:\n${successes.map((r, i) => `[${i + 1}] ${r.name}:\n${r.text}`).join('\n\n')}`
+      [
+        'You are the aggregator in a Mixture of Agents process. Synthesize the reference responses below into a single coherent, actionable response to the user.',
+        '',
+        'Focus on:',
+        '- The most accurate and complete answer to the user\'s question',
+        '- Concrete next steps or recommendations (when applicable)',
+        '- Key disagreements between the references, if any, and how to resolve them',
+        '- Risks, pitfalls, or caveats the user should know about',
+        '',
+        'Do NOT simply list or quote each reference. Produce a unified response that preserves the strongest points from each advisor and resolves conflicts explicitly. Write in Markdown.',
+        '',
+        'Match the language of the user\'s question (Chinese question → answer in Chinese, English question → answer in English).',
+        '',
+        '=== ORIGINAL USER QUESTION ===',
+        prompt,
+        '',
+        '=== REFERENCE RESPONSES ===',
+        joined,
+      ].join('\n')
     ),
   ];
 
@@ -360,19 +247,6 @@ export async function runP1Fanout(
     output: aggregated,
     elapsed: (Date.now() - start) / 1000,
     path: successes.length >= 2 ? 'P1' : 'P1-partial',
-    preset,
   };
 }
 
-/**
- * Tiny helper — promisified fs.access.
- */
-async function pathExists(p: string): Promise<boolean> {
-  try {
-    const fs = await import('fs/promises');
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
