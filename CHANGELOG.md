@@ -5,6 +5,66 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.14] - 2026-07-19
+
+### Added — Preset groups + true parallel ref fan-out
+
+Two long-requested features in one release. Both are fully backward-compatible: existing v0.14.13 configs continue to work and are auto-migrated on first use.
+
+#### 1. Preset groups (`moa.presets` + `moa.activePreset`)
+
+You can now save **multiple full-pipeline configurations** as named presets and switch between them with one click. Each preset bundles refs + aggregator + recon + L3 — switching a preset swaps the entire pipeline.
+
+**New settings**:
+- `moa.presets` (object): Map of `{ name → { refModels, aggregator, reconModel, l3Summarizer, description? } }`.
+- `moa.activePreset` (string): Key into `moa.presets` identifying the currently active group.
+
+**New commands**:
+- `MoA: Switch Preset` — QuickPick showing all saved presets with a one-line preview (`4 refs · agg=GLM-5.2 · recon=DeepSeek · L3=MiniMax-M3`). One-click switch, no re-configuration needed.
+- `MoA: Configure Models` (updated) — Now opens with a new **Step 0/4** to pick / create / delete a preset group before editing. Steps 1-4 then edit the selected preset's refs/aggregator/recon/L3.
+
+**Backward compatibility**:
+- Legacy flat config (`moa.refModels` + `moa.aggregator` + `moa.reconModel` + `moa.l3Summarizer`) is **auto-migrated** to `presets.default` on extension activation (idempotent — only runs if `moa.presets` is empty AND legacy config has refs).
+- Migration shows a one-time info notification: *"Your existing model configuration was migrated to the 'default' preset group."*
+- Legacy fields are NOT deleted — they serve as read-only fallback if `moa.presets` ever gets corrupted.
+- Runtime reads go through a new single-source-of-truth function `getActivePresetConfig()` (in `presetConfig.ts`), used by both `moaRunner.ts` and `moaOrchestrator.ts` to keep them in sync.
+
+**Typical usage**:
+- `"code"` preset: 4 refs + GLM aggregator + DeepSeek recon + MiniMax L3
+- `"research"` preset: 6 refs + MiniMax aggregator + GLM recon + L3 disabled
+- `"quick"` preset: 2 refs + GLM aggregator (no recon, no L3)
+
+Switch between them via `MoA: Switch Preset` based on the task at hand.
+
+#### 2. Real parallel ref fan-out (`moa.parallelRefs`)
+
+**Bug**: The `moa.parallelRefs` setting has existed since early v0.7.x and was documented as *"Fan out reference advisors in parallel"*, but **the code never read it** — refs always ran sequentially (`for (const ref of probePool) { await ref.model.sendRequest(...) }`). Setting `parallelRefs: true` had no effect.
+
+**Fix**: Extracted the ref execution into a new helper `runSingleRef()` (atomic unit, never throws — errors captured into `{ ok: false, error }`), and the ref prompt body into `buildRefPromptBody()` (built once, shared by all refs since they're equal-mode). The Phase 1 loop now has two branches:
+
+- **`parallelRefs: true` (new default)** — `Promise.allSettled(tasks.map(runSingleRef))`. All ref requests fire simultaneously; wall-clock time = slowest ref. N refs → theoretical N× speedup. Individual ref failures don't affect siblings.
+- **`parallelRefs: false`** — sequential `for-await` (legacy behavior). Use this if your provider rate-limits concurrent requests.
+
+**Default change**: `moa.parallelRefs` default flipped from `false` → `true`. If you experience cascading 429/5xx errors from your provider, set it back to `false`.
+
+### Changed
+- `moaRunner.ts` — Ref configuration now reads from `getActivePresetConfig()` instead of direct `config.get('refModels')`. Aggregator, recon, and L3 config reads similarly migrated.
+- `moaOrchestrator.ts` — Worker/aggregator resolution goes through `getActivePresetConfig()` (same single-source-of-truth as `moaRunner.ts`).
+- `l3Summarizer.ts` — L3 model ID resolution goes through `getActivePresetConfig()` when `opts.modelId` is not provided.
+- `extension.ts` — Registers new `moa.switchPreset` command; calls `migrateLegacyToPreset()` on activation (fire-and-forget).
+
+### Files
+- **NEW** `src/presetConfig.ts` (~400 LOC): `MoaPreset` lifecycle — `getActivePresetConfig()`, `migrateLegacyToPreset()`, `savePreset()`, `deletePreset()`, `setActivePreset()`, `listPresets()`.
+- **NEW** `src/types.ts`: `MoaPreset` interface added.
+- `src/moaRunner.ts`: `runSingleRef()` + `buildRefPromptBody()` helpers; parallel/serial Phase 1 branches; preset reads.
+- `src/moaConfig.ts`: `pickOrCreatePreset()` Step 0 UI; `switchPreset()` command; `askMakeActive()` helper; `shortModelName()` helper.
+- `src/moaOrchestrator.ts`: `resolveModels()` uses `getActivePresetConfig()`.
+- `src/l3Summarizer.ts`: `l3Summarize()` uses `getActivePresetConfig()` for default model ID.
+- `src/extension.ts`: registers `moa.switchPreset`; auto-migration on activate.
+- `package.json`: version bump; new `moa.presets` / `moa.activePreset` settings; new `moa.switchPreset` command; `moa.parallelRefs` default `false → true`.
+
+---
+
 ## [0.14.13] - 2026-07-19
 
 ### Changed — README rewrite: clear loop shapes + roadmap

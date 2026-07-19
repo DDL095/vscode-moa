@@ -30,7 +30,15 @@
  */
 
 import * as vscode from 'vscode';
-import type { RefModelConfig, AggregatorConfig, ReconConfig, L3Config } from './types';
+import type { RefModelConfig, AggregatorConfig, ReconConfig, L3Config, MoaPreset } from './types';
+import {
+  listPresets,
+  getActivePresetKey,
+  setActivePreset,
+  savePreset,
+  deletePreset,
+  getActivePresetConfig,
+} from './presetConfig';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Internal helpers: model identity, display, lookup.
@@ -280,8 +288,31 @@ export async function configureModels(): Promise<void> {
     return;
   }
 
-  const existingRefs = vscode.workspace.getConfiguration('moa').get<RefModelConfig[]>('refModels') ?? [];
-  const existingAgg = vscode.workspace.getConfiguration('moa').get<AggregatorConfig>('aggregator');
+  // ─────────────────────────────────────────────────────────────────────────
+  // v0.14.14 Step 0/4: Pick / create / delete a preset group.
+  //
+  // This is the entry point of the new 5-step flow. User can:
+  //   - Pick an existing preset to edit → loads its config into Steps 1-4
+  //   - Create a new preset → starts with empty/default config
+  //   - Delete an existing preset (except last one)
+  //   - Skip (Esc) → edits the currently active preset (backward compat)
+  //
+  // The preset picked here is what gets WRITTEN at the end of Step 4.
+  // We also offer to make it the active preset after saving.
+  // ─────────────────────────────────────────────────────────────────────────
+  const presetChoice = await pickOrCreatePreset();
+  if (!presetChoice) return; // user cancelled
+
+  // presetChoice.targetKey: which preset key we're editing
+  // presetChoice.makeActive: whether to set this preset active after saving
+  // presetChoice.seed: initial config for Steps 1-4 (existing preset values, or defaults for new)
+  const targetPresetKey = presetChoice.targetKey;
+  const seed = presetChoice.seed;
+
+  // Resolve existing refs/agg from the SEED (not from global config).
+  // This is the key change: Steps 1-4 now edit a SPECIFIC preset's values.
+  const existingRefs = seed.refModels;
+  const existingAgg = seed.aggregator;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Pre-pick logic (v0.7.0): UNIQUE by m.id — no more "4 refs → 11 picks".
@@ -382,7 +413,7 @@ export async function configureModels(): Promise<void> {
   //   - 其余选项是所有可用模型
   //   - 预勾选当前配置的 reconModel（空则勾 aggregator fallback 项）
   // ─────────────────────────────────────────────────────────────────────────
-  const existingRecon = vscode.workspace.getConfiguration('moa').get<ReconConfig>('reconModel');
+  const existingRecon = seed.reconModel;
   const RECON_FALLBACK_KEY = '__use_aggregator__';  // 特殊 sentinel key
   const reconFallbackLabel = `$(sync) Use aggregator (${displayLabel(aggModel)})`;
 
@@ -422,7 +453,7 @@ export async function configureModels(): Promise<void> {
   //   - 其余选项是所有可用模型
   //   - 默认推荐 MiniMax-M3（如可用）
   // ─────────────────────────────────────────────────────────────────────────
-  const existingL3 = vscode.workspace.getConfiguration('moa').get<L3Config>('l3Summarizer');
+  const existingL3 = seed.l3Summarizer;
   const L3_DISABLE_KEY = '__disable_l3__';
   const l3DisableLabel = `$(circle-slash) Disable L3 (use L2 semantic-boundary truncation only)`;
 
@@ -476,9 +507,26 @@ export async function configureModels(): Promise<void> {
 
   // v0.7.0: store m.id (unique).
   // v0.14.1: saveConfiguration 同时写到 User + Workspace，返回 boolean
-  const saved = await saveConfiguration(newRefs, aggKey, reconKey, l3Key);
+  // v0.14.14: 改为 savePreset —— 保存到 moa.presets[targetPresetKey] 而不是扁平字段
+  const presetToSave: MoaPreset = {
+    name: targetPresetKey,
+    refModels: newRefs,
+    aggregator: { model: aggKey, temperature: existingAgg?.temperature ?? 0.4 },
+    reconModel: { model: reconKey },
+    l3Summarizer: { model: l3Key },
+    description: seed.description,
+    createdAt: seed.createdAt ?? new Date().toISOString(),
+  };
+  const saved = await savePreset(targetPresetKey, presetToSave);
+
+  // 如果用户选了"切到这个 preset"，做切换
+  if (saved && presetChoice.makeActive) {
+    await setActivePreset(targetPresetKey);
+  }
+
   if (saved) {
     const parts = [
+      `preset=${targetPresetKey}${presetChoice.makeActive ? ' (active)' : ''}`,
       `${newRefs.length} ref(s)`,
       `aggregator=${displayLabel(aggModel)}`,
       `recon=${reconKey ? displayLabel(reconModel!) : '(= aggregator)'}`,
@@ -487,6 +535,296 @@ export async function configureModels(): Promise<void> {
     vscode.window.showInformationMessage(
       `MoA configured: ${parts.join(', ')}. Saved to User + Workspace. Try @moa <question> now.`
     );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.14.14: Preset group helpers (Step 0 UI + switchPreset command).
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Step 0 UI: Pick an existing preset to edit, create a new one, or delete one.
+ *
+ * Returns:
+ *   - undefined → user cancelled (Esc) → caller aborts configureModels
+ *   - { targetKey, makeActive, seed } → caller proceeds to Steps 1-4 with seed
+ *
+ * The seed is the initial config for Steps 1-4:
+ *   - For existing preset: that preset's current values
+ *   - For new preset: empty refs + empty aggregator (defaults)
+ *
+ * If user picks the currently active preset, `makeActive` is false (no-op).
+ * If user picks a non-active preset or creates new, we ask whether to switch.
+ */
+async function pickOrCreatePreset(): Promise<
+  | undefined
+  | {
+      targetKey: string;
+      makeActive: boolean;
+      seed: MoaPreset;
+    }
+> {
+  // Build option list
+  const presets = listPresets();
+  const activeKey = getActivePresetKey();
+
+  type PresetOption = {
+    label: string;
+    description: string;
+    detail: string;
+    action: 'edit' | 'new' | 'delete';
+    presetKey?: string;
+    seed?: MoaPreset;
+  };
+
+  const options: PresetOption[] = [];
+
+  // Existing presets (edit)
+  for (const { key, preset } of presets) {
+    const isActive = key === activeKey;
+    const refsCount = preset.refModels?.length ?? 0;
+    const aggName = preset.aggregator?.model || '(unset)';
+    options.push({
+      label: `$(pencil) ${key}${isActive ? ' (active)' : ''}`,
+      description: `${refsCount} refs · agg=${shortModelName(aggName)}`,
+      detail: `Edit this preset${isActive ? ' (currently active)' : ''}`,
+      action: 'edit',
+      presetKey: key,
+      seed: preset,
+    });
+  }
+
+  // Always offer "new"
+  options.push({
+    label: '$(add) Create new preset...',
+    description: 'Start with empty config',
+    detail: 'You\'ll be asked for a name after this step',
+    action: 'new',
+    seed: {
+      name: '',
+      refModels: [],
+      aggregator: { model: '' },
+      reconModel: { model: '' },
+      l3Summarizer: { model: '' },
+    },
+  });
+
+  // Offer delete if there are presets (and more than 1, or 1 with confirmation)
+  if (presets.length > 0) {
+    options.push({
+      label: '$(trash) Delete a preset...',
+      description: `${presets.length} preset(s) available`,
+      detail: 'Pick which one to remove',
+      action: 'delete',
+    });
+  }
+
+  const picked = await vscode.window.showQuickPick(options, {
+    title: 'MoA Configure — Step 0/4: Preset Group',
+    placeHolder: 'Pick a preset to edit, create new, or delete. Esc to edit the active preset.',
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+
+  if (!picked) {
+    // Esc = edit active preset (backward compat with v0.14.x flow)
+    const active = presets.find((p) => p.key === activeKey);
+    if (active) {
+      return {
+        targetKey: active.key,
+        makeActive: false,
+        seed: active.preset,
+      };
+    }
+    // No active preset → fall back to legacy flat config as seed
+    const activeCfg = getActivePresetConfig();
+    if (!activeCfg.isEmpty) {
+      return {
+        targetKey: 'default',
+        makeActive: false,
+        seed: {
+          name: 'default',
+          refModels: activeCfg.refModels,
+          aggregator: activeCfg.aggregator,
+          reconModel: activeCfg.reconModel,
+          l3Summarizer: activeCfg.l3Summarizer,
+          description: 'Auto-seeded from active config',
+          createdAt: new Date().toISOString(),
+        },
+      };
+    }
+    return undefined;
+  }
+
+  // Delete flow: sub-QuickPick to pick which one
+  if (picked.action === 'delete') {
+    const deleteOptions = presets.map(({ key, preset }) => ({
+      label: `$(trash) ${key}${key === activeKey ? ' (active)' : ''}`,
+      description: `${preset.refModels?.length ?? 0} refs`,
+      detail: preset.description ?? '',
+      presetKey: key,
+    }));
+    const toDelete = await vscode.window.showQuickPick(deleteOptions, {
+      title: 'Delete which preset?',
+      placeHolder: 'This cannot be undone (well, you can recreate it)',
+    });
+    if (!toDelete) return undefined;
+    const ok = await deletePreset(toDelete.presetKey!);
+    if (ok) {
+      vscode.window.showInformationMessage(`Preset "${toDelete.presetKey}" deleted.`);
+    }
+    return undefined; // delete is terminal — user has to re-invoke configureModels
+  }
+
+  // New preset flow: ask for name first
+  if (picked.action === 'new') {
+    const name = await vscode.window.showInputBox({
+      title: 'New preset name',
+      prompt: 'Letters, digits, dash, underscore. Will be used as the key in moa.presets.',
+      placeHolder: 'e.g. research, code, quick, fast',
+      validateInput: (v) => {
+        const trimmed = v.trim();
+        if (!trimmed) return 'Name cannot be empty';
+        if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+          return 'Use only letters, digits, dash, underscore (no spaces)';
+        }
+        const existing = listPresets().find((p) => p.key === trimmed);
+        if (existing) return `Preset "${trimmed}" already exists`;
+        return null;
+      },
+    });
+    if (!name) return undefined;
+    const newSeed: MoaPreset = {
+      name,
+      refModels: [],
+      aggregator: { model: '' },
+      reconModel: { model: '' },
+      l3Summarizer: { model: '' },
+      createdAt: new Date().toISOString(),
+    };
+    // For new preset, ask if they want it active
+    const makeActive = await askMakeActive(name);
+    return { targetKey: name, makeActive, seed: newSeed };
+  }
+
+  // Edit flow: if not active, ask if they want to switch
+  const targetKey = picked.presetKey!;
+  const makeActive =
+    targetKey === activeKey ? false : await askMakeActive(targetKey);
+  return { targetKey, makeActive, seed: picked.seed! };
+}
+
+/**
+ * Quick helper: ask user whether to make this preset active after saving.
+ */
+async function askMakeActive(presetKey: string): Promise<boolean> {
+  const choice = await vscode.window.showQuickPick(
+    [
+      { label: `$(check) Make "${presetKey}" active after saving`, value: true },
+      { label: '$(circle-slash) Just save, don\'t switch active', value: false },
+    ],
+    {
+      title: `Switch active preset?`,
+      placeHolder: `Current active is "${getActivePresetKey()}". Switch to "${presetKey}" after save?`,
+    }
+  );
+  return choice?.value ?? false;
+}
+
+/**
+ * Extract a short model name from a full m.id (e.g. "gcmp.zhipu:::GLM-5.2-CodingPlan" → "GLM-5.2").
+ * For QuickPick description display only.
+ */
+function shortModelName(modelId: string): string {
+  if (!modelId) return '(unset)';
+  // Take last segment after ":::" if present
+  const afterSeparator = modelId.includes(':::')
+    ? modelId.split(':::').pop()!
+    : modelId;
+  // Strip "(CodingPlan)" / "(TokenPlan)" suffixes for brevity
+  return afterSeparator.replace(/\s*\([^)]*\)\s*/g, '').trim() || afterSeparator;
+}
+
+/**
+ * v0.14.14: switchPreset command — QuickPick to switch active preset.
+ *
+ * Shows all presets with a preview of their models. One-click switch.
+ * Also offers "Configure models" as a shortcut (jump to configureModels).
+ */
+export async function switchPreset(): Promise<void> {
+  const presets = listPresets();
+  const activeKey = getActivePresetKey();
+
+  if (presets.length === 0) {
+    const choice = await vscode.window.showWarningMessage(
+      'No preset groups configured yet. Create one now?',
+      { modal: false },
+      'Create preset',
+      'Cancel'
+    );
+    if (choice === 'Create preset') {
+      await configureModels();
+    }
+    return;
+  }
+
+  type SwitchOption = {
+    label: string;
+    description: string;
+    detail: string;
+    presetKey?: string;
+    isShortcut?: boolean;
+  };
+
+  const options: SwitchOption[] = presets.map(({ key, preset }) => {
+    const isActive = key === activeKey;
+    const refsCount = preset.refModels?.length ?? 0;
+    const aggName = shortModelName(preset.aggregator?.model ?? '');
+    const reconName = preset.reconModel?.model
+      ? shortModelName(preset.reconModel.model)
+      : `(=agg)`;
+    const l3Name = preset.l3Summarizer?.model
+      ? shortModelName(preset.l3Summarizer.model)
+      : '(disabled)';
+    return {
+      label: `$(server) ${key}${isActive ? ' ✓ (active)' : ''}`,
+      description: `${refsCount} refs`,
+      detail: `agg=${aggName} · recon=${reconName} · L3=${l3Name}`,
+      presetKey: key,
+    };
+  });
+
+  // Shortcut: jump to full configure flow
+  options.push({
+    label: '$(gear) Configure models (full editor)...',
+    description: 'Open Step 0-4 flow',
+    detail: 'Edit refs/aggregator/recon/L3 in detail',
+    isShortcut: true,
+  });
+
+  const picked = await vscode.window.showQuickPick(options, {
+    title: 'MoA: Switch Active Preset',
+    placeHolder: `Current: "${activeKey}". Pick a preset to activate.`,
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+
+  if (!picked) return;
+
+  if (picked.isShortcut) {
+    await configureModels();
+    return;
+  }
+
+  if (picked.presetKey && picked.presetKey !== activeKey) {
+    const ok = await setActivePreset(picked.presetKey);
+    if (ok) {
+      vscode.window.showInformationMessage(
+        `MoA preset switched: "${activeKey}" → "${picked.presetKey}". @moa will use the new preset now.`
+      );
+    }
+  } else if (picked.presetKey === activeKey) {
+    vscode.window.showInformationMessage(`"${activeKey}" is already active.`);
   }
 }
 

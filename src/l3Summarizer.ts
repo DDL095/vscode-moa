@@ -37,6 +37,8 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as path from 'path';
 import * as fs from 'fs';
+// v0.14.14: 读 L3 模型配置时统一走 preset
+import { getActivePresetConfig } from './presetConfig';
 
 /**
  * L3 孙代理调用参数。
@@ -200,11 +202,12 @@ export async function l3Summarize(opts: L3SummarizeOptions): Promise<L3Summarize
   const configuredTarget = config.get<number>('reconL3TargetChars');
   const target = opts.targetChars ?? configuredTarget ?? DEFAULT_TARGET_CHARS;
 
-  // v0.14.0: 从配置读取模型 ID（opts.modelId 优先，否则读 moa.l3Summarizer.model）
+  // v0.14.0: 从配置读取模型 ID（opts.modelId 优先，否则读 activePreset.l3Summarizer.model）
+  // v0.14.14: 改为走 preset 统一读取（getActivePresetConfig）
   let modelId = opts.modelId;
   if (!modelId) {
-    const l3Cfg = config.get<{ model?: string }>('l3Summarizer');
-    modelId = l3Cfg?.model ?? '';
+    const presetCfg = getActivePresetConfig();
+    modelId = presetCfg.isEmpty ? '' : (presetCfg.l3Summarizer.model ?? '');
   }
 
   // 空配置 = 禁用 L3

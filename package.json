@@ -1,8 +1,8 @@
 {
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "description": "@moa chat participant + moa_recon and moa_analyze LM tools. v0.14.13: README 大改 —— What it does 章节现在清楚画出两条路径的循环形态（@moa 的 sufficiencyLoop + #moa_orchestrate 的完整 Hermes 迭代闭环），新增 Roadmap 章节（v0.15+ 计划：acting → recon 反馈闭环，完全 LLM 主导的循环控制）。同时加 Marketplace badge、Install 改为 Marketplace 优先、修正 release badge 到 v0.14.12。",
-  "version": "0.14.13",
+  "description": "Mixture-of-Agents for VSCode Copilot Chat. Runs multi-LLM fan-out (recon → N refs → aggregator → acting agent) through the native vscode.lm API. Supports @moa chat participant, moa_recon / moa_analyze / moa_orchestrate LM tools, preset groups, and parallel reference advisors. Vendor-agnostic — works with Copilot, GCMP, or any extension exposing LanguageModelChat.",
+  "version": "0.14.14",
   "publisher": "dudali095",
   "license": "MIT",
   "repository": {
@@ -72,7 +72,13 @@
         "command": "moa.configureModels",
         "title": "MoA: Configure Models",
         "category": "MoA",
-        "description": "v0.14.0: Four-step flow — (1/4) refs (checkbox multi-select, 2-8), (2/4) aggregator (single-select checkbox), (3/4) recon agent (single-select, default=aggregator), (4/4) L3 summarizer (single-select + 'Disable L3' option). All steps use checkbox UI for clarity of current selection."
+        "description": "v0.14.14: Five-step flow — (0/4) pick/create/delete preset group, (1/4) refs (checkbox multi-select, 2-8), (2/4) aggregator (single-select checkbox), (3/4) recon agent (single-select, default=aggregator), (4/4) L3 summarizer (single-select + 'Disable L3' option). All steps use checkbox UI for clarity of current selection."
+      },
+      {
+        "command": "moa.switchPreset",
+        "title": "MoA: Switch Preset",
+        "category": "MoA",
+        "description": "v0.14.14: QuickPick to switch the active preset group. Shows all saved presets with a preview of which models they use (refs count + aggregator + recon + L3). One-click switch, no need to re-configure models."
       },
       {
         "command": "moa.probeTools",
@@ -328,9 +334,33 @@
         },
         "moa.parallelRefs": {
           "type": "boolean",
-          "default": false,
-          "description": "Fan out reference advisors in parallel (may cause cascading 4xx/5xx when models have expired subscriptions).",
+          "default": true,
+          "description": "v0.14.14: Fan out reference advisors in parallel (Promise.allSettled). When true (default), all ref requests fire simultaneously → wall-clock time = slowest ref. When false, refs run sequentially (safer for providers that rate-limit concurrent requests). NOTE: pre-v0.14.14 this setting existed but was never read by code; v0.14.14 makes it actually work.",
           "order": 3
+        },
+        "moa.presets": {
+          "type": "object",
+          "default": {},
+          "description": "v0.14.14: Named preset groups. Each value is a full pipeline config: {name, refModels, aggregator, reconModel, l3Summarizer, description?}. Switch active preset via 'Moa: Switch Preset' command. Legacy flat config (moa.refModels + moa.aggregator + ...) is auto-migrated to presets.default on first use.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "refModels": { "type": "array" },
+              "aggregator": { "type": "object" },
+              "reconModel": { "type": "object" },
+              "l3Summarizer": { "type": "object" },
+              "description": { "type": "string" },
+              "createdAt": { "type": "string" }
+            }
+          },
+          "order": 50
+        },
+        "moa.activePreset": {
+          "type": "string",
+          "default": "default",
+          "description": "v0.14.14: Key into moa.presets identifying the currently active group. Switch via 'Moa: Switch Preset' command. When the referenced preset doesn't exist, falls back to the first available preset, then to legacy flat config.",
+          "order": 51
         },
         "moa.sharedRefPrompt": {
           "type": "string",
@@ -485,3 +515,4 @@
     "webpack-cli": "^5.1.0"
   }
 }
+

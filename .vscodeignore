@@ -7,3 +7,11 @@ tsconfig.json
 webpack.config.js
 .gitignore
 .vscodeignore
+# v0.14.14: exclude build artifacts and temp files
+tsc_output.txt
+*.bak
+.prettierrc
+.editorconfig
+eslint.config.mjs
+# old vsix packages (keep only the latest in releases, not in extension)
+moa-bridge-*.vsix

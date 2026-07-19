@@ -28,6 +28,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { promises as fs } from 'fs';
+// v0.14.14: 统一通过 preset 读取 worker/aggregator 配置
+import { getActivePresetConfig } from './presetConfig';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types
@@ -166,9 +168,16 @@ async function resolveModels(): Promise<{
   const PLACEHOLDER = new Set(['auto', 'automatic', 'default', '']);
   const real = all.filter((m) => !PLACEHOLDER.has(m.name.toLowerCase().trim()));
 
-  const config = vscode.workspace.getConfiguration('moa');
-  const refCfg = config.get<Array<{ role: string; model: string }>>('refModels') ?? [];
-  const aggCfg = config.get<{ model?: string }>('aggregator');
+  // v0.14.14: 统一通过 preset 读取（替代直接 config.get）
+  // 解析顺序：moa.presets[activePreset] → legacy flat config → isEmpty
+  const activePreset = getActivePresetConfig();
+  if (activePreset.isEmpty) {
+    throw new Error(
+      'No preset configured. Run "Moa: Configure Models" to set up refs/aggregator.'
+    );
+  }
+  const refCfg = activePreset.refModels;
+  const aggCfg = activePreset.aggregator;
 
   const workers: ResolvedModel[] = [];
   for (const cfg of refCfg) {
@@ -179,7 +188,7 @@ async function resolveModels(): Promise<{
 
   if (workers.length === 0) {
     throw new Error(
-      'No usable worker models. Run "Moa: Configure Models" to set moa.refModels.'
+      `No usable worker models in preset "${activePreset.activeName}". Run "Moa: Configure Models" to set refs.`
     );
   }
 

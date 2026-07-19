@@ -22,6 +22,7 @@ import type { MoaPath, MoaRunResult, RefModelConfig } from './types';
 import { buildWorkspaceContext } from './workspaceContext';
 import { runActingAgent, runReconAgent } from './actingAgent';
 import type { CapturedToolCall } from './actingAgent';
+import { getActivePresetConfig } from './presetConfig';
 // v0.13.0: L3 summarizer（孙代理）—— 仅在使用时动态 import，避免影响启动
 import { shouldTriggerL3 } from './l3Summarizer';
 
@@ -143,7 +144,23 @@ export async function runP1Fanout(
   // the "same model name under multiple vendors" case correctly — only the
   // exact-id match wins.
   const config = vscode.workspace.getConfiguration('moa');
-  const refModelsCfg: RefModelConfig[] = config.get<RefModelConfig[]>('refModels') ?? [];
+
+  // v0.14.14: 统一通过 preset 配置读取（替代直接读 moa.refModels）。
+  // getActivePresetConfig() 解析顺序：
+  //   1. moa.presets[activePreset] —— 新机制
+  //   2. legacy flat config (refModels+aggregator+reconModel+l3Summarizer) —— 向后兼容
+  //   3. { isEmpty: true } —— 未配置
+  const activePreset = getActivePresetConfig();
+  if (activePreset.isEmpty) {
+    throw new Error(
+      'No preset configured. Run "Moa: Configure Models" to set up refs/aggregator/recon/L3, ' +
+        'or "Moa: Switch Preset" if you have saved presets.'
+    );
+  }
+  const refModelsCfg: RefModelConfig[] = activePreset.refModels;
+  stream.progress(
+    `[MoA] active preset: "${activePreset.activeName}"${activePreset.fromLegacy ? ' (legacy)' : ''} (${refModelsCfg.length} refs configured)`
+  );
 
   const refsToUse: { model: vscode.LanguageModelChat; label: string }[] = [];
 
@@ -266,11 +283,15 @@ export async function runP1Fanout(
   //     markdown (visible inline AND recorded in history). Use this if you
   //     want Copilot to reference individual ref opinions in follow-ups.
   const refDisplayMode = config.get<'thinking' | 'verbose'>('refDisplayMode') ?? 'thinking';
+  // v0.14.14: 真正读取 parallelRefs 配置（之前从未被读取过）
+  // 默认 true —— 并行 fan-out，wall-clock = 最慢的 ref
+  // 设为 false 时退化为串行（老行为）
+  const parallelRefs = config.get<boolean>('parallelRefs') ?? true;
   const refChannel = refDisplayMode === 'thinking' ? createOutputChannel() : undefined;
   if (refChannel) {
     refChannel.appendLine(`=== @moa request @ ${new Date().toISOString()} ===`);
     refChannel.appendLine(`Prompt: ${prompt}`);
-    refChannel.appendLine(`Mode: ${refDisplayMode}, Refs: ${probePool.length}`);
+    refChannel.appendLine(`Mode: ${refDisplayMode}, Refs: ${probePool.length}, Parallel: ${parallelRefs}`);
     refChannel.appendLine('');
   }
 
@@ -308,8 +329,9 @@ export async function runP1Fanout(
   // ─────────────────────────────────────────────────────────────────────────
   // v0.9.0: Resolve aggregator model EARLY (recon reuses it).
   // Original v0.8.0 resolved aggregator after refs; we now need it before Phase 0.
+  // v0.14.14: 改为读 activePreset.aggregator（不再直接 config.get('aggregator')）
   // ─────────────────────────────────────────────────────────────────────────
-  const aggCfg = config.get<{ model?: string; temperature?: number }>('aggregator');
+  const aggCfg = activePreset.aggregator;
   let aggregator: vscode.LanguageModelChat = probePool[0].model;
   if (aggCfg?.model) {
     let aggMatch = realCandidates.find((m) => (m.id ?? '') === aggCfg.model);
@@ -323,15 +345,16 @@ export async function runP1Fanout(
 
   // ─────────────────────────────────────────────────────────────────────────
   // v0.14.0: Resolve recon model — 可独立配置，空时 fallback 到 aggregator
+  // v0.14.14: 改为读 activePreset.reconModel
   //
   // 设计：
-  //   - 读 moa.reconModel.model（vscode.lm m.id）
+  //   - 读 activePreset.reconModel.model（vscode.lm m.id）
   //   - 空字符串 / 未配置 → 复用 aggregator（保持 v0.13.x 行为）
   //   - 配置了 → 用对应模型（用于"aggregator 用 GLM-5.2，recon 用 DeepSeek" 等场景）
   //
   // 决策顺序：精确 id 匹配 → name 子串 → fallback 到 aggregator
   // ─────────────────────────────────────────────────────────────────────────
-  const reconCfg = config.get<{ model?: string; temperature?: number }>('reconModel');
+  const reconCfg = activePreset.reconModel;
   let reconModel: vscode.LanguageModelChat = aggregator;  // 默认 = aggregator
   if (reconCfg?.model && reconCfg.model.trim().length > 0) {
     let reconMatch = realCandidates.find((m) => (m.id ?? '') === reconCfg.model);
@@ -610,120 +633,120 @@ export async function runP1Fanout(
     //   3. user question
     // No workspace context, no active editor, no project tree.
     // If recon didn't gather enough, refs flag gaps in JSON "missing" field.
+    //
+    // v0.14.14: 真正实现 moa.parallelRefs
+    //   - parallelRefs=true (默认): Promise.allSettled 并行 fan-out
+    //     wall-clock = max(ref durations)，N 个 ref 理论上 N 倍速
+    //   - parallelRefs=false: 串行（老行为，适合 provider 限流场景）
+    //
+    // pre-v0.14.14: parallelRefs 配置项存在但从未被读取，永远是串行。
+    // v0.14.14 修复了这个挂着的开关，默认并行。
     successes.length = 0;  // Clear per-round; final round's analyses feed aggregator.
 
-    for (const ref of probePool) {
-      // v0.12.5: Removed wsContextText — refs are pure reasoning layer.
-      const refPromptParts: string[] = [sharedRefPrompt, ''];
-      if (reconSummary) {
-        refPromptParts.push(
-          '=== RECON DATA (collected by recon agent) ===',
-          'Below is the raw context collected by the recon agent. Use it to give grounded analysis. If you need MORE information (specific files, symbols, or context) that wasn\'t collected, indicate so in your JSON output.',
-          '',
-          reconSummary,
-          ''
-        );
-      } else {
-        // No recon data — refs reason about the abstract question.
-        // For research/literature tasks this is fine (no files to read).
-        // For code tasks, refs will likely flag "missing" → triggers recon.
-        refPromptParts.push(
-          '=== RECON DATA ===',
-          '(no recon data yet — reason about the question abstractly,',
-          ' or flag specific files/info needed in the "missing" field)',
-          ''
-        );
-      }
-      refPromptParts.push('=== USER QUESTION ===', prompt, '');
-      refPromptParts.push(
-        '=== OUTPUT FORMAT (REQUIRED) ===',
-        'Respond with a JSON object wrapped in ```json fences. Schema:',
-        '```json',
-        '{',
-        '  "sufficient": true|false,',
-        '  "missing": ["specific file path / symbol / info you still need", ...],',
-        '  "analysis": "your full detailed analysis"',
-        '}',
-        '```',
-        '- "sufficient": true if the recon data above is enough for grounded analysis.',
-        '              false if critical information is missing (list them in "missing").',
-        '- "missing": when sufficient=false, list SPECIFIC items (file paths, symbol names,',
-        '            line ranges, etc.) — the recon agent will collect them in the next round.',
-        '- "analysis": your full analysis. ALWAYS provide this, even if sufficient=false.',
-        '             This is what the aggregator will synthesize into the final answer.',
-        '',
-        '=== OUTPUT DEPTH (agent judgment) ===',
-        'You are an expert advisor. Calibrate your output depth to the question:',
-        '',
-        '- For RESEARCH/LITERATURE questions (mechanism review, multi-dimensional analysis,',
-        '  "what is X", comparative synthesis): produce a COMPREHENSIVE analysis covering',
-        '  every dimension the user asked about. The recon agent gathered rich context for',
-        '  you — USE IT. If recon data has 50K+ chars of literature, your analysis should',
-        '  proportionally unpack that richness, not compress it into a brief.',
-        '',
-        '- For NARROW CODE questions (specific bug, single function, quick lookup):',
-        '  be CONCISE and surgical. No padding.',
-        '',
-        '- Judge by the question, not by a fixed length. A "review hibernation mechanisms"',
-        '  question deserves 10x the depth of a "what does config.timeout do" question.',
-        '',
-        'Anti-patterns to AVOID on research questions:',
-        '  - One-paragraph summaries when recon data has 5+ distinct aspects',
-        '  - Listing paper titles without extracting their actual findings',
-        '  - Hand-waving ("many factors are involved") instead of naming specific genes/',
-        '    pathways/numbers from the recon data',
-        '  - Stopping at 2-3 sentences per subtopic when the user asked for systematic coverage',
-        '',
-        'Structure with ## subheadings for each major dimension the user requested.',
-        'Cite specific recon data points with [recon: ...] labels.',
-        'Include your training knowledge with [training: ...] labels when it adds value.',
-        'Match the language of the user\'s question.'
+    // Build the ref prompt body ONCE (same for all refs — equal-mode MoA).
+    // Each ref gets the same prompt; diversity comes from model differences.
+    const refPromptBody = buildRefPromptBody(sharedRefPrompt, reconSummary, prompt);
+
+    // Progress indicator for thinking mode (fired once per round, not per ref,
+    // because in parallel mode we can't track individual progress).
+    if (refDisplayMode === 'thinking') {
+      const refLabels = probePool.map((r) => `${r.label}/${formatModel(r.model)}`).join(', ');
+      stream.progress(
+        `[MoA] Phase 1 round ${round}: ${probePool.length} ref(s) ${parallelRefs ? 'in parallel' : 'sequentially'} — ${refLabels}`
       );
+    }
 
-      const refPrompts: vscode.LanguageModelChatMessage[] = [
-        vscode.LanguageModelChatMessage.User(refPromptParts.join('\n')),
-      ];
+    if (parallelRefs) {
+      // ── 并行路径 (v0.14.14 default) ──────────────────────────────────
+      // Promise.allSettled: 所有 ref 同时发出，单个失败不影响其他。
+      // wall-clock = 最慢的 ref 耗时（而非所有 ref 之和）。
+      const tasks = probePool.map((ref) => runSingleRef(ref, refPromptBody, round, token));
+      const results = await Promise.allSettled(tasks);
 
-      if (refDisplayMode === 'thinking') {
-        stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} thinking (round ${round})...`);
-      }
-
-      // v0.14.9: 不显式设置 maxOutputTokens（避免 provider 兼容性问题）。
-      // 改为通过 prompt agent 化引导 LLM 自己判断输出深度。
-      // 见上方 ANALYSIS DEPTH REQUIREMENT 块。
-      try {
-        const response = await ref.model.sendRequest(refPrompts, {}, token);
-        let text = '';
-        for await (const frag of response.text) {
-          text += frag;
-        }
-        if (refDisplayMode === 'verbose') {
-          stream.markdown(`**Ref [${ref.label} / ${formatModel(ref.model)} (round ${round})]**:\n\n${text}\n\n---\n\n`);
-        } else {
-          refChannel?.appendLine(`--- Ref ${ref.label} / ${formatModel(ref.model)} (round ${round}) ---`);
-          refChannel?.appendLine(text);
-          refChannel?.appendLine('');
+      // 按原顺序处理结果（保持 successes 顺序稳定，便于日志与 aggregator）
+      for (let i = 0; i < probePool.length; i++) {
+        const ref = probePool[i];
+        const result = results[i];
+        if (result.status === 'fulfilled' && result.value.ok) {
+          const text = result.value.text;
+          if (refDisplayMode === 'verbose') {
+            stream.markdown(`**Ref [${ref.label} / ${formatModel(ref.model)} (round ${round})]**:\n\n${text}\n\n---\n\n`);
+          } else {
+            refChannel?.appendLine(`--- Ref ${ref.label} / ${formatModel(ref.model)} (round ${round}) ---`);
+            refChannel?.appendLine(text);
+            refChannel?.appendLine('');
+          }
+          successes.push({ model: ref.model, name: ref.model.name, label: ref.label, text });
+          if (dumpDir) {
+            dumpRefOutput(dumpDir, successes.length - 1, ref.label, ref.model.name, text, round);
+          }
           stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} done (${text.length} chars, round ${round})`);
+        } else if (result.status === 'fulfilled' && !result.value.ok) {
+          // runSingleRef 内部捕获的错误
+          const msg = result.value.error ?? 'unknown error';
+          const shortMsg = msg.length > 150 ? msg.substring(0, 150) + '...' : msg;
+          if (refDisplayMode === 'verbose') {
+            stream.markdown(`**Ref [${ref.label} / ${formatModel(ref.model)} (round ${round})]**: [skipped] ${shortMsg}\n\n---\n\n`);
+          } else {
+            stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} FAILED (round ${round}): ${shortMsg}`);
+            refChannel?.appendLine(`--- Ref ${ref.label} / ${formatModel(ref.model)} [FAILED round ${round}] ---`);
+            refChannel?.appendLine(msg);
+            refChannel?.appendLine('');
+          }
+          failures.push({ name: `${ref.label}/${ref.model.name}`, msg });
+        } else if (result.status === 'rejected') {
+          // Promise rejected (shouldn't happen — runSingleRef catches all)
+          // 加 result.status === 'rejected' 类型保护，让 TS 知道这里是 rejected 分支
+          const reason = (result as PromiseRejectedResult).reason;
+          const msg = String(reason instanceof Error ? reason.message : reason);
+          failures.push({ name: `${ref.label}/${ref.model.name}`, msg });
+          stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} CRASHED (round ${round}): ${msg}`);
         }
-        successes.push({ model: ref.model, name: ref.model.name, label: ref.label, text });
-        // v0.14.3: 落盘 ref 输出
-        if (dumpDir) {
-          dumpRefOutput(dumpDir, successes.length - 1, ref.label, ref.model.name, text, round);
+      }
+    } else {
+      // ── 串行路径 (legacy behavior) ───────────────────────────────────
+      // 逐个 await，单 ref 完成后才跑下一个。适合 provider 限流场景。
+      for (const ref of probePool) {
+        if (token.isCancellationRequested) break;
+        if (refDisplayMode === 'thinking') {
+          stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} thinking (round ${round})...`);
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const shortMsg = msg.length > 150 ? msg.substring(0, 150) + '...' : msg;
-        if (refDisplayMode === 'verbose') {
-          stream.markdown(`**Ref [${ref.label} / ${formatModel(ref.model)} (round ${round})]**: [skipped] ${shortMsg}\n\n---\n\n`);
+        const result = await runSingleRef(ref, refPromptBody, round, token);
+        if (result.ok) {
+          const text = result.text;
+          if (refDisplayMode === 'verbose') {
+            stream.markdown(`**Ref [${ref.label} / ${formatModel(ref.model)} (round ${round})]**:\n\n${text}\n\n---\n\n`);
+          } else {
+            refChannel?.appendLine(`--- Ref ${ref.label} / ${formatModel(ref.model)} (round ${round}) ---`);
+            refChannel?.appendLine(text);
+            refChannel?.appendLine('');
+            stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} done (${text.length} chars, round ${round})`);
+          }
+          successes.push({ model: ref.model, name: ref.model.name, label: ref.label, text });
+          if (dumpDir) {
+            dumpRefOutput(dumpDir, successes.length - 1, ref.label, ref.model.name, text, round);
+          }
         } else {
-          stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} FAILED (round ${round}): ${shortMsg}`);
-          refChannel?.appendLine(`--- Ref ${ref.label} / ${formatModel(ref.model)} [FAILED round ${round}] ---`);
-          refChannel?.appendLine(msg);
-          refChannel?.appendLine('');
+          const msg = result.error ?? 'unknown error';
+          const shortMsg = msg.length > 150 ? msg.substring(0, 150) + '...' : msg;
+          if (refDisplayMode === 'verbose') {
+            stream.markdown(`**Ref [${ref.label} / ${formatModel(ref.model)} (round ${round})]**: [skipped] ${shortMsg}\n\n---\n\n`);
+          } else {
+            stream.progress(`Ref ${ref.label} / ${formatModel(ref.model)} FAILED (round ${round}): ${shortMsg}`);
+            refChannel?.appendLine(`--- Ref ${ref.label} / ${formatModel(ref.model)} [FAILED round ${round}] ---`);
+            refChannel?.appendLine(msg);
+            refChannel?.appendLine('');
+          }
+          failures.push({ name: `${ref.label}/${ref.model.name}`, msg });
         }
-        failures.push({ name: `${ref.label}/${ref.model.name}`, msg });
       }
     }
+
+    // ── v0.14.14: 老 Phase 1 串行循环体已移除 ──
+    // 原来 `for (const ref of probePool) { await ref.model.sendRequest(...) }` 的
+    // prompt 构造 + sendRequest + 错误处理 整段 (~115 行) 被上方的
+    // parallelRefs 分支 (Promise.allSettled) 和串行 fallback 分支替代。
+    // Ref prompt 构造下沉到 buildRefPromptBody()，执行下沉到 runSingleRef()。
 
     // Surface OutputChannel so user can inspect ref detail (best-effort).
     if (refDisplayMode === 'thinking' && refChannel && (successes.length > 0 || failures.length > 0)) {
@@ -1063,6 +1086,148 @@ export async function runP1Fanout(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// v0.14.14: Ref fan-out helpers (并行/串行统一调用)
+//
+// 把原来散在 for 循环里的两块逻辑抽出来：
+//   1. buildRefPromptBody: 构造所有 ref 共用的 prompt body（equal-mode MoA）
+//   2. runSingleRef: 单个 ref 的 sendRequest + 流式收集 + 错误捕获
+//
+// 这样并行路径 (Promise.allSettled) 和串行路径 (for-await) 可以复用同一份代码，
+// 避免逻辑分叉。runSingleRef 永不 throw —— 所有错误都捕获后返回 { ok: false }。
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Build the ref prompt body shared by all refs (equal-mode MoA).
+ *
+ * Extracted from the original inline for-loop body in v0.14.14 to enable
+ * parallel fan-out: the prompt is identical for all refs, so we build it
+ * once and pass to each runSingleRef call.
+ *
+ * Layout:
+ *   - sharedRefPrompt (system prompt)
+ *   - RECON DATA block (if reconSummary non-empty)
+ *   - USER QUESTION
+ *   - OUTPUT FORMAT (JSON schema with sufficient/missing/analysis)
+ *   - OUTPUT DEPTH guidance
+ */
+function buildRefPromptBody(
+  sharedRefPrompt: string,
+  reconSummary: string,
+  userPrompt: string
+): string {
+  const parts: string[] = [sharedRefPrompt, ''];
+
+  if (reconSummary) {
+    parts.push(
+      '=== RECON DATA (collected by recon agent) ===',
+      'Below is the raw context collected by the recon agent. Use it to give grounded analysis. If you need MORE information (specific files, symbols, or context) that wasn\'t collected, indicate so in your JSON output.',
+      '',
+      reconSummary,
+      ''
+    );
+  } else {
+    parts.push(
+      '=== RECON DATA ===',
+      '(no recon data yet — reason about the question abstractly,',
+      ' or flag specific files/info needed in the "missing" field)',
+      ''
+    );
+  }
+
+  parts.push('=== USER QUESTION ===', userPrompt, '');
+
+  parts.push(
+    '=== OUTPUT FORMAT (REQUIRED) ===',
+    'Respond with a JSON object wrapped in ```json fences. Schema:',
+    '```json',
+    '{',
+    '  "sufficient": true|false,',
+    '  "missing": ["specific file path / symbol / info you still need", ...],',
+    '  "analysis": "your full detailed analysis"',
+    '}',
+    '```',
+    '- "sufficient": true if the recon data above is enough for grounded analysis.',
+    '              false if critical information is missing (list them in "missing").',
+    '- "missing": when sufficient=false, list SPECIFIC items (file paths, symbol names,',
+    '            line ranges, etc.) — the recon agent will collect them in the next round.',
+    '- "analysis": your full analysis. ALWAYS provide this, even if sufficient=false.',
+    '             This is what the aggregator will synthesize into the final answer.',
+    '',
+    '=== OUTPUT DEPTH (agent judgment) ===',
+    'You are an expert advisor. Calibrate your output depth to the question:',
+    '',
+    '- For RESEARCH/LITERATURE questions (mechanism review, multi-dimensional analysis,',
+    '  "what is X", comparative synthesis): produce a COMPREHENSIVE analysis covering',
+    '  every dimension the user asked about. The recon agent gathered rich context for',
+    '  you — USE IT. If recon data has 50K+ chars of literature, your analysis should',
+    '  proportionally unpack that richness, not compress it into a brief.',
+    '',
+    '- For NARROW CODE questions (specific bug, single function, quick lookup):',
+    '  be CONCISE and surgical. No padding.',
+    '',
+    '- Judge by the question, not by a fixed length. A "review hibernation mechanisms"',
+    '  question deserves 10x the depth of a "what does config.timeout do" question.',
+    '',
+    'Anti-patterns to AVOID on research questions:',
+    '  - One-paragraph summaries when recon data has 5+ distinct aspects',
+    '  - Listing paper titles without extracting their actual findings',
+    '  - Hand-waving ("many factors are involved") instead of naming specific genes/',
+    '    pathways/numbers from the recon data',
+    '  - Stopping at 2-3 sentences per subtopic when the user asked for systematic coverage',
+    '',
+    'Structure with ## subheadings for each major dimension the user requested.',
+    'Cite specific recon data points with [recon: ...] labels.',
+    'Include your training knowledge with [training: ...] labels when it adds value.',
+    'Match the language of the user\'s question.'
+  );
+
+  return parts.join('\n');
+}
+
+/**
+ * Single ref execution. Never throws — all errors captured into { ok: false }.
+ *
+ * This is the atomic unit of ref fan-out:
+ *   - Parallel mode: called by Promise.allSettled(tasks.map(runSingleRef))
+ *   - Sequential mode: called inside a for-await loop
+ *
+ * The caller is responsible for:
+ *   - Displaying the result (stream.markdown or refChannel.appendLine)
+ *   - Pushing to successes/failures arrays
+ *   - Dumping to disk (dumpRefOutput)
+ *
+ * Cancellation: respects token.isCancellationRequested at the sendRequest level
+ * (vscode.lm propagates cancellation into the model call).
+ */
+async function runSingleRef(
+  ref: { model: vscode.LanguageModelChat; label: string },
+  promptBody: string,
+  round: number,
+  token: vscode.CancellationToken
+): Promise<
+  | { ok: true; text: string }
+  | { ok: false; error: string }
+> {
+  const refPrompts: vscode.LanguageModelChatMessage[] = [
+    vscode.LanguageModelChatMessage.User(promptBody),
+  ];
+
+  // v0.14.9: 不显式设置 maxOutputTokens（避免 provider 兼容性问题）。
+  // 改为通过 prompt agent 化引导 LLM 自己判断输出深度。
+  try {
+    const response = await ref.model.sendRequest(refPrompts, {}, token);
+    let text = '';
+    for await (const frag of response.text) {
+      text += frag;
+    }
+    return { ok: true, text };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // v0.9.0: Phase 0 (Recon) + Phase 1.5 (Sufficiency gate) helpers.
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -1242,8 +1407,12 @@ async function extractReconSummary(
   const l3Threshold = config.get<number>('reconL3Threshold') ?? 200000;
   const l3MaxCalls = config.get<number>('reconL3MaxCalls') ?? 5;
 
-  // v0.14.0: 检查 L3 是否被禁用（moa.l3Summarizer.model 为空 = 禁用）
-  const l3Cfg = config.get<{ model?: string }>('l3Summarizer');
+  // v0.14.0: 检查 L3 是否被禁用（activePreset.l3Summarizer.model 为空 = 禁用）
+  // v0.14.14: 改为读 activePreset.l3Summarizer（不再直接 config.get）
+  // 本函数是独立 helper（不在 runP1Fanout 作用域内），需要自己解析 preset。
+  // preset 为空时（未配置）默认 l3Disabled=true，安全降级。
+  const _presetForL3 = getActivePresetConfig();
+  const l3Cfg = _presetForL3.isEmpty ? { model: '' } : _presetForL3.l3Summarizer;
   const l3Disabled = !l3Cfg?.model || l3Cfg.model.trim().length === 0;
 
   let l3CallsUsed = 0;

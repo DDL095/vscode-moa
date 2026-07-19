@@ -105,6 +105,76 @@ export interface L3Config {
   model: string;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// v0.14.14: Preset group — full-pipeline config bundle.
+//
+// 设计哲学：
+//   - 一个 preset 是整套流水线配置（refs + aggregator + recon + L3）
+//   - 通过 `moa.presets` (object) 存储，key 是 preset 名（如 "default", "research"）
+//   - `moa.activePreset` 指向当前激活的 key
+//   - 运行时统一通过 getActivePresetConfig() 读取（见 presetConfig.ts）
+//
+// 向后兼容：
+//   - 老配置（moa.refModels + moa.aggregator + moa.reconModel + moa.l3Summarizer）
+//     在首次访问时自动迁移为 presets.default
+//   - 迁移后老字段保留（不删除），作为 fallback
+//
+// 典型用例：
+//   - "code" preset: 4 refs + GLM aggregator + DeepSeek recon + MiniMax L3
+//   - "research" preset: 6 refs + MiniMax aggregator + GLM recon + L3 disabled
+//   - "quick" preset: 2 refs + GLM aggregator (no recon, no L3)
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * v0.14.14: 完整流水线预设组。
+ *
+ * 把原来分散的 4 个配置项（refModels / aggregator / reconModel / l3Summarizer）
+ * 打包成一个命名的组，让用户保存多套场景化配置。
+ */
+export interface MoaPreset {
+  /**
+   * 显示名（应等于 presets map 的 key）。
+   * 仅用于 UI 显示和日志，不参与运行时逻辑。
+   */
+  name: string;
+
+  /**
+   * 参考顾问模型列表（equal-mode MoA）。
+   * 沿用现有 RefModelConfig 结构（{role, model}）。
+   * 数组长度 = ref 数量（2-8 个）。
+   */
+  refModels: RefModelConfig[];
+
+  /**
+   * 聚合器模型配置。
+   */
+  aggregator: AggregatorConfig;
+
+  /**
+   * Recon 代理模型配置。
+   * model='' 表示 fallback 到 aggregator（向后兼容 v0.13.x）。
+   */
+  reconModel: ReconConfig;
+
+  /**
+   * L3 孙代理配置。
+   * model='' 表示禁用 L3。
+   */
+  l3Summarizer: L3Config;
+
+  /**
+   * 可选：用户自定义描述（"代码项目专用"、"研究任务专用" 等）。
+   * 纯 UI 用途，不参与运行时。
+   */
+  description?: string;
+
+  /**
+   * 可选：创建时间戳（ISO 格式），用于排序和审计。
+   * 自动生成，用户通常不手编。
+   */
+  createdAt?: string;
+}
+
 /**
  * Re-export helper to keep imports tidy in other files.
  */

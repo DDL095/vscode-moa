@@ -14,7 +14,8 @@
 
 import * as vscode from 'vscode';
 import { moaHandler } from './moaHandler';
-import { configureModels } from './moaConfig';
+import { configureModels, switchPreset } from './moaConfig';
+import { migrateLegacyToPreset } from './presetConfig';
 import { probeTools } from './probeTools';
 import { registerMoaAnalyzeTool } from './moaTool';
 import { registerMoaReconTool } from './moaReconTool';
@@ -78,12 +79,35 @@ export function activate(context: vscode.ExtensionContext): void {
     // ---------- Commands (accessible via Command Palette) ----------
     context.subscriptions.push(
       vscode.commands.registerCommand('moa.configureModels', configureModels),
+      vscode.commands.registerCommand('moa.switchPreset', switchPreset),
       vscode.commands.registerCommand('moa.probeTools', probeTools)
     );
 
+    // v0.14.14: Auto-migrate legacy flat config → presets.default (idempotent).
+    // Fire-and-forget — runs in background, logs to diag channel on completion.
+    migrateLegacyToPreset()
+      .then((migrated) => {
+        if (migrated) {
+          diag().appendLine(
+            `[MoA activate] v0.14.14 auto-migration: legacy flat config → presets.default (OK)`
+          );
+          vscode.window.showInformationMessage(
+            'MoA Bridge v0.14.14: Your existing model configuration was migrated to the "default" preset group. Use "MoA: Switch Preset" to manage multiple groups.'
+          );
+        } else {
+          diag().appendLine(
+            `[MoA activate] v0.14.14 auto-migration: no legacy config or already migrated (skip)`
+          );
+        }
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        diag().appendLine(`[MoA activate] v0.14.14 auto-migration FAILED: ${msg}`);
+      });
+
     console.log('[moa-bridge] @moa participant registered (id=' + PARTICIPANT_ID + ')');
     console.log('[moa-bridge] tool registered: moa_analyze');
-    console.log('[moa-bridge] command registered: configureModels');
+    console.log('[moa-bridge] command registered: configureModels, switchPreset');
     diag().appendLine('[MoA activate] complete OK');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

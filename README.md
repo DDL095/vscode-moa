@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![VSCode](https://img.shields.io/badge/VSCode-1.95+-blue.svg)](https://code.visualstudio.com)
 [![Marketplace](https://img.shields.io/badge/Marketplace-dudali095.moa--bridge-green.svg)](https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge)
-[![Release](https://img.shields.io/badge/release-v0.14.12-blue.svg)](https://github.com/DDL095/vscode-moa/releases/tag/v0.14.12)
+[![Release](https://img.shields.io/badge/release-v0.14.14-blue.svg)](https://github.com/DDL095/vscode-moa/releases/tag/v0.14.14)
 
 ## What it does
 
@@ -130,16 +130,32 @@ code --extensionDevelopmentPath .
 
 ## First-run configuration
 
-Run **`Moa: Configure Models`** from the command palette — a 4-step flow:
+Run **`Moa: Configure Models`** from the command palette — a 5-step flow:
 
 | Step | What | UI |
 |---|---|---|
+| 0/4 | Pick / create / delete a preset group *(new in v0.14.14)* | single-select |
 | 1/4 | Reference advisors (2-8 models) | multi-select checkbox |
 | 2/4 | Aggregator | single-select checkbox |
 | 3/4 | Recon model *(optional, default = aggregator)* | single-select checkbox |
 | 4/4 | L3 summarizer *(optional, default = disabled)* | single-select checkbox |
 
 Configuration is persisted to **both** User (Global) and Workspace tiers, so it works across windows without manual duplication.
+
+### Preset groups (v0.14.14+)
+
+A preset bundles the **entire pipeline config** (refs + aggregator + recon + L3) into a named group. You can save multiple presets for different scenarios and switch between them with one click via **`Moa: Switch Preset`**.
+
+```text
+moa.presets = {
+  "code":    { refModels: [...4 refs...], aggregator: {GLM-5.2},     recon: {DeepSeek}, l3: {MiniMax-M3} },
+  "research":{ refModels: [...6 refs...], aggregator: {MiniMax-M3},  recon: {GLM-5.2},  l3: {disabled}   },
+  "quick":   { refModels: [...2 refs...], aggregator: {GLM-5.2},     recon: {""},       l3: {disabled}   }
+}
+moa.activePreset = "code"   ← @moa uses this one
+```
+
+**Backward compatibility**: legacy flat config (`moa.refModels` + `moa.aggregator` + ...) is auto-migrated to `presets.default` on extension activation. Legacy fields are kept as read-only fallback.
 
 ## Usage
 
@@ -267,13 +283,15 @@ MoA is fully vendor-agnostic — there are **no hardcoded model IDs** in the cod
 
 ## Configuration reference
 
-All settings live under the `moa.*` namespace. Edit via `settings.json` or use **`Moa: Configure Models`** for the 4-step guided flow.
+All settings live under the `moa.*` namespace. Edit via `settings.json` or use **`Moa: Configure Models`** for the 5-step guided flow.
 
 ### Models
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `moa.refModels` | `Array<{role, model}>` | `[]` | Reference advisors. `model` is matched as a substring against `LanguageModelChat.id`. |
+| `moa.presets` | `Object<name, MoaPreset>` | `{}` | Named preset groups, each bundling refs + aggregator + recon + L3. Switch via **`Moa: Switch Preset`**. *(v0.14.14+)* |
+| `moa.activePreset` | string | `"default"` | Key into `moa.presets` for the currently active group. *(v0.14.14+)* |
+| `moa.refModels` | `Array<{role, model}>` | `[]` | Reference advisors. `model` is matched as a substring against `LanguageModelChat.id`. *(legacy flat config; auto-migrated to `presets.default` on first use)* |
 | `moa.aggregator` | `{model, temperature?}` | `{}` | Aggregator model (substring match). |
 | `moa.reconModel` | `{model}` | `{model: ""}` | Recon model. Empty = reuse aggregator. |
 | `moa.l3Summarizer` | `{model}` | `{model: ""}` | L3 grandchild model. Empty = disable L3. |
@@ -282,7 +300,7 @@ All settings live under the `moa.*` namespace. Edit via `settings.json` or use *
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `moa.parallelRefs` | boolean | `false` | Fan out refs in parallel (faster but may trigger 429s). |
+| `moa.parallelRefs` | boolean | `true` | Fan out refs in parallel (`Promise.allSettled`) — wall-clock = slowest ref. Set `false` for sequential fan-out if your provider rate-limits concurrent requests. *(v0.14.14: default flipped from `false` to `true`; pre-v0.14.14 this setting existed but was never read by code)* |
 | `moa.sharedRefPrompt` | string | `""` | Override the shared ref system prompt. Empty = built-in Hermes prompt. |
 | `moa.refDisplayMode` | `"thinking"` \| `"verbose"` | `"thinking"` | `thinking` keeps refs out of chat history (Hermes-style); `verbose` streams inline. |
 | `moa.enableRecon` | boolean | `true` | Toggle Phase 0. |
@@ -311,7 +329,8 @@ vscode-moa/
 │   ├── extension.ts            # activate() — registers @moa + LM tools + commands
 │   ├── moaHandler.ts           # ChatRequestHandler — dispatches @moa invocations
 │   ├── moaRunner.ts            # core 4-layer pipeline (recon → refs → aggregator → acting)
-│   ├── moaConfig.ts            # Configure Models 4-step flow + singlePickWithCheckbox
+│   ├── moaConfig.ts            # Configure Models 5-step flow + switchPreset + singlePickWithCheckbox
+│   ├── presetConfig.ts         # Preset group management — getActivePresetConfig, migrate, save, list (v0.14.14+)
 │   ├── actingAgent.ts          # Phase 3 tool-calling agent + read-only tool filter
 │   ├── workspaceContext.ts     # active editor / open docs / project tree snapshot
 │   ├── l3Summarizer.ts         # L3 grandchild agent (large-file digest) + cache
