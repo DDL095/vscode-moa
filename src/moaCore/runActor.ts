@@ -22,6 +22,19 @@ import { getActivePresetConfig } from '../presetConfig';
 import { runActingAgent } from '../actingAgent';
 
 /**
+ * v0.19.0 §1: Actor 调用 actingAgent 时的最大迭代数。
+ *
+ * 提取为常量是为了：
+ *   1. actingAgent.ts §1.1 注入"强制 JSON 总结"消息时，能感知到这个值
+ *      （通过 options.maxIterations 传入，actingAgent 内部 maxIter 变量）
+ *   2. runActor.ts §1.2 兜底分支引用此值，构造"Hit iteration cap (N/M)"消息
+ *
+ * 选 15 而非默认 12（MAX_ACTING_ITERATIONS）：Actor 可能需要多轮工具调用
+ * （读文件 → 分析 → 写文件 → 跑测试 → 验证），每轮 LLM 可发起多个 tool call。
+ */
+const ACTOR_MAX_ITERATIONS = 15;
+
+/**
  * 解析 Actor 模型（fallback 到 aggregator）。
  */
 async function resolveActorModel(): Promise<vscode.LanguageModelChat> {
@@ -100,9 +113,13 @@ export async function callActor(
       token,
       {
         readOnly: false,    // 全工具权限
-        maxIterations: 15,  // Actor 可能需要多轮工具调用（写文件 + 跑测试）
+        maxIterations: ACTOR_MAX_ITERATIONS,
         progressPrefix: 'MoA Actor',
-        captureToolResults: false,
+        // v0.19.0 §1.2: 改为 true，以便撞 iteration cap 时兜底能从
+        // capturedToolCalls 构造 partial executed_actions。
+        // 代价：内存占用增加（保留所有 tool result 文本）。
+        // 好处：Layer 2 bug 下 LLM 不输出 JSON 时仍有可审计证据。
+        captureToolResults: true,
       }
     );
 
@@ -150,6 +167,38 @@ export async function callActor(
           artifacts: [],
         }];
       }
+    } else if (result.hitIterationCap && executedActions.length === 0
+               && result.capturedToolCalls && result.capturedToolCalls.length > 0) {
+      // ── v0.19.0 §1.2: 兜底 —— LLM 撞 iteration cap 且未输出 JSON 时，
+      // 从 capturedToolCalls 构造最小 executed_actions，避免完全空跑 ──────
+      // 背景：Layer 2 bug —— actingAgent 主循环撞 cap 时 finalOutput 是空字符串，
+      //      上面的 result.output 分支不会被进入，executed_actions 保持空数组。
+      //      v0.19.0 §1.1 在 actingAgent 最后一轮注入"强制 JSON 总结"，但 LLM
+      //      仍可能不服从（继续调用工具）。本兜底确保即使 LLM 不输出 JSON，
+      //      Actor 也至少有 1 条 partial executed_action，保留已做的工作证据。
+      const toolSummary = result.capturedToolCalls
+        .map((c, i) => {
+          const inputShort = JSON.stringify(c.input).substring(0, 120);
+          const resultShort = c.resultText.substring(0, 300);
+          return `${i + 1}. ${c.name}(${inputShort})\n   → ${resultShort}`;
+        })
+        .join('\n\n');
+      const partialContent = `Actor hit iteration cap (${result.iterations}/${ACTOR_MAX_ITERATIONS}). ` +
+        `LLM did not produce structured JSON summary. ` +
+        `Preserving ${result.capturedToolCalls.length} captured tool call(s) as partial progress:\n\n${toolSummary}`;
+      executedActions = [{
+        action: {
+          type: 'inform_user',
+          target: 'partial_progress',
+          content: partialContent,
+          rationale: 'LLM hit iteration cap without producing JSON; partial progress preserved from capturedToolCalls (v0.19.0 §1.2 fallback).',
+        },
+        status: 'partial',
+        output_chars: partialContent.length,
+        error_message: `Hit iteration cap (${result.iterations}/${ACTOR_MAX_ITERATIONS}) without producing JSON summary`,
+        artifacts: result.capturedToolCalls.map((c) => c.name),
+      }];
+      progress?.(`[MoA Actor] §1.2 fallback: constructed ${executedActions.length} partial action(s) from ${result.capturedToolCalls.length} captured tool calls`);
     }
 
     return {

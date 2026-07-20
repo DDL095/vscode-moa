@@ -1,4 +1,5 @@
 {
   "extension.displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "extension.description": "Multi-LLM orchestration for VSCode Copilot Chat. Runs a 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor) via the native vscode.lm API. Supports @moa chat participant, LM tools, and preset model groups."
+  "extension.description": "Multi-LLM orchestration for VSCode Copilot Chat. Runs a 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor) via the native vscode.lm API. Supports @moa chat participant, LM tools, and preset model groups.",
+  "moa.config.enableActorInLoop": "Enable the Actor role in 5-role Loop mode (`@moa` chat participant). When **false** (default), Actor is skipped — Aggregator's `actor_needed` is downgraded to `recon_needed`. When **true**, Actor executes action_items via the acting agent loop (may write files, run terminal commands). Independent from `moa.enableActingAgent` (which controls single-shot Hermes mode in `moaRunner`)."
 }

@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.18.4",
+  "version": "0.19.0",
   "publisher": "dudali095",
   "license": "MIT",
   "repository": {
@@ -458,6 +458,13 @@
           "default": true,
           "description": "Enable the 3-layer Hermes architecture. When true, the aggregator's output becomes guidance for an acting agent that can call tools (read_file, find_files, apply_patch, run_in_terminal, etc.) to actually accomplish the user's task. When false, falls back to v0.7.x 2-layer behavior (aggregator output IS the final answer). Requires copilot_* tools to be registered (default when GitHub Copilot Chat is active).",
           "order": 6
+        },
+        "moa.enableActorInLoop": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "%moa.config.enableActorInLoop%",
+          "description": "Enable the Actor role in the 5-role Loop mode (moaOrchestrator). When false (default), Actor is skipped and Aggregator's actor_needed suggestion is downgraded to recon_needed. When true, Actor executes action_items using the acting agent loop. Independent from moa.enableActingAgent (which controls single-shot Hermes mode in moaRunner). Default false for safety — Actor has side effects (file writes, terminal commands).",
+          "order": 6.1
         },
         "moa.enableRecon": {
           "type": "boolean",

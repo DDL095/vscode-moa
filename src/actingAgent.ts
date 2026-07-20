@@ -187,7 +187,7 @@ export interface ActingAgentResult {
  *
  * @param readOnly When true, 只返回 read-only 工具（recon 模式）。Default false.
  * @param allowTerminal recon 模式下是否允许 terminal 类工具。Default false.
- *                     仅在 readOnly=true 时生效。
+ *                     仅在 readOnly=true 时生效.
  */
 function getActingTools(readOnly: boolean = false, allowTerminal: boolean = false): vscode.LanguageModelChatTool[] {
   const allTools = vscode.lm.tools;
@@ -558,12 +558,40 @@ export async function runActingAgent(
   while (iterations < maxIter) {
     if (token.isCancellationRequested) break;
 
+    // ── v0.19.0 §1.1: 强制 JSON 总结轮（仅 acting 模式，仅最后一轮）────
+    // 背景：Layer 2 bug —— 当 LLM 持续调用工具到 iteration cap 时，从未进入
+    // "toolCalls.length === 0" 自然退出分支，导致 finalOutput 始终为空字符串,
+    // 下游 runActor 的 extractActorJson('') 返回 null，executed_actions = []。
+    //
+    // 修复：在最后一轮（iterations === maxIter - 1）注入强制总结 User 消息,
+    // 要求 LLM 输出 JSON 而非继续调用工具。LLM 若服从，iterationText 被填充
+    // 并在 "toolCalls.length === 0" 分支 break；若不服从，下游兜底（runActor
+    // §1.2）会从 capturedToolCalls 构造最小 executed_actions。
+    //
+    // 仅 acting 模式（!readOnly）启用，recon 模式不需要（recon 通过早停 + 信息
+    // 饱和检测自然收敛）。
+    if (!readOnly && iterations === maxIter - 1) {
+      const forceSummaryMsg = vscode.LanguageModelChatMessage.User(
+        `[SYSTEM] You have used all but one of your allowed iterations (${maxIter}). ` +
+        `You MUST now produce your final structured output. ` +
+        `DO NOT call any more tools. ` +
+        `Output ONLY the JSON summary of what you have accomplished so far, ` +
+        `including partial progress and any actions that were started but not completed. ` +
+        `Required format: ` +
+        `{"executed_actions": [{"action": {"type": "...", "target": "...", "content": "...", "rationale": "..."}, "status": "success|failed|partial", "output_chars": N, "artifacts": [...]}], "self_assessment": {"all_succeeded": false, "missing_dependencies": [], "should_recon": false, "reason": "..."}}`
+      );
+      messages.push(forceSummaryMsg);
+      stream.progress(
+        `[${progressPrefix}] acting: forcing JSON summary (iteration ${iterations + 1}/${maxIter})`
+      );
+    }
+
     // ── v0.14.2: sendRequest + stream 全部包进 try ────────────────────
     // 原设计：sendRequest 在 try 内，但 `for await (response.stream)` 在 try 外。
-    // 这导致 GLM 的 1213 错误（在 stream 中途返回）直接冒泡到 moaRunner，
+    // 这导致 GLM 的 1213 错误（在 stream 中途返回）直接冒泡到 moaRunner,
     // 整段 capturedToolCalls 被丢弃。
     //
-    // 现设计：sendRequest 和 stream 同在一个 try 内；任何异常都捕获，
+    // 现设计：sendRequest 和 stream 同在一个 try 内；任何异常都捕获,
     // transient 错误（1213/429/network）首次重试一次，再次失败或非 transient
     // 则 set loopError 并 break。capturedToolCalls 保留所有已收集的内容。
     //

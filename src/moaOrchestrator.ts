@@ -1231,57 +1231,89 @@ export async function runIteration(
     state.convergence_raw_next_action = aggOutput.next_action;
     progress?.(`[MoA] naturally converged at iteration ${iterNum}, completeness=${state.completeness.toFixed(2)}`);
   } else if (aggOutput.next_action === 'actor_needed' && aggOutput.action_items && aggOutput.action_items.length > 0) {
-    // Actor 执行（v0.18.4: gate 提前到 shouldStop 之前，避免 Actor 空跑）
-    progress?.(`[MoA Actor] running with ${aggOutput.action_items.length} action(s)...`);
-    const actorResult = await callActor({
-      task: state.task,
-      actionItems: aggOutput.action_items,
-      iteration: iterNum,
-    }, token, progress, undefined, toolInvocationToken);
-    record.actor_result = actorResult;
-    state.actor_history.push(actorResult);
-    await saveIterationArtifact(taskId, iterNum, 'actor_result.json', actorResult);
-
-    // v0.17.0: 把 Actor 执行结果写到 OutputChannel
-    //   - 每个 action_item 的 status / artifacts / error_message
-    //   - self_assessment（all_succeeded / should_recon）
-    const actorLogLines: string[] = [];
-    actorLogLines.push(`Elapsed: ${actorResult.elapsed_sec.toFixed(1)}s | Tool calls: ${actorResult.tool_calls}`);
-    actorLogLines.push('');
-    actorLogLines.push('Executed actions:');
-    for (let i = 0; i < actorResult.executed_actions.length; i++) {
-      const ar = actorResult.executed_actions[i];
-      actorLogLines.push(
-        `  ${i + 1}. [${ar.action.type}] ${ar.action.target} → ${ar.status}` +
-        (ar.error_message ? ` (${ar.error_message})` : '') +
-        (ar.artifacts.length > 0 ? ` [${ar.artifacts.join(', ')}]` : '')
+    // v0.19.0 §2: 接线 moa.enableActorInLoop 配置项
+    //
+    // 设计哲学：
+    //   - 默认 false（保守原则）——Actor 有副作用（写文件、跑终端命令）
+    //   - 与 moa.enableActingAgent 独立（后者控制 moaRunner 单次模式）
+    //   - 关闭时降级为 recon_needed，让 Loop 继续（而不是卡死或空跑）
+    //
+    // 关键：v0.18.4 修复 gate 顺序后，Actor 确实会执行，但 Layer 2 bug
+    //      （actingAgent 撞 iteration cap 时 finalOutput 为空）会导致
+    //      executed_actions=[]。v0.19.0 §1 已修复 Layer 2，但默认仍关闭
+    //      Actor，让用户显式启用。
+    const actorEnabled = vscode.workspace.getConfiguration('moa').get<boolean>('enableActorInLoop', false);
+    if (!actorEnabled) {
+      // Actor 被禁用，降级为 recon_needed（让 Loop 继续）
+      progress?.(
+        `[MoA] Actor disabled by config (moa.enableActorInLoop=false). ` +
+        `Downgrading actor_needed → recon_needed. ` +
+        `Enable Actor in Settings to execute action_items.`
       );
-    }
-    actorLogLines.push('');
-    actorLogLines.push(
-      `Self-assessment: all_succeeded=${actorResult.self_assessment.all_succeeded}, ` +
-      `should_recon=${actorResult.self_assessment.should_recon}, ` +
-      `reason=${actorResult.self_assessment.reason}`
-    );
-    if (actorResult.error) {
-      actorLogLines.push('');
-      actorLogLines.push(`Actor error: ${actorResult.error}`);
-    }
-    logPipelineBlock('actor', `--- Actor @iter${iterNum} ---`, actorLogLines.join('\n'));
-    if (actorResult.error) {
-      logPipelineBlock('actor', `--- Actor FAILED @iter${iterNum} ---`, actorResult.error);
-    }
+      logPipelineBlock('actor',
+        `--- Actor @iter${iterNum} SKIPPED (moa.enableActorInLoop=false) ---`,
+        `Aggregator suggested ${aggOutput.action_items.length} action(s) but Actor is disabled.\n` +
+        `Downgrading to recon_needed. The next iteration's Recon will investigate the same gaps.\n` +
+        `To enable Actor, set "moa.enableActorInLoop": true in Settings.`
+      );
+      state.status = 'running';
+      // 标记当前轮为"actor 被跳过"，让下轮 Recon 接手 gaps
+      if (state.gaps.length === 0 && aggOutput.critical_gaps && aggOutput.critical_gaps.length > 0) {
+        state.gaps = [...aggOutput.critical_gaps];
+      }
+    } else {
+      // Actor 启用，正常执行（v0.18.4 gate 顺序已修复 + v0.19.0 §1 Layer 2 已修复）
+      progress?.(`[MoA Actor] running with ${aggOutput.action_items.length} action(s)...`);
+      const actorResult = await callActor({
+        task: state.task,
+        actionItems: aggOutput.action_items,
+        iteration: iterNum,
+      }, token, progress, undefined, toolInvocationToken);
+      record.actor_result = actorResult;
+      state.actor_history.push(actorResult);
+      await saveIterationArtifact(taskId, iterNum, 'actor_result.json', actorResult);
 
-    // Actor 产出进 evidence（high confidence，下轮 Refs 自然评估质量）
-    // v0.15.0 hotfix 1: Actor LLM 经常不回填 action.content，必须防御性访问
-    //   （否则抛 "Cannot read properties of undefined (reading 'length')"，导致 history 不入栈）
-    for (const ar of actorResult.executed_actions) {
-      const ev = buildActorEvidence(ar, iterNum);
-      if (ev) state.evidence.push(ev);
+      // v0.17.0: 把 Actor 执行结果写到 OutputChannel
+      //   - 每个 action_item 的 status / artifacts / error_message
+      //   - self_assessment（all_succeeded / should_recon）
+      const actorLogLines: string[] = [];
+      actorLogLines.push(`Elapsed: ${actorResult.elapsed_sec.toFixed(1)}s | Tool calls: ${actorResult.tool_calls}`);
+      actorLogLines.push('');
+      actorLogLines.push('Executed actions:');
+      for (let i = 0; i < actorResult.executed_actions.length; i++) {
+        const ar = actorResult.executed_actions[i];
+        actorLogLines.push(
+          `  ${i + 1}. [${ar.action.type}] ${ar.action.target} → ${ar.status}` +
+          (ar.error_message ? ` (${ar.error_message})` : '') +
+          (ar.artifacts.length > 0 ? ` [${ar.artifacts.join(', ')}]` : '')
+        );
+      }
+      actorLogLines.push('');
+      actorLogLines.push(
+        `Self-assessment: all_succeeded=${actorResult.self_assessment.all_succeeded}, ` +
+        `should_recon=${actorResult.self_assessment.should_recon}, ` +
+        `reason=${actorResult.self_assessment.reason}`
+      );
+      if (actorResult.error) {
+        actorLogLines.push('');
+        actorLogLines.push(`Actor error: ${actorResult.error}`);
+      }
+      logPipelineBlock('actor', `--- Actor @iter${iterNum} ---`, actorLogLines.join('\n'));
+      if (actorResult.error) {
+        logPipelineBlock('actor', `--- Actor FAILED @iter${iterNum} ---`, actorResult.error);
+      }
+
+      // Actor 产出进 evidence（high confidence，下轮 Refs 自然评估质量）
+      // v0.15.0 hotfix 1: Actor LLM 经常不回填 action.content，必须防御性访问
+      //   （否则抛 "Cannot read properties of undefined (reading 'length')"，导致 history 不入栈）
+      for (const ar of actorResult.executed_actions) {
+        const ev = buildActorEvidence(ar, iterNum);
+        if (ev) state.evidence.push(ev);
+      }
+      // 状态设为 running，下轮 Recon 会读 Actor 产出
+      state.status = 'running';
+      progress?.(`[MoA] iteration ${iterNum} complete (Actor done), continuing to next iteration`);
     }
-    // 状态设为 running，下轮 Recon 会读 Actor 产出
-    state.status = 'running';
-    progress?.(`[MoA] iteration ${iterNum} complete (Actor done), continuing to next iteration`);
   } else if (shouldStop(state)) {
     // v0.18.4: shouldStop gate 移到 actor 之后，避免 Actor 还没跑就被杀
     state.status = 'finalized';

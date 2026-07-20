@@ -1,4 +1,5 @@
 {
   "extension.displayName": "MoA Bridge - Copilot 多模型协作",
-  "extension.description": "VSCode Copilot Chat 的多模型协作插件。通过原生 vscode.lm API 编排 5 角色流水线（规划 → 侦察 → 参考 → 聚合 → 执行）。支持 @moa 聊天参与者、LM 工具及预设模型组。"
+  "extension.description": "VSCode Copilot Chat 的多模型协作插件。通过原生 vscode.lm API 编排 5 角色流水线（规划 → 侦察 → 参考 → 聚合 → 执行）。支持 @moa 聊天参与者、LM 工具及预设模型组。",
+  "moa.config.enableActorInLoop": "在 5 角色 Loop 模式（`@moa` 聊天参与者）中启用 Actor 角色。**默认 false**（保守原则）——Aggregator 给出的 `actor_needed` 建议会被降级为 `recon_needed`，Actor 完全不执行。设为 `true` 时，Actor 通过 acting agent 循环执行 action_items（可能写文件、跑终端命令）。与 `moa.enableActingAgent`（控制 moaRunner 单次 Hermes 模式）独立。"
 }
