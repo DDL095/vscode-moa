@@ -16,6 +16,7 @@
 import * as vscode from "vscode";
 import { runP1Fanout } from "./moaRunner";
 import { runSingleIterationAnalyze, runMoaLoopAnalyze, type MoaFinalOutput } from "./moaOrchestrator";
+import { EXTENSION_VERSION } from "./extension";
 
 /**
  * v0.16.0: 三种 chat 模式
@@ -35,7 +36,7 @@ async function runMoaChatEntry(
   token: vscode.CancellationToken
 ): Promise<vscode.ChatResult> {
   const modeLabel = mode === 'loop' ? 'Loop (iterative)' : 'Single (1-shot)';
-  stream.progress(`[MoA v0.17 ${mode === 'loop' ? 'Loop' : 'Single'}] starting 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor)...`);
+  stream.progress(`[MoA v${EXTENSION_VERSION} ${mode === 'loop' ? 'Loop' : 'Single'}] starting 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor)...`);
 
   const start = Date.now();
   try {
@@ -55,10 +56,44 @@ async function runMoaChatEntry(
     // 附加元信息（task_id + 落盘路径 + 置信度 + mode）
     const confPct = (output.confidence * 100).toFixed(0);
     stream.markdown(
-      `\n\n---\n\n> **MoA v0.17 ${modeLabel}** | task_id: \`${output.task_id}\` | iterations: ${output.iterations_used} | confidence: ${confPct}%`
+      `\n\n---\n\n> **MoA v${EXTENSION_VERSION} ${modeLabel}** | task_id: \`${output.task_id}\` | iterations: ${output.iterations_used} | confidence: ${confPct}%`
     );
     stream.markdown(`> 落盘文件：\`.moa_cache/${output.task_id}/final.md\` (完整报告) + \`timeline.md\` (时序表)`);
     stream.markdown(`> 中间过程：VSCode Output 面板下拉选择 MoA Planner / MoA Recon / MoA Refs / MoA Aggregator / MoA Actor`);
+
+    // v0.18.4: 主会话末尾汇总增强——读取 meta.json 展示模型清单、轮次、收敛来源
+    //   - 让用户在 chat 末尾一眼看到"用了哪些模型 + 跑了几轮 + 收敛方式"
+    //   - 失败静默（meta.json 缺失/损坏不影响主流程）
+    try {
+      const ws = vscode.workspace.workspaceFolders?.[0];
+      if (ws) {
+        const metaPath = vscode.Uri.joinPath(
+          ws.uri, '.moa_cache', output.task_id, 'meta.json'
+        );
+        const metaBytes = await vscode.workspace.fs.readFile(metaPath);
+        const meta = JSON.parse(Buffer.from(metaBytes).toString('utf8')) as {
+          ref_models?: string[];
+          aggregator_model?: string;
+          completeness_timeline?: Array<{
+            iteration: number;
+            completeness: number;
+            next_action: string;
+            recon_used: boolean;
+          }>;
+        };
+        const refList = meta.ref_models?.length
+          ? meta.ref_models.join(' / ')
+          : '(unknown)';
+        const aggModel = meta.aggregator_model || '(unknown)';
+        const timeline = meta.completeness_timeline ?? [];
+        const actorRounds = timeline.filter(t => t.next_action === 'actor_needed').length;
+        const reconRounds = timeline.filter(t => t.recon_used).length;
+        stream.markdown(`\n> 🤖 **Refs**: ${refList}  |  **Aggregator**: ${aggModel}`);
+        stream.markdown(`> 🔁 Recon rounds: ${reconRounds}/${timeline.length}  |  Actor rounds: ${actorRounds}/${timeline.length}`);
+      }
+    } catch {
+      // meta.json 读失败静默跳过
+    }
 
     // v0.16.0: 低 confidence 警告（loop 模式下说明任务真的难，single 模式下说明证据不足）
     if (output.confidence < 0.8) {
@@ -187,7 +222,7 @@ export const moaSingleHandler: vscode.ChatRequestHandler = async (
 
 function buildHelpMarkdown(): string {
   return [
-    "## MoA Bridge — Usage (v0.18.3)",
+    `## MoA Bridge — Usage (v${EXTENSION_VERSION})`,
     "",
     "### 三种 chat 入口",
     "",

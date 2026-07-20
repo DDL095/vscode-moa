@@ -1,4 +1,4 @@
 {
-  "extension.displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "extension.description": "Mixture-of-Agents (@moa) 多视角融合 chat participant for VSCode Copilot"
+  "extension.displayName": "MoA Bridge - Copilot 多模型协作",
+  "extension.description": "VSCode Copilot Chat 的多模型协作插件。通过原生 vscode.lm API 编排 5 角色流水线（规划 → 侦察 → 参考 → 聚合 → 执行）。支持 @moa 聊天参与者、LM 工具及预设模型组。"
 }

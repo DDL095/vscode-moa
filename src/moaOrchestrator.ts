@@ -55,6 +55,7 @@ import {
 import { runPlanner as callPlanner } from './moaCore/runPlanner';
 import { callRecon } from './moaCore/runRecon';
 import { callActor } from './moaCore/runActor';
+import { EXTENSION_VERSION } from './extension';
 // v0.15.0 hotfix 1: evidence 提取纯函数（独立文件便于单测）
 import { buildActorEvidence } from './moaCore/actorEvidence';
 
@@ -924,7 +925,7 @@ export async function runIteration(
 
   state.iteration += 1;
   const iterNum = state.iteration;
-  progress?.(`[MoA v0.15] starting iteration ${iterNum}`);
+  progress?.(`[MoA v${EXTENSION_VERSION}] starting iteration ${iterNum}`);
 
   // v0.17.0: iteration 起始分隔头分别写到 5 个角色的 OutputChannel
   //   ——每个 channel 自成一体（用户在某个角色 channel 里能看到该角色每轮的完整边界）
@@ -1205,6 +1206,19 @@ export async function runIteration(
   // ═══════════════════════════════════════════════════════════════════════
   // 阶段 5：Gate 决策（finalize / actor_needed / recon_needed）
   // ═══════════════════════════════════════════════════════════════════════
+  // v0.18.4: 调整 gate 顺序——actor_needed 必须在 shouldStop 之前判断。
+  //
+  // 历史背景（v0.18.3 及之前）：
+  //   原 gate 顺序为 max_iter → finalize → shouldStop → actor_needed。
+  //   当 Aggregator 连续 3 轮要求 actor_needed 但 completeness 不变时，
+  //   shouldStop() 会先返回 true，在 Actor 真正执行前就强制 finalize，
+  //   导致 Actor 角色整轮空跑（timeline 中 Actor 列为 0/0）。
+  //
+  // v0.18.4 修复：
+  //   actor_needed gate 提前到 shouldStop 之前。这样当 Aggregator 要求
+  //   执行 Actor 时，先真正跑完 Actor，下一轮 Refs 自然评估 Actor 产出，
+  //   completeness 会上升，shouldStop 不再误触发。
+  //
   // 硬保底：iteration 上限
   if (state.iteration >= MAX_ITER) {
     state.status = 'finalized';
@@ -1216,13 +1230,8 @@ export async function runIteration(
     state.convergence_source = 'natural';
     state.convergence_raw_next_action = aggOutput.next_action;
     progress?.(`[MoA] naturally converged at iteration ${iterNum}, completeness=${state.completeness.toFixed(2)}`);
-  } else if (shouldStop(state)) {
-    state.status = 'finalized';
-    state.convergence_source = 'should_stop';
-    state.convergence_raw_next_action = aggOutput.next_action;
-    progress?.(`[MoA] shouldStop() triggered at iteration ${iterNum}, forcing finalize (last aggregator suggestion: ${aggOutput.next_action})`);
   } else if (aggOutput.next_action === 'actor_needed' && aggOutput.action_items && aggOutput.action_items.length > 0) {
-    // Actor 执行
+    // Actor 执行（v0.18.4: gate 提前到 shouldStop 之前，避免 Actor 空跑）
     progress?.(`[MoA Actor] running with ${aggOutput.action_items.length} action(s)...`);
     const actorResult = await callActor({
       task: state.task,
@@ -1273,6 +1282,12 @@ export async function runIteration(
     // 状态设为 running，下轮 Recon 会读 Actor 产出
     state.status = 'running';
     progress?.(`[MoA] iteration ${iterNum} complete (Actor done), continuing to next iteration`);
+  } else if (shouldStop(state)) {
+    // v0.18.4: shouldStop gate 移到 actor 之后，避免 Actor 还没跑就被杀
+    state.status = 'finalized';
+    state.convergence_source = 'should_stop';
+    state.convergence_raw_next_action = aggOutput.next_action;
+    progress?.(`[MoA] shouldStop() triggered at iteration ${iterNum}, forcing finalize (last aggregator suggestion: ${aggOutput.next_action})`);
   } else {
     // recon_needed：什么都不做，下一轮 Recon 自然会基于 gaps 调查
     state.status = 'running';

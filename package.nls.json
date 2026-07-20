@@ -1,4 +1,4 @@
 {
   "extension.displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "extension.description": "Mixture-of-Agents for VSCode Copilot Chat. Runs multi-LLM fan-out (recon → N refs → aggregator → acting agent) through the native vscode.lm API."
+  "extension.description": "Multi-LLM orchestration for VSCode Copilot Chat. Runs a 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor) via the native vscode.lm API. Supports @moa chat participant, LM tools, and preset model groups."
 }

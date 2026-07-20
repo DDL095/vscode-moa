@@ -32,6 +32,7 @@
  */
 
 import * as vscode from 'vscode';
+import { EXTENSION_VERSION } from './extension';
 import type { MoaRunResult } from './types';
 
 // Re-use the P1 fanout logic from moaRunner. Note: we can't pass a
@@ -143,7 +144,7 @@ export class MoaAnalyzeTool implements vscode.LanguageModelTool<{
 
         let resultText = output.summary;
         // 附加 task_id + 落盘文件路径，方便用户查阅
-        resultText += `\n\n---\n\n> **MoA v0.17 Single-shot** | task_id: \`${output.task_id}\` | iterations: ${output.iterations_used} | confidence: ${(output.confidence * 100).toFixed(0)}%`;
+        resultText += `\n\n---\n\n> **MoA v${EXTENSION_VERSION} Single-shot** | task_id: \`${output.task_id}\` | iterations: ${output.iterations_used} | confidence: ${(output.confidence * 100).toFixed(0)}%`;
         resultText += `\n> 落盘文件：\`.moa_cache/${output.task_id}/final.md\` (完整报告) + \`timeline.md\` (时序表)`;
         resultText += `\n> 中间过程：VSCode Output 面板下拉选择 MoA Planner / MoA Recon / MoA Refs / MoA Aggregator / MoA Actor`;
 

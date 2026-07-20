@@ -5,6 +5,73 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.4] - 2026-07-20
+
+### Fixed — Actor 空跑 + 版本号漂移修复
+
+本次修订基于第一轮 MoA 自审（task `moa_mrswvdj3_14d628`）发现的 4 个核心问题，
+以及用户提出的"汇总信息不足、版本号漂移"等反馈。完整修订路线图见
+[`docs/roadmap/v0.18.4-actor-fix-and-roadmap.md`](docs/roadmap/v0.18.4-actor-fix-and-roadmap.md)。
+
+#### Fixed P0 — Actor gate 顺序 bug（导致 Actor 永不执行）
+
+- **症状**：MoA loop 跑 10 轮，timeline 表 Actor 列始终为 `0/0`，
+  最终由 `shouldStop()` 强制 finalize，Aggregator 的 `actor_needed` 建议
+  从未被执行。
+- **根因**：[`src/moaOrchestrator.ts`](src/moaOrchestrator.ts) 阶段 5
+  Gate 决策的原顺序为 `max_iter → finalize → shouldStop → actor_needed`，
+  当 Aggregator 连续 3 轮要求 `actor_needed` 但 completeness 不变时，
+  `shouldStop()` 先返回 true，在 Actor 真正执行前就强制收敛。
+- **修复**：调整 gate 顺序为
+  `max_iter → finalize → actor_needed → shouldStop → recon_needed`，
+  确保 Aggregator 要求执行 Actor 时一定先跑完 Actor。
+- **影响范围**：[`src/moaOrchestrator.ts`](src/moaOrchestrator.ts) ~10 行注释 + 1 处 gate 位置调整。
+
+#### Fixed P1 — 版本号硬编码（5 处漂移点）
+
+- **症状**：README 显示 v0.18.3，但 chat 进度提示显示 v0.17，
+  `Usage` markdown 显示 v0.18.3，`Single-shot` footer 显示 v0.17 — 多处不一致。
+- **修复**：在 [`src/extension.ts`](src/extension.ts) 新增
+  `EXTENSION_VERSION` 常量，通过
+  `vscode.extensions.getExtension('dudali095.moa-bridge')?.packageJSON?.version`
+  动态读取 `package.json` 的 version 字段，作为单一真相源。
+- **替换点**：`moaHandler.ts` (3 处) + `moaTool.ts` (1 处) + `moaOrchestrator.ts` (1 处)。
+- **好处**：以后只需改 `package.json` 一处，所有显示自动同步；CI/CD 友好；
+  避免 commit 噪音；分支合并不冲突。
+
+#### Added P2 — 主会话末尾汇总增强（模型清单 + 轮次统计）
+
+- **背景**：原 chat 末尾只显示 task_id + iterations + confidence + 落盘路径，
+  缺乏"用了哪些模型、Recon 跑了几次、Actor 触发了几次"等聚合信息。
+- **新增**：从 `.moa_cache/<task_id>/meta.json` 读取并展示：
+  - 🤖 Refs 模型列表 / Aggregator 模型名
+  - 🔁 Recon rounds / Actor rounds 占比
+- **失败静默**：meta.json 缺失或损坏不影响主流程。
+
+#### Changed P3 — 用户可见术语统一
+
+- `src/moaOrchestrateTools.ts`: 用户可见的 confirmation message 中
+  `workers + aggregator` → `refs + aggregator`（术语与 5 角色架构对齐）。
+
+#### Added P4 — 文字与提示双语化（来自 v0.18.4 第一轮 MoA 自审）
+
+- `package.json`: `displayName` / `description` 启用 `%` NLS 占位符。
+- `package.nls.json`: 重写为精简英文，对齐 5 角色架构（"5-role pipeline"）。
+- `package.nls.zh-cn.json`: 重写为简明中文
+  （"5 角色流水线：规划 → 侦察 → 参考 → 聚合 → 执行"）。
+- `README.md`: 开头改为中英双语；徽章改用动态 `github/v/release`。
+- 配套脚本：`scripts/clean_pkg.py`（幂等的批量清洗脚本，保留以备后续发版复用）。
+
+### Known Limitations
+
+- **Settings UI 仍是英文**：17 个 `moa.*` 配置项的 `description` 未启用 NLS 占位符
+  （需改为 `markdownDescription: "%key%"` 才能本地化）。留待 v0.19.x。
+- **源码注释中的历史版本号保留**：如 `// v0.15.0: 改名 Workers→Refs`
+  是开发文档价值，正常用户看不到，保留以备维护追溯。
+- **CHANGELOG 仍需手工编写**：未实现自动生成（留待长期路线图）。
+
+---
+
 ## [0.18.3] - 2026-07-20
 
 ### Fixed — 文字与提示一致性修复（基于 MoA 代码审查报告 `moa_mrsslp09_f00a9c`）

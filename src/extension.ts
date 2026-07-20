@@ -25,6 +25,25 @@ const PARTICIPANT_ID = 'moa-bridge.moa';
 const PARTICIPANT_LOOP_ID = 'moa-bridge.moaloop';
 const PARTICIPANT_SINGLE_ID = 'moa-bridge.moasingle';
 
+/**
+ * v0.18.4: 动态读取 package.json 的 version 字段，作为整个扩展的
+ * 单一真相源（single source of truth）。
+ *
+ * 所有运行时展示给用户的版本号字符串（进度提示、help markdown、
+ * chat footer 等）都应从这里导入，避免：
+ *   - README 显示 v0.18.3 但 chat 显示 v0.17.0 的漂移
+ *   - 每次发版需要修改多处源码
+ *   - 不同分支合并时的版本号冲突
+ *
+ * 使用示例：
+ *   import { EXTENSION_VERSION } from './extension';
+ *   stream.progress(`[MoA v${EXTENSION_VERSION} Loop] starting...`);
+ *
+ * fallback '0.0.0' 仅在 extension 未正常 activate 时出现（理论上不会发生）。
+ */
+export const EXTENSION_VERSION: string =
+  vscode.extensions.getExtension('dudali095.moa-bridge')?.packageJSON?.version ?? '0.0.0';
+
 // v0.12.0 diagnostic: persistent OutputChannel so activation errors are visible
 // even if activate() throws midway.
 let _diagChannel: vscode.OutputChannel | undefined;

@@ -1,11 +1,13 @@
 # vscode-moa
 
-**Mixture-of-Agents (MoA) for VSCode Copilot Chat** — a 5-role Hermes-style pipeline (Planner → Recon → Refs → Aggregator → Actor) that orchestrates multiple LLMs entirely through the native `vscode.lm` API.
+**Mixture-of-Agents (MoA) for VSCode Copilot Chat** — a streamlined 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor) that orchestrates multiple LLMs entirely through the native `vscode.lm` API.
+
+**面向 VSCode Copilot Chat 的混合专家智能体** — 通过原生 `vscode.lm` API 编排精简的 5 角色流水线（规划 → 侦察 → 参考 → 聚合 → 执行）。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![VSCode](https://img.shields.io/badge/VSCode-1.95+-blue.svg)](https://code.visualstudio.com)
 [![Marketplace](https://img.shields.io/badge/Marketplace-dudali095.moa--bridge-green.svg)](https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge)
-[![Release](https://img.shields.io/badge/release-v0.18.3-blue.svg)](https://github.com/DDL095/vscode-moa/releases/tag/v0.18.3)
+[![GitHub Release](https://img.shields.io/github/v/release/DDL095/vscode-moa?color=blue&label=release)](https://github.com/DDL095/vscode-moa/releases/latest)
 
 ## What it does
 

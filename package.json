@@ -1,8 +1,8 @@
 {
   "name": "moa-bridge",
-  "displayName": "MoA Bridge - Mixture of Agents for Copilot",
-  "description": "Mixture-of-Agents for VSCode Copilot Chat. Runs multi-LLM fan-out (recon → N refs → aggregator → acting agent) through the native vscode.lm API. Supports @moa chat participant, moa_recon / moa_analyze / moa_orchestrate LM tools, preset groups, and parallel reference advisors. Vendor-agnostic — works with Copilot, GCMP, or any extension exposing LanguageModelChat.",
-  "version": "0.18.3",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "0.18.4",
   "publisher": "dudali095",
   "license": "MIT",
   "repository": {
@@ -46,7 +46,7 @@
         "id": "moa-bridge.moa",
         "name": "moa",
         "fullName": "MoA Bridge",
-        "description": "v0.17.0: MoA Loop mode (default) — iterative 5-role pipeline until Aggregator naturally converges",
+        "description": "MoA Loop mode (default) — iterative 5-role pipeline until Aggregator naturally converges",
         "isSticky": true,
         "commands": [
           {
@@ -72,7 +72,7 @@
         "id": "moa-bridge.moaloop",
         "name": "moaloop",
         "fullName": "MoA Bridge (Loop)",
-        "description": "v0.17.0: Explicit Loop mode — same as @moa (iterative until Aggregator decides finalize or MAX_ITER)",
+        "description": "Explicit Loop mode — same as @moa (iterative until Aggregator decides finalize or MAX_ITER)",
         "isSticky": true,
         "commands": [
           {
@@ -97,7 +97,7 @@
         "id": "moa-bridge.moasingle",
         "name": "moasingle",
         "fullName": "MoA Bridge (Single)",
-        "description": "v0.17.0: Single-shot mode — 1 iteration then forces finalize (faster but may have low confidence if evidence is incomplete)",
+        "description": "Single-shot mode — 1 iteration then forces finalize (faster but may have low confidence if evidence is incomplete)",
         "isSticky": true,
         "commands": [
           {
@@ -123,13 +123,13 @@
         "command": "moa.configureModels",
         "title": "MoA: Configure Models",
         "category": "MoA",
-        "description": "v0.18.2: Eight-step flow — (0/7) pick/create/delete preset group, (1/7) refs (checkbox multi-select, 2-8), (2/7) aggregator (single-select checkbox), (3/7) recon agent(s) (multi-select for parallel, or 'Use aggregator' sentinel), (4/7) recon aggregator (single-select, 'Use main aggregator' sentinel), (5/7) planner (single-select, 'Use aggregator' sentinel), (6/7) actor (single-select, 'Use aggregator' sentinel), (7/7) L3 summarizer (single-select + 'Disable L3' sentinel). All steps use checkbox UI for clarity of current selection."
+        "description": "Eight-step flow — (0/7) pick/create/delete preset group, (1/7) refs (checkbox multi-select, 2-8), (2/7) aggregator (single-select checkbox), (3/7) recon agent(s) (multi-select for parallel, or 'Use aggregator' sentinel), (4/7) recon aggregator (single-select, 'Use main aggregator' sentinel), (5/7) planner (single-select, 'Use aggregator' sentinel), (6/7) actor (single-select, 'Use aggregator' sentinel), (7/7) L3 summarizer (single-select + 'Disable L3' sentinel). All steps use checkbox UI for clarity of current selection."
       },
       {
         "command": "moa.switchPreset",
         "title": "MoA: Switch Preset",
         "category": "MoA",
-        "description": "v0.18.2: QuickPick to switch the active preset group. Shows all saved presets with a preview of which models they use (refs count + aggregator + recon + reconAgg + planner + actor + L3). One-click switch, no need to re-configure models."
+        "description": "QuickPick to switch the active preset group. Shows all saved presets with a preview of which models they use (refs count + aggregator + recon + reconAgg + planner + actor + L3). One-click switch, no need to re-configure models."
       },
       {
         "command": "moa.probeTools",
@@ -217,14 +217,14 @@
             },
             "reconContext": {
               "type": "string",
-              "description": "v0.10.2: Pre-collected context (file contents, grep results, etc.) that the calling LLM gathered via its own tool calls (e.g. copilot_readFile). When provided, MoA skips its internal Phase 0 recon and uses this directly as the ref prompt's RECON DATA block. Recommended: call copilot_readFile first to read the relevant file(s), then pass their concatenated contents here. This implements the Hermes-style subagent flow where recon is a separate tool the orchestrator decides to call."
+              "description": "Pre-collected context (file contents, grep results, etc.) that the calling LLM gathered via its own tool calls (e.g. copilot_readFile). When provided, MoA skips its internal Phase 0 recon and uses this directly as the ref prompt's RECON DATA block. Recommended: call copilot_readFile first to read the relevant file(s), then pass their concatenated contents here. This implements the Hermes-style subagent flow where recon is a separate tool the orchestrator decides to call."
             },
             "reconSources": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "v0.10.2: List of file paths that produced the reconContext (for logging/traceability). Example: ['src/moaRunner.ts', 'src/types.ts']."
+              "description": "List of file paths that produced the reconContext (for logging/traceability). Example: ['src/moaRunner.ts', 'src/types.ts']."
             }
           },
           "additionalProperties": false
@@ -232,8 +232,8 @@
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "moaAnalyze",
         "icon": "$(multiple-windows)",
-        "modelDescription": "v0.17.0: Run SINGLE-SHOT (1 iteration only) 5-role MoA analysis (Planner → Recon → Refs → Aggregator → Actor). Forces finalize after iteration 1 regardless of Aggregator's actual suggestion — completeness may be < 80% if evidence is incomplete. For iterative refinement (let Aggregator decide convergence), USE #moaOrchestrate instead. Good for: single-shot questions needing multi-model reasoning (code review, design trade-offs). NOT for: complex tasks requiring iterative recon refinement. Optional reconContext parameter accepts pre-gathered file contents (e.g. from #moaRecon or copilot_readFile) so refs give grounded analysis.",
-        "userDescription": "v0.17.0: Run the MoA 5-role pipeline in SINGLE-SHOT mode (Planner → Recon → Refs → Aggregator → Actor, 1 iteration only). Output is persisted to .moa_cache/<task_id>/ (final.md + timeline.md).\n\n**When to use this vs #moa_orchestrate**:\n- `#moa_analyze` — single-shot (fast, but Aggregator may want more iterations)\n- `#moa_orchestrate` — iterative loop (Aggregator decides convergence, more thorough)\n\n**Recommended workflow (Hermes-style subagent)**:\n1. Call #moaRecon first to gather relevant file contents\n2. Pass that content as reconContext=<markdown content> to #moaAnalyze\n3. MoA refs see the pre-collected context and produce grounded analysis\n\nFor simple questions, answer directly without MoA.\n\n**Intermediate output**: VSCode Output panel (View → Output) shows per-role channels: MoA Planner / MoA Recon / MoA Refs / MoA Aggregator / MoA Actor."
+        "modelDescription": "Run SINGLE-SHOT (1 iteration only) 5-role MoA analysis (Planner → Recon → Refs → Aggregator → Actor). Forces finalize after iteration 1 regardless of Aggregator's actual suggestion — completeness may be < 80% if evidence is incomplete. For iterative refinement (let Aggregator decide convergence), USE #moaOrchestrate instead. Good for: single-shot questions needing multi-model reasoning (code review, design trade-offs). NOT for: complex tasks requiring iterative recon refinement. Optional reconContext parameter accepts pre-gathered file contents (e.g. from #moaRecon or copilot_readFile) so refs give grounded analysis.",
+        "userDescription": "Run the MoA 5-role pipeline in SINGLE-SHOT mode (Planner → Recon → Refs → Aggregator → Actor, 1 iteration only). Output is persisted to .moa_cache/<task_id>/ (final.md + timeline.md).\n\n**When to use this vs #moa_orchestrate**:\n- `#moa_analyze` — single-shot (fast, but Aggregator may want more iterations)\n- `#moa_orchestrate` — iterative loop (Aggregator decides convergence, more thorough)\n\n**Recommended workflow (Hermes-style subagent)**:\n1. Call #moaRecon first to gather relevant file contents\n2. Pass that content as reconContext=<markdown content> to #moaAnalyze\n3. MoA refs see the pre-collected context and produce grounded analysis\n\nFor simple questions, answer directly without MoA.\n\n**Intermediate output**: VSCode Output panel (View → Output) shows per-role channels: MoA Planner / MoA Recon / MoA Refs / MoA Aggregator / MoA Actor."
       },
       {
         "name": "moa_orchestrate",
@@ -386,19 +386,19 @@
         "moa.parallelRefs": {
           "type": "boolean",
           "default": true,
-          "description": "v0.14.14: Fan out reference advisors in parallel (Promise.allSettled). When true (default), all ref requests fire simultaneously → wall-clock time = slowest ref. When false, refs run sequentially (safer for providers that rate-limit concurrent requests). NOTE: pre-v0.14.14 this setting existed but was never read by code; v0.14.14 makes it actually work.",
+          "description": "Fan out reference advisors in parallel (Promise.allSettled). When true (default), all ref requests fire simultaneously → wall-clock time = slowest ref. When false, refs run sequentially (safer for providers that rate-limit concurrent requests). NOTE: pre-v0.14.14 this setting existed but was never read by code; v0.14.14 makes it actually work.",
           "order": 3
         },
         "moa.parallelRecon": {
           "type": "boolean",
           "default": true,
-          "description": "v0.18.0: Fan out Recon agents in parallel when preset.reconModels has 2+ models. When true (default), all recon agents run simultaneously → wall-clock time = slowest. When false, or when only 1 recon model is configured, runs sequentially (single-model mode) and Recon Aggregator is auto-disabled. Parallel recon produces N independent results that are merged by Recon Aggregator (pure LLM integration, no tool calls) into a single summary before injecting to Refs.",
+          "description": "Fan out Recon agents in parallel when preset.reconModels has 2+ models. When true (default), all recon agents run simultaneously → wall-clock time = slowest. When false, or when only 1 recon model is configured, runs sequentially (single-model mode) and Recon Aggregator is auto-disabled. Parallel recon produces N independent results that are merged by Recon Aggregator (pure LLM integration, no tool calls) into a single summary before injecting to Refs.",
           "order": 20
         },
         "moa.presets": {
           "type": "object",
           "default": {},
-          "description": "v0.14.14: Named preset groups. Each value is a full pipeline config: {name, refModels, aggregator, reconModel, l3Summarizer, description?}. Switch active preset via 'Moa: Switch Preset' command. Legacy flat config (moa.refModels + moa.aggregator + ...) is auto-migrated to presets.default on first use.",
+          "description": "Named preset groups. Each value is a full pipeline config: {name, refModels, aggregator, reconModel, l3Summarizer, description?}. Switch active preset via 'Moa: Switch Preset' command. Legacy flat config (moa.refModels + moa.aggregator + ...) is auto-migrated to presets.default on first use.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -430,7 +430,7 @@
         "moa.activePreset": {
           "type": "string",
           "default": "default",
-          "description": "v0.14.14: Key into moa.presets identifying the currently active group. Switch via 'Moa: Switch Preset' command. When the referenced preset doesn't exist, falls back to the first available preset, then to legacy flat config.",
+          "description": "Key into moa.presets identifying the currently active group. Switch via 'Moa: Switch Preset' command. When the referenced preset doesn't exist, falls back to the first available preset, then to legacy flat config.",
           "order": 51
         },
         "moa.sharedRefPrompt": {
@@ -456,13 +456,13 @@
         "moa.enableActingAgent": {
           "type": "boolean",
           "default": true,
-          "description": "v0.8.0: Enable the 3-layer Hermes architecture. When true, the aggregator's output becomes guidance for an acting agent that can call tools (read_file, find_files, apply_patch, run_in_terminal, etc.) to actually accomplish the user's task. When false, falls back to v0.7.x 2-layer behavior (aggregator output IS the final answer). Requires copilot_* tools to be registered (default when GitHub Copilot Chat is active).",
+          "description": "Enable the 3-layer Hermes architecture. When true, the aggregator's output becomes guidance for an acting agent that can call tools (read_file, find_files, apply_patch, run_in_terminal, etc.) to actually accomplish the user's task. When false, falls back to v0.7.x 2-layer behavior (aggregator output IS the final answer). Requires copilot_* tools to be registered (default when GitHub Copilot Chat is active).",
           "order": 6
         },
         "moa.enableRecon": {
           "type": "boolean",
           "default": true,
-          "description": "v0.9.0: Enable the recon phase (Phase 0). When true, a recon agent runs BEFORE ref fan-out to collect files relevant to the user's question (read_file, find_files, grep, get_errors, search_codebase). The collected raw context is injected into ref prompts so refs can give grounded analysis instead of guessing. When false, skips recon — refs see only workspace context (v0.8.0 behavior).",
+          "description": "Enable the recon phase (Phase 0). When true, a recon agent runs BEFORE ref fan-out to collect files relevant to the user's question (read_file, find_files, grep, get_errors, search_codebase). The collected raw context is injected into ref prompts so refs can give grounded analysis instead of guessing. When false, skips recon — refs see only workspace context (v0.8.0 behavior).",
           "order": 7
         },
         "moa.maxReconRounds": {
@@ -470,19 +470,19 @@
           "default": 3,
           "minimum": 1,
           "maximum": 5,
-          "description": "v0.9.0: Maximum number of recon rounds. Each round = 1 recon pass + N ref fan-out. If refs report 'sufficient=false' in their JSON output, the next recon round uses their 'missing' hints to fill gaps. Loop exits early when a majority of refs say sufficient=true. Hard cap at 5 to bound cost.",
+          "description": "Maximum number of recon rounds. Each round = 1 recon pass + N ref fan-out. If refs report 'sufficient=false' in their JSON output, the next recon round uses their 'missing' hints to fill gaps. Loop exits early when a majority of refs say sufficient=true. Hard cap at 5 to bound cost.",
           "order": 8
         },
         "moa.reconContextChars": {
           "type": "number",
           "default": 500000,
-          "description": "v0.14.5 [DEPRECATED — 不再作上限]: 仅作为审计指标记录到 meta.json。原 v0.13.0 用于总字符预算截断，v0.14.5 起完全不再截断 —— refs 单轮无历史 + 1M 上下文模型可以消化任意大小；如果 recon 真爆了说明检索方向出问题（噪声过多），是 LLM 该处理的不是工程层该截断的。保留此配置仅为向后兼容。",
+          "description": "[DEPRECATED — 不再作上限]: 仅作为审计指标记录到 meta.json。原 v0.13.0 用于总字符预算截断，v0.14.5 起完全不再截断 —— refs 单轮无历史 + 1M 上下文模型可以消化任意大小；如果 recon 真爆了说明检索方向出问题（噪声过多），是 LLM 该处理的不是工程层该截断的。保留此配置仅为向后兼容。",
           "order": 9
         },
         "moa.forceDirect": {
           "type": "boolean",
           "default": false,
-          "description": "v0.9.1: Skip the entire recon/ref/aggregator pipeline. The acting agent receives only the user prompt + workspace context and acts directly (no multi-model consultation). Useful when the user has had repeated multi-model failures and just wants a single competent model to handle the task with full tool access.",
+          "description": "Skip the entire recon/ref/aggregator pipeline. The acting agent receives only the user prompt + workspace context and acts directly (no multi-model consultation). Useful when the user has had repeated multi-model failures and just wants a single competent model to handle the task with full tool access.",
           "order": 10
         },
         "moa.maxReconIterations": {
@@ -490,13 +490,13 @@
           "default": 50,
           "minimum": 4,
           "maximum": 100,
-          "description": "v0.13.0: Recon agent 单次任务的最大工具调用迭代数（兜底硬上限）。默认 50。实际多数任务会在 LLM 自主判断 + 早停机制触发后更早收敛。配置项 moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated 控制主动早停。",
+          "description": "Recon agent 单次任务的最大工具调用迭代数（兜底硬上限）。默认 50。实际多数任务会在 LLM 自主判断 + 早停机制触发后更早收敛。配置项 moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated 控制主动早停。",
           "order": 11
         },
         "moa.reconAllowTerminal": {
           "type": "boolean",
           "default": false,
-          "description": "v0.13.0: 允许 recon agent 使用 terminal 类工具（runInTerminal / sendToTerminal / killTerminal）。默认 false（安全为先）。Debug 工作流需要 recon 跑测试/编译时设为 true。注意：prompt 会指示 recon 避免破坏性命令（rm -rf / git push --force 等），但最终取决于模型遵循度。",
+          "description": "允许 recon agent 使用 terminal 类工具（runInTerminal / sendToTerminal / killTerminal）。默认 false（安全为先）。Debug 工作流需要 recon 跑测试/编译时设为 true。注意：prompt 会指示 recon 避免破坏性命令（rm -rf / git push --force 等），但最终取决于模型遵循度。",
           "order": 12
         },
         "moa.reconEarlyStopStagnant": {
@@ -504,7 +504,7 @@
           "default": 2,
           "minimum": 1,
           "maximum": 10,
-          "description": "v0.13.0: Recon 早停阈值 —— 连续 N 轮工具签名（工具名+输入摘要）完全相同 → 触发早停（防死循环）。默认 2。设大可让 recon 更'耐心'，设小可更激进省成本。",
+          "description": "Recon 早停阈值 —— 连续 N 轮工具签名（工具名+输入摘要）完全相同 → 触发早停（防死循环）。默认 2。设大可让 recon 更'耐心'，设小可更激进省成本。",
           "order": 13
         },
         "moa.reconEarlyStopSaturated": {
@@ -512,14 +512,14 @@
           "default": 200,
           "minimum": 0,
           "maximum": 5000,
-          "description": "v0.13.0: Recon 早停阈值 —— iterations > 5 后，单轮新增 capturedToolCalls 字符数 < 此值持续 N 轮（N 同 reconEarlyStopStagnant）→ 触发早停（信息饱和）。默认 200 字符。",
+          "description": "Recon 早停阈值 —— iterations > 5 后，单轮新增 capturedToolCalls 字符数 < 此值持续 N 轮（N 同 reconEarlyStopStagnant）→ 触发早停（信息饱和）。默认 200 字符。",
           "order": 14
         },
         "moa.reconL3Threshold": {
           "type": "number",
           "default": 200000,
           "minimum": 50000,
-          "description": "v0.14.4: L3 孙代理触发阈值。单个文件超过此字符数且为代码文件时，才派 L3 做内容精选（保留关键函数）。v0.14.4 默认从 60k 提升到 200k —— 现代 LLM 1M 上下文，绝大多数文件无需精选。只有真正巨型文件（如生成的 schema、minified bundle）才需要 L3。",
+          "description": "L3 孙代理触发阈值。单个文件超过此字符数且为代码文件时，才派 L3 做内容精选（保留关键函数）。v0.14.4 默认从 60k 提升到 200k —— 现代 LLM 1M 上下文，绝大多数文件无需精选。只有真正巨型文件（如生成的 schema、minified bundle）才需要 L3。",
           "order": 15
         },
         "moa.reconL3MaxCalls": {
@@ -527,14 +527,14 @@
           "default": 5,
           "minimum": 0,
           "maximum": 20,
-          "description": "v0.13.0: 单次 MoA 任务最多派多少个 L3 孙代理。超出后即使文件超大也降级为 L2 语义边界截断。设 0 完全禁用 L3。默认 5（兼顾效果与成本）。",
+          "description": "单次 MoA 任务最多派多少个 L3 孙代理。超出后即使文件超大也降级为 L2 语义边界截断。设 0 完全禁用 L3。默认 5（兼顾效果与成本）。",
           "order": 16
         },
         "moa.reconL3TargetChars": {
           "type": "number",
           "default": 50000,
           "minimum": 5000,
-          "description": "v0.14.4: L3 孙代理对单个大文件精选后的目标输出长度（字符）。默认 50k —— v0.14.3 是 10k，过度压缩。1M 上下文模型完全可以消化 50k 的精选结果。",
+          "description": "L3 孙代理对单个大文件精选后的目标输出长度（字符）。默认 50k —— v0.14.3 是 10k，过度压缩。1M 上下文模型完全可以消化 50k 的精选结果。",
           "order": 17
         },
         "moa.reconModel": {
@@ -542,7 +542,7 @@
           "default": {
             "model": ""
           },
-          "description": "v0.14.0: Recon agent 专用模型配置。model 字段为 vscode.lm 模型 ID（如 gcmp.zhipu:::GLM-5.2-CodingPlan）。空字符串 = fallback 到 aggregator 模型（保持 v0.13.x 行为）。通过 'Moa: Configure Models' 命令的 Step 3/7 设置（v0.18.2+ 支持多选并行，见 moa.presets.reconModels）。",
+          "description": "Recon agent 专用模型配置。model 字段为 vscode.lm 模型 ID（如 gcmp.zhipu:::GLM-5.2-CodingPlan）。空字符串 = fallback 到 aggregator 模型（保持 v0.13.x 行为）。通过 'Moa: Configure Models' 命令的 Step 3/7 设置（v0.18.2+ 支持多选并行，见 moa.presets.reconModels）。",
           "properties": {
             "model": {
               "type": "string",
@@ -561,7 +561,7 @@
           "default": {
             "model": ""
           },
-          "description": "v0.14.0: L3 孙代理（大文件精选器）模型配置。model 字段为 vscode.lm 模型 ID。空字符串 = 禁用 L3（所有大文件降级为 L2 语义边界截断）。推荐 MiniMax-M3 (TokenPlan)。通过 'Moa: Configure Models' 命令的 Step 7/7 设置。",
+          "description": "L3 孙代理（大文件精选器）模型配置。model 字段为 vscode.lm 模型 ID。空字符串 = 禁用 L3（所有大文件降级为 L2 语义边界截断）。推荐 MiniMax-M3 (TokenPlan)。通过 'Moa: Configure Models' 命令的 Step 7/7 设置。",
           "properties": {
             "model": {
               "type": "string",

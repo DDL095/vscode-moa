@@ -52,7 +52,7 @@ export class MoaOrchestrateTool implements vscode.LanguageModelTool<OrchestrateI
       confirmationMessages: {
         title: 'Start MoA orchestration',
         message:
-          `Start a new MoA iterative loop (workers + aggregator) for:\n\n"${preview}"\n\n` +
+          `Start a new MoA iterative loop (refs + aggregator) for:\n\n"${preview}"\n\n` +
           `State will persist to .moa_cache/. You will need to drive iterations via #moa_continue.`,
       },
     };
