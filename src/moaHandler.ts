@@ -187,7 +187,7 @@ export const moaSingleHandler: vscode.ChatRequestHandler = async (
 
 function buildHelpMarkdown(): string {
   return [
-    "## MoA Bridge — Usage (v0.17.0)",
+    "## MoA Bridge — Usage (v0.18.3)",
     "",
     "### 三种 chat 入口",
     "",

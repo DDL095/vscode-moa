@@ -1,13 +1,4 @@
 {
-  "extension.displayName": "vscode-moa",
-  "extension.description": "Mixture-of-Agents (@moa) 多视角融合 chat participant for VSCode Copilot",
-  "chatParticipant.moa.description": "触发 Mixture-of-Agents 多视角融合分析",
-  "chatParticipant.moa.fullName": "MoA Bridge",
-  "command.moa.preset.title": "切换 MoA Preset",
-  "command.moa.help.title": "MoA 帮助",
-  "configuration.title": "MoA Bridge",
-  "configuration.defaultPreset.description": "未指定时使用的默认 preset",
-  "configuration.presetsDir.description": "preset JSON 文件目录路径（默认使用扩展内置 presets）",
-  "configuration.timeoutSec.description": "每次 MoA 调用的超时秒数",
-  "configuration.parallelRefs.description": "是否并行拉取 reference advisor"
+  "extension.displayName": "MoA Bridge - Mixture of Agents for Copilot",
+  "extension.description": "Mixture-of-Agents (@moa) 多视角融合 chat participant for VSCode Copilot"
 }

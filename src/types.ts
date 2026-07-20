@@ -69,7 +69,7 @@ export interface AggregatorConfig {
  * v0.14.0: Recon agent 专用模型配置。
  *
  * 设计：
- *   - 用户可通过 "Moa: Configure Models" Step 3/4 单独指定 recon 用的模型
+ *   - 用户可通过 "Moa: Configure Models" Step 3/7 单独指定 recon 用的模型（v0.18.2+ 支持多选并行）
  *   - 留空（model=''）= fallback 到 aggregator 模型（保持 v0.13.x 行为）
  *   - 推荐选工具调用稳定的模型（GLM-5.2 / DeepSeek-V4-Pro）
  *
@@ -148,7 +148,7 @@ export interface ActorConfig {
  * v0.14.0: L3 孙代理（大文件精选器）模型配置。
  *
  * 设计：
- *   - 用户可通过 "Moa: Configure Models" Step 4/4 单独指定 L3 用的模型
+ *   - 用户可通过 "Moa: Configure Models" Step 7/7 单独指定 L3 用的模型
  *   - 留空（model=''）= 完全禁用 L3，所有大文件走 L2 语义边界截断
  *   - 默认推荐 MiniMax-M3（CLAUDE.md §2.4 两层嵌套规则要求 M3）
  *

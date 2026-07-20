@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
   "description": "Mixture-of-Agents for VSCode Copilot Chat. Runs multi-LLM fan-out (recon → N refs → aggregator → acting agent) through the native vscode.lm API. Supports @moa chat participant, moa_recon / moa_analyze / moa_orchestrate LM tools, preset groups, and parallel reference advisors. Vendor-agnostic — works with Copilot, GCMP, or any extension exposing LanguageModelChat.",
-  "version": "0.18.2",
+  "version": "0.18.3",
   "publisher": "dudali095",
   "license": "MIT",
   "repository": {
@@ -123,13 +123,13 @@
         "command": "moa.configureModels",
         "title": "MoA: Configure Models",
         "category": "MoA",
-        "description": "v0.14.14: Five-step flow — (0/4) pick/create/delete preset group, (1/4) refs (checkbox multi-select, 2-8), (2/4) aggregator (single-select checkbox), (3/4) recon agent (single-select, default=aggregator), (4/4) L3 summarizer (single-select + 'Disable L3' option). All steps use checkbox UI for clarity of current selection."
+        "description": "v0.18.2: Eight-step flow — (0/7) pick/create/delete preset group, (1/7) refs (checkbox multi-select, 2-8), (2/7) aggregator (single-select checkbox), (3/7) recon agent(s) (multi-select for parallel, or 'Use aggregator' sentinel), (4/7) recon aggregator (single-select, 'Use main aggregator' sentinel), (5/7) planner (single-select, 'Use aggregator' sentinel), (6/7) actor (single-select, 'Use aggregator' sentinel), (7/7) L3 summarizer (single-select + 'Disable L3' sentinel). All steps use checkbox UI for clarity of current selection."
       },
       {
         "command": "moa.switchPreset",
         "title": "MoA: Switch Preset",
         "category": "MoA",
-        "description": "v0.14.14: QuickPick to switch the active preset group. Shows all saved presets with a preview of which models they use (refs count + aggregator + recon + L3). One-click switch, no need to re-configure models."
+        "description": "v0.18.2: QuickPick to switch the active preset group. Shows all saved presets with a preview of which models they use (refs count + aggregator + recon + reconAgg + planner + actor + L3). One-click switch, no need to re-configure models."
       },
       {
         "command": "moa.probeTools",
@@ -542,7 +542,7 @@
           "default": {
             "model": ""
           },
-          "description": "v0.14.0: Recon agent 专用模型配置。model 字段为 vscode.lm 模型 ID（如 gcmp.zhipu:::GLM-5.2-CodingPlan）。空字符串 = fallback 到 aggregator 模型（保持 v0.13.x 行为）。通过 'Moa: Configure Models' 命令的 Step 3/4 设置。",
+          "description": "v0.14.0: Recon agent 专用模型配置。model 字段为 vscode.lm 模型 ID（如 gcmp.zhipu:::GLM-5.2-CodingPlan）。空字符串 = fallback 到 aggregator 模型（保持 v0.13.x 行为）。通过 'Moa: Configure Models' 命令的 Step 3/7 设置（v0.18.2+ 支持多选并行，见 moa.presets.reconModels）。",
           "properties": {
             "model": {
               "type": "string",
@@ -561,7 +561,7 @@
           "default": {
             "model": ""
           },
-          "description": "v0.14.0: L3 孙代理（大文件精选器）模型配置。model 字段为 vscode.lm 模型 ID。空字符串 = 禁用 L3（所有大文件降级为 L2 语义边界截断）。推荐 MiniMax-M3 (TokenPlan)。通过 'Moa: Configure Models' 命令的 Step 4/4 设置。",
+          "description": "v0.14.0: L3 孙代理（大文件精选器）模型配置。model 字段为 vscode.lm 模型 ID。空字符串 = 禁用 L3（所有大文件降级为 L2 语义边界截断）。推荐 MiniMax-M3 (TokenPlan)。通过 'Moa: Configure Models' 命令的 Step 7/7 设置。",
           "properties": {
             "model": {
               "type": "string",

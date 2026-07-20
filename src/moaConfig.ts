@@ -289,15 +289,15 @@ export async function configureModels(): Promise<void> {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // v0.14.14 Step 0/4: Pick / create / delete a preset group.
+  // v0.18.2 Step 0/7: Pick / create / delete a preset group.
   //
-  // This is the entry point of the new 5-step flow. User can:
-  //   - Pick an existing preset to edit → loads its config into Steps 1-4
-  //   - Create a new preset → starts with empty/default config
+  // This is the entry point of the 8-step flow. User can:
+  //   - Pick an existing preset to edit → loads its config into Steps 1-7
+  //   - Create a new preset → starts with empty/default config (sentinels pre-picked)
   //   - Delete an existing preset (except last one)
   //   - Skip (Esc) → edits the currently active preset (backward compat)
   //
-  // The preset picked here is what gets WRITTEN at the end of Step 4.
+  // The preset picked here is what gets WRITTEN at the end of Step 7.
   // We also offer to make it the active preset after saving.
   // ─────────────────────────────────────────────────────────────────────────
   const presetChoice = await pickOrCreatePreset();
@@ -376,7 +376,7 @@ export async function configureModels(): Promise<void> {
     model: modelKey(m),
   }));
 
-  // Step 2/4: aggregator (single-select 对勾).
+  // Step 2/7: aggregator (single-select 对勾).
   // v0.18.1: 取消"新建时默认勾第一个 ref / 第一个模型"行为。
   //   - 已配置 → 按现有配置预勾选
   //   - 未配置 → 全部 picked:false（强制用户主动选择，避免"第一个模型被默认选上"）
@@ -943,8 +943,8 @@ export async function switchPreset(): Promise<void> {
   // Shortcut: jump to full configure flow
   options.push({
     label: '$(gear) Configure models (full editor)...',
-    description: 'Open Step 0-4 flow',
-    detail: 'Edit refs/aggregator/recon/L3 in detail',
+    description: 'Open Step 0-7 flow',
+    detail: 'Edit refs/aggregator/recon/reconAgg/planner/actor/L3 in detail',
     isShortcut: true,
   });
 

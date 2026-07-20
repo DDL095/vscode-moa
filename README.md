@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![VSCode](https://img.shields.io/badge/VSCode-1.95+-blue.svg)](https://code.visualstudio.com)
 [![Marketplace](https://img.shields.io/badge/Marketplace-dudali095.moa--bridge-green.svg)](https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge)
-[![Release](https://img.shields.io/badge/release-v0.18.2-blue.svg)](https://github.com/DDL095/vscode-moa/releases/tag/v0.18.2)
+[![Release](https://img.shields.io/badge/release-v0.18.3-blue.svg)](https://github.com/DDL095/vscode-moa/releases/tag/v0.18.3)
 
 ## What it does
 
@@ -208,7 +208,7 @@ Each channel includes iteration boundary headers (`═══════ iter N 
 | **Refs** | every iter | N parallel LLM advisors; each emits `{sufficient, missing, analysis}` JSON | `moa.refModels` (multi-select) | None (pure reasoning) | Step 1/7 |
 | **Aggregator** | every iter | Fuse ref outputs; emit `completeness` + `next_action` | `moa.aggregator` | None | Step 2/7 |
 | **Actor** | on `actor_needed` | Execute `action_items` with full tool access; produce artifacts | `preset.actor` (falls back to `moa.aggregator`) | All `vscode.lm.tools` (filtered through read/write split) | Step 6/7 |
-| **L3 Summarizer** | per large file in Recon | Digest single large file (>30K chars) to ~5K chars | `moa.l3Summarizer` (disabled by default) | None | Step 7/7 |
+| **L3 Summarizer** | per large file in Recon | Digest single large file (>200K chars) to ~50K chars | `moa.l3Summarizer` (disabled by default) | None | Step 7/7 |
 
 Every role with a "falls back to `moa.aggregator`" note offers a "Use aggregator" sentinel in its UI step — pick that unless you have a specific reason to deviate.
 
@@ -225,7 +225,7 @@ Layer toggles (any combination):
 - **Tool blacklist**: 24 hard-blocked patterns (write/edit/delete/run/exec/terminal/git/…) + 3 soft-blocked (`run_in_terminal`, `get_terminal_output`, `exec`).
 - **Early-stop**: stagnant (2 consecutive identical tool signatures) **or** saturated (<200 new chars per iteration for 2 iterations).
 - **Max iterations**: 50 (hard cap 100). Most tasks converge in <15.
-- **L3 grandchild agent**: when a single file exceeds `moa.reconL3Threshold` (default 30000 chars), a small model (default MiniMax-M3) digests it to ~5k chars. Cached at `<workspace>/.moa_cache/l3_summaries/<sha1>.txt`. Set `moa.l3Summarizer.model = ""` to disable.
+- **L3 grandchild agent**: when a single file exceeds `moa.reconL3Threshold` (default 200000 chars), a small model (default disabled; recommended MiniMax-M3) digests it to ~50k chars. Cached at `<workspace>/.moa_cache/l3_summaries/<sha1>.txt`. Set `moa.l3Summarizer.model = ""` to disable.
 - **Path normalization** (v0.14.12+): relative paths emitted by LLMs are auto-resolved against the workspace root before tool dispatch; multi-workspace smart matching included.
 
 ### Local cache & workspace artifacts (v0.14.10+, updated v0.18.0)
@@ -291,7 +291,7 @@ MoA is fully vendor-agnostic — there are **no hardcoded model IDs** in the cod
 
 ## Configuration reference
 
-All settings live under the `moa.*` namespace. Edit via `settings.json` or use **`Moa: Configure Models`** for the 5-step guided flow.
+All settings live under the `moa.*` namespace. Edit via `settings.json` or use **`Moa: Configure Models`** for the 8-step guided flow.
 
 ### Models
 
@@ -322,12 +322,13 @@ All settings live under the `moa.*` namespace. Edit via `settings.json` or use *
 | Key | Default | Description |
 |---|---|---|
 | `moa.maxReconIterations` | `50` | Hard cap on tool calls per recon task. |
-| `moa.reconContextChars` | `30000` | Character budget for the recon summary injected into ref prompts. |
+| `moa.reconContextChars` | `500000` | **[DEPRECATED v0.14.5]** No longer enforces a cap; only recorded to `meta.json` as an audit metric. Original v0.13.0 role (character budget truncation) was removed because refs are single-turn history-less and 1M-context models can digest any size — if recon truly overflows, that's a search-direction problem for the LLM to handle, not a truncation problem. Kept for backward compat. |
 | `moa.reconAllowTerminal` | `false` | Allow terminal tools in recon (off by default for safety). |
 | `moa.reconEarlyStopStagnant` | `2` | Stop after N consecutive identical tool signatures. |
 | `moa.reconEarlyStopSaturated` | `200` | Stop after N iterations adding <200 chars each (post-iter-5). |
-| `moa.reconL3Threshold` | `30000` | Single-file size (chars) that triggers L3 summarization. |
+| `moa.reconL3Threshold` | `200000` | Single-file size (chars) that triggers L3 summarization. v0.14.4 raised from 60k → 200k — modern 1M-context models rarely need L3; only truly huge files (generated schemas, minified bundles) trigger it. |
 | `moa.reconL3MaxCalls` | `5` | Max L3 grandchild calls per MoA task. `0` disables. |
+| `moa.reconL3TargetChars` | `50000` | L3 target output length (chars). v0.14.4 raised from 10k → 50k to avoid over-compression. |
 
 ## File layout
 
@@ -338,7 +339,7 @@ vscode-moa/
 │   ├── extension.ts            # activate() — registers @moa + LM tools + commands
 │   ├── moaHandler.ts           # ChatRequestHandler — dispatches @moa / @moaloop / @moasingle
 │   ├── moaRunner.ts            # single-shot @moa pipeline (recon → refs → aggregator → acting)
-│   ├── moaConfig.ts            # Configure Models 5-step flow + switchPreset + singlePickWithCheckbox
+│   ├── moaConfig.ts            # Configure Models 8-step flow + switchPreset + singlePickWithCheckbox
 │   ├── presetConfig.ts         # Preset group management (incl. resolveReconModels — v0.18.0)
 │   ├── actingAgent.ts          # Phase 3 tool-calling agent + read-only tool filter + runReconAgent
 │   ├── workspaceContext.ts     # active editor / open docs / project tree snapshot

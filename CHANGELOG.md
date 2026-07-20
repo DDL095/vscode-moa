@@ -5,6 +5,60 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.3] - 2026-07-20
+
+### Fixed — 文字与提示一致性修复（基于 MoA 代码审查报告 `moa_mrsslp09_f00a9c`）
+
+本次修订**只改文字与提示，不改运行时行为**。完整修订路线图见 [`docs/roadmap/v0.18.3-consistency-fix.md`](docs/roadmap/v0.18.3-consistency-fix.md)。
+
+#### P0 — Configure Models 步数多重矛盾
+
+v0.18.2 把流程从 5 步扩到 8 步，但只改了 QuickPick header 的 `title:` 字符串，漏改了 package.json 命令描述和 README 散文描述：
+
+| 位置 | 修订前 | 修订后 |
+|---|---|---|
+| `package.json` `moa.configureModels.description` | `v0.14.14: Five-step flow — (0/4)...(4/4)` | `v0.18.2: Eight-step flow — (0/7)...(7/7)` |
+| `package.json` `moa.switchPreset.description` | `refs count + aggregator + recon + L3` | `+ reconAgg + planner + actor` |
+| `README.md` "Configuration reference" 段 | `the 5-step guided flow` | `the 8-step guided flow` |
+| `README.md` 文件布局注释 | `Configure Models 5-step flow` | `8-step flow` |
+| `src/moaConfig.ts` L292 注释 | `v0.14.14 Step 0/4` | `v0.18.2 Step 0/7` |
+| `src/moaConfig.ts` L379 注释 | `Step 2/4: aggregator` | `Step 2/7: aggregator` |
+
+#### P1 — 配置项默认值与功能语义系统性偏差
+
+README 表格的默认值从 v0.14.4/v0.14.5 起就过时了（实际代码早已调大，README 没同步）：
+
+| 配置项 | README 标注（修订前） | 实际值（package.json + 代码） | 修订后 README |
+|---|---|---|---|
+| `moa.reconL3Threshold` | `30000` | `200000` (6.7×) | `200000` |
+| `moa.reconContextChars` | `30000` (Character budget) | `500000` (DEPRECATED) | `500000` + 标注 DEPRECATED + 解释原因 |
+| L3 输出目标字符数（散文） | `~5k chars` | `DEFAULT_TARGET_CHARS = 50000` (10×) | `~50k chars` |
+| L3 Summarizer 表格行 | `>30K chars to ~5K chars` | `>200K to ~50K` | 修正 |
+
+同时新增 `moa.reconL3TargetChars` 表格行（之前完全漏写）。
+
+#### P2 — 路线图文档状态滞后
+
+`docs/roadmap/v0.15.0-closed-loop-moa.md` 头部仍标注 "状态：设计草案，尚未开始实施"，但 §15 已记录 v0.15.0 完整实施 + hotfix 1/2。修订：
+
+- 头部状态改为 `✅ 已实施（v0.15.0 + hotfix 1/2，详见 §15）`
+- §1.1/§1.2/§2 的"关键缺陷"段落下追加 `✅ 已修复` 注释（保留原设计脉络）
+- §10 文档更新清单全部 `[ ]` → `[x]`
+
+#### P3 — 帮助提示版本号滞后
+
+`src/moaHandler.ts` `buildHelpMarkdown()` 硬编码 `Usage (v0.17.0)` → 修订为 `Usage (v0.18.3)`。
+
+#### P4 — NLS 本地化文件严重过时
+
+`package.nls.json` / `package.nls.zh-cn.json` 含早期草稿遗留的完全不对应字段（`configuration.defaultPreset` / `configuration.presetsDir` / `configuration.timeoutSec` 等都不存在于实际 package.json）。修订：清空为最小骨架（仅保留 `extension.displayName` / `extension.description`），消除"未来按 NLS 添加 % 引用会显示错误字段"的陷阱。
+
+**影响**：package.json 当前未用 `%key%` 语法引用 NLS，所以清空不影响实际 UI。
+
+### Added — 新增修订路线图文档
+
+新增 [`docs/roadmap/v0.18.3-consistency-fix.md`](docs/roadmap/v0.18.3-consistency-fix.md)，记录本次修订的完整问题清单（5 类）、修复计划（5 phase）、不做什么（out-of-scope）、验收标准。
+
 ## [0.18.2] - 2026-07-20
 
 ### Fixed — Configure Models 数据丢失 bug（严重）
