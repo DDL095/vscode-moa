@@ -105,8 +105,10 @@ export class MoaReconTool implements vscode.LanguageModelTool<ReconToolInput> {
     const candidatePaths: string[] = [];
 
     // From scopeHint — extract path:line-line patterns.
+    // v0.19.1 §6: 扩展 regex 支持中文字符（\u4e00-\u9fa5）——Windows 中文路径
+    // 如 "D:\BaiduYunDrive\OneDrive\实验相关文档\AI\src\foo.ts" 原本无法匹配。
     if (scopeHint) {
-      const pathRegex = /([\w./\\-]+\.\w+)(?::(\d+)(?:-(\d+))?)?/g;
+      const pathRegex = /([\w./\\\u4e00-\u9fa5-]+\.\w+)(?::(\d+)(?:-(\d+))?)?/g;
       let m: RegExpExecArray | null;
       while ((m = pathRegex.exec(scopeHint)) !== null) {
         candidatePaths.push(m[1]);

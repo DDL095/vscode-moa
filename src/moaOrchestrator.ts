@@ -370,6 +370,44 @@ interface OrchestrationMeta {
   total_evidence_items: number;
   /** finalize 后才填。 */
   final_confidence?: number;
+
+  // ── v0.19.1 §5: 信息可见性增强字段 ──────────────────────────────────
+
+  /** v0.19.1 §5: 任务总耗时（秒）。finalized 后填，运行中为当前累计。 */
+  total_elapsed_sec?: number;
+  /** v0.19.1 §5: 整个任务的工具调用总数（recon + actor 累加）。 */
+  total_tool_calls?: number;
+  /** v0.19.1 §5: 收敛来源（max_iter / natural / should_stop）。 */
+  convergence_source?: string;
+
+  /** v0.19.1 §5: per-role 汇总（rounds 数 + 总耗时 + 工具调用数）。 */
+  per_role_breakdown?: {
+    planner: { rounds: number; total_elapsed_sec: number };
+    recon: { rounds: number; total_elapsed_sec: number; total_tool_calls: number };
+    refs: { rounds: number; total_elapsed_sec: number };
+    aggregator: { rounds: number; total_elapsed_sec: number };
+    actor: { rounds: number; total_elapsed_sec: number; actions_executed: number; tool_calls: number };
+  };
+
+  /** v0.19.1 §5: 每轮每个角色的模型调用记录（可画出"哪一轮用了哪个模型"）。 */
+  model_invocations?: Array<{
+    iter: number;
+    role: 'planner' | 'recon' | 'refs' | 'aggregator' | 'actor';
+    model: string;
+    elapsed_sec?: number;
+    tool_calls?: number;
+  }>;
+
+  /** v0.19.1 §5: Actor 执行的所有 action（结构化审计日志）。 */
+  actor_actions_log?: Array<{
+    iter: number;
+    type: string;
+    target: string;
+    status: string;
+    output_chars?: number;
+    artifacts?: string[];
+    error_message?: string;
+  }>;
 }
 
 /**
@@ -473,9 +511,159 @@ async function renderMetaJson(
     })),
     total_evidence_items: state.evidence.length,
     final_confidence: state.status === 'finalized' ? state.completeness : undefined,
+
+    // v0.19.1 §5: 信息可见性增强字段
+    convergence_source: state.convergence_source,
+    total_elapsed_sec: computeTotalElapsedSec(state),
+    total_tool_calls: computeTotalToolCalls(state),
+    per_role_breakdown: computePerRoleBreakdown(state),
+    model_invocations: buildModelInvocations(state, resolvedRefModels ?? [], resolvedAggregator ?? ''),
+    actor_actions_log: buildActorActionsLog(state),
   };
 
   await writeMdArtifact(taskId, '', 'meta.json', JSON.stringify(meta, null, 2));
+}
+
+/**
+ * v0.19.1 §5: 计算任务总耗时（秒）。
+ *
+ * 策略：用 history 中每条 started_at 的时间戳，取首末差值。
+ * 兜底：created_at → last_update。
+ */
+function computeTotalElapsedSec(state: MoaState): number {
+  try {
+    if (state.history.length === 0) return 0;
+    const first = new Date(state.history[0].started_at).getTime();
+    const lastTs = state.history[state.history.length - 1]?.started_at;
+    if (!lastTs) return 0;
+    const last = new Date(lastTs).getTime();
+    const diffMs = last - first;
+    return diffMs > 0 ? Math.round(diffMs / 1000) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * v0.19.1 §5: 统计任务工具调用总数。
+ */
+function computeTotalToolCalls(state: MoaState): number {
+  let total = 0;
+  for (const h of state.history) {
+    if (h.recon_result?.tool_calls) total += h.recon_result.tool_calls;
+    if (h.actor_result?.tool_calls) total += h.actor_result.tool_calls;
+  }
+  return total;
+}
+
+/**
+ * v0.19.1 §5: 构建 per-role breakdown。
+ *
+ * 注意：MoA 不显式追踪 per-role 耗时（recon/refs/aggregator 内部耗时未入 state），
+ * 这里只能近似：用 actor_history 累加 elapsed_sec，其他角色用 0 占位。
+ * 完整 per-role 耗时需 v0.20.x 在 callRecon / callRefs 等钩子点记录。
+ */
+function computePerRoleBreakdown(state: MoaState): OrchestrationMeta['per_role_breakdown'] {
+  let actorRounds = 0;
+  let actorElapsed = 0;
+  let actorActions = 0;
+  let actorToolCalls = 0;
+  for (const h of state.history) {
+    if (h.actor_result) {
+      actorRounds += 1;
+      actorElapsed += h.actor_result.elapsed_sec ?? 0;
+      actorActions += h.actor_result.executed_actions.length;
+      actorToolCalls += h.actor_result.tool_calls ?? 0;
+    }
+  }
+
+  return {
+    planner: { rounds: 1, total_elapsed_sec: 0 },  // 待 v0.20.x 记录
+    recon: { rounds: state.history.filter((h) => h.recon_result).length, total_elapsed_sec: 0, total_tool_calls: state.history.reduce((s, h) => s + (h.recon_result?.tool_calls ?? 0), 0) },
+    refs: { rounds: state.history.length, total_elapsed_sec: 0 },  // 待 v0.20.x 记录
+    aggregator: { rounds: state.history.length, total_elapsed_sec: 0 },  // 待 v0.20.x 记录
+    actor: { rounds: actorRounds, total_elapsed_sec: Math.round(actorElapsed), actions_executed: actorActions, tool_calls: actorToolCalls },
+  };
+}
+
+/**
+ * v0.19.1 §5: 构建 model_invocations 列表。
+ *
+ * 每轮每个角色的模型调用。Refs 每 N 个 advisor 共用一个轮次（合并为 1 条）。
+ */
+function buildModelInvocations(
+  state: MoaState,
+  refModels: string[],
+  aggregatorModel: string,
+): OrchestrationMeta['model_invocations'] {
+  const invocations: NonNullable<OrchestrationMeta['model_invocations']>[number][] = [];
+
+  for (const h of state.history) {
+    // Planner 只在 iter 1 执行（state 没单独追踪，简化：每轮都打一条）
+    invocations.push({
+      iter: h.iteration,
+      role: 'planner',
+      model: aggregatorModel,  // 待 v0.20.x 独立追踪 planner model
+      elapsed_sec: undefined,
+    });
+
+    if (h.recon_result) {
+      invocations.push({
+        iter: h.iteration,
+        role: 'recon',
+        model: '(recon agent)',  // 待 v0.20.x 追踪 recon model
+        tool_calls: h.recon_result.tool_calls,
+      });
+    }
+
+    // Refs：合并为一条（用第一个 model 名代表）
+    if (h.ref_outputs && h.ref_outputs.length > 0) {
+      invocations.push({
+        iter: h.iteration,
+        role: 'refs',
+        model: refModels[0] ?? '(unknown)',
+      });
+    }
+
+    invocations.push({
+      iter: h.iteration,
+      role: 'aggregator',
+      model: aggregatorModel,
+    });
+
+    if (h.actor_result) {
+      invocations.push({
+        iter: h.iteration,
+        role: 'actor',
+        model: aggregatorModel,  // 待 v0.20.x 追踪 actor model
+        tool_calls: h.actor_result.tool_calls,
+      });
+    }
+  }
+
+  return invocations;
+}
+
+/**
+ * v0.19.1 §5: 构建 actor_actions_log。
+ */
+function buildActorActionsLog(state: MoaState): OrchestrationMeta['actor_actions_log'] {
+  const log: NonNullable<OrchestrationMeta['actor_actions_log']>[number][] = [];
+  for (const h of state.history) {
+    if (!h.actor_result) continue;
+    for (const ar of h.actor_result.executed_actions) {
+      log.push({
+        iter: h.iteration,
+        type: ar.action.type,
+        target: ar.action.target,
+        status: ar.status,
+        output_chars: ar.output_chars,
+        artifacts: ar.artifacts,
+        error_message: ar.error_message,
+      });
+    }
+  }
+  return log;
 }
 
 /**
@@ -1264,10 +1452,13 @@ export async function runIteration(
     } else {
       // Actor 启用，正常执行（v0.18.4 gate 顺序已修复 + v0.19.0 §1 Layer 2 已修复）
       progress?.(`[MoA Actor] running with ${aggOutput.action_items.length} action(s)...`);
+      // v0.19.1 §3: 传入 taskDir 以启用 SafeExecutor（保守执行模式）
+      const actorTaskDir = await getTaskDir(taskId);
       const actorResult = await callActor({
         task: state.task,
         actionItems: aggOutput.action_items,
         iteration: iterNum,
+        taskDir: actorTaskDir,
       }, token, progress, undefined, toolInvocationToken);
       record.actor_result = actorResult;
       state.actor_history.push(actorResult);

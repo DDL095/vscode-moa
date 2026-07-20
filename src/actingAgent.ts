@@ -226,6 +226,19 @@ export interface ActingAgentOptions {
    * use (recon summary extraction). Default false.
    */
   captureToolResults?: boolean;
+  /**
+   * v0.19.1 §3: SafeExecutor 实例（仅 acting 模式有效）。
+   *
+   * 传入后，所有 tool calls 会先经过 SafeExecutor.wrapToolCall 拦截：
+   *   - write_file / apply_patch / insert_edit / replace_string：预备份原文件
+   *   - delete / remove：移到 _trash/ 而非真删
+   *   - execute（terminal）：仅记 manifest
+   *
+   * manifest 累积到 `.moa_cache/<task_id>/manifest.json`，iter 末尾 flush。
+   *
+   * recon 模式（readOnly=true）不应传入此参数（recon 不应有副作用）。
+   */
+  safeExecutor?: import('./moaCore/safeExecutor').SafeExecutor;
 }
 
 /**
@@ -869,12 +882,27 @@ export async function runActingAgent(
         if (!toolInvocationToken) {
           throw new Error('No toolInvocationToken in ChatRequest (cannot execute tools)');
         }
-        // API signature: invokeTool(name, { input, toolInvocationToken }, token)
-        const result = await vscode.lm.invokeTool(
-          call.name,
-          { input: call.input, toolInvocationToken },
-          token
+        // v0.19.1 §3: SafeExecutor 包装（仅 acting 模式且传入 executor 时）
+        //
+        // 流程：
+        //   1. 分类工具（write_file / delete / execute / read / grep / other）
+        //   2. write_file/delete → 预备份原文件（.bak.<timestamp> 或 _trash/）
+        //   3. 实际 invokeTool
+        //   4. 记录 manifest
+        //
+        // 注意：recon 模式（readOnly=true）永远不传 safeExecutor，因此这段
+        // 包装对 recon 无影响（空操作开销）。
+        const rawInvoke = () => Promise.resolve(
+          vscode.lm.invokeTool(
+            call.name,
+            { input: call.input, toolInvocationToken },
+            token
+          )
         );
+
+        const result = options?.safeExecutor && !readOnly
+          ? await options.safeExecutor.wrapToolCall(call.name, call.input, rawInvoke)
+          : await rawInvoke();
 
         // Capture plain-text representation of the result (for recon summary).
         // v0.14.7: 同时规范化 result.content，确保透传给 ToolResultPart 的 parts 都是

@@ -20,6 +20,8 @@ import { probeTools } from './probeTools';
 import { registerMoaAnalyzeTool } from './moaTool';
 import { registerMoaReconTool } from './moaReconTool';
 import { registerMoaOrchestrateTools } from './moaOrchestrateTools';
+// v0.19.1 §4: CacheManager
+import { registerCacheManagerCommands } from './cacheManager';
 
 const PARTICIPANT_ID = 'moa-bridge.moa';
 const PARTICIPANT_LOOP_ID = 'moa-bridge.moaloop';
@@ -114,6 +116,9 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand('moa.switchPreset', switchPreset),
       vscode.commands.registerCommand('moa.probeTools', probeTools)
     );
+
+    // v0.19.1 §4: CacheManager 命令注册
+    registerCacheManagerCommands(context);
 
     // v0.14.14: Auto-migrate legacy flat config → presets.default (idempotent).
     // Fire-and-forget — runs in background, logs to diag channel on completion.

@@ -1,5 +1,8 @@
 {
   "extension.displayName": "MoA Bridge - Copilot 多模型协作",
   "extension.description": "VSCode Copilot Chat 的多模型协作插件。通过原生 vscode.lm API 编排 5 角色流水线（规划 → 侦察 → 参考 → 聚合 → 执行）。支持 @moa 聊天参与者、LM 工具及预设模型组。",
-  "moa.config.enableActorInLoop": "在 5 角色 Loop 模式（`@moa` 聊天参与者）中启用 Actor 角色。**默认 false**（保守原则）——Aggregator 给出的 `actor_needed` 建议会被降级为 `recon_needed`，Actor 完全不执行。设为 `true` 时，Actor 通过 acting agent 循环执行 action_items（可能写文件、跑终端命令）。与 `moa.enableActingAgent`（控制 moaRunner 单次 Hermes 模式）独立。"
+  "moa.config.enableActorInLoop": "在 5 角色 Loop 模式（`@moa` 聊天参与者）中启用 Actor 角色。**默认 false**（保守原则）——Aggregator 给出的 `actor_needed` 建议会被降级为 `recon_needed`，Actor 完全不执行。设为 `true` 时，Actor 通过 acting agent 循环执行 action_items（可能写文件、跑终端命令）。与 `moa.enableActingAgent`（控制 moaRunner 单次 Hermes 模式）独立。",
+  "moa.config.safeExecutionMode": "v0.19.1：**保守执行模式**（默认 **true**）。启用后，Actor 的所有工具调用会被 SafeExecutor 包装：`write_file`/`apply_patch`/`insert_edit`/`replace_string` 类操作执行前会把原文件备份到 `<目标>.bak.<时间戳>`；`delete`/`remove` 类操作把文件移动到 `.moa_cache/<task_id>/_trash/`（而非真删）；所有副作用类操作记录到 `.moa_cache/<task_id>/manifest.json`（含 iter/seq/type/target/backup/status 字段）。禁用时 Actor 直接执行工具，无备份无清单（不推荐）。",
+  "moa.config.cacheTtlDays": "v0.19.1：**缓存 TTL**（单位：天，默认 **30**）。超过此天数的任务会被 `MoA: Cleanup Old Tasks` 命令清理。范围 1-365。",
+  "moa.config.cacheRootDir": "v0.19.1：**缓存根目录**覆盖（默认空 = 使用 `<工作区>/.moa_cache/`）。设为绝对路径（如 `D:/moa_cache`）可跨工作区集中存储所有 MoA 任务缓存。"
 }

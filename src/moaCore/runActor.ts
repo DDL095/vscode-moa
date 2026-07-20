@@ -20,6 +20,8 @@ import {
 } from './roles';
 import { getActivePresetConfig } from '../presetConfig';
 import { runActingAgent } from '../actingAgent';
+// v0.19.1 §3: SafeExecutor（保守执行模式）
+import { createSafeExecutor } from './safeExecutor';
 
 /**
  * v0.19.0 §1: Actor 调用 actingAgent 时的最大迭代数。
@@ -83,6 +85,11 @@ export async function callActor(
     task: string;
     actionItems: NonNullable<AggregatorOutput['action_items']>;
     iteration: number;
+    /**
+     * v0.19.1 §3: 任务目录（.moa_cache/<task_id>/），用于 SafeExecutor
+     * 写 manifest.json 和 _trash/。可选（不传则不启用保守执行模式）。
+     */
+    taskDir?: string;
   },
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,
@@ -102,6 +109,24 @@ export async function callActor(
 
     const actingStream = stream ?? createProgressOnlyStream(progress);
 
+    // v0.19.1 §3: SafeExecutor（保守执行模式）
+    //
+    // 仅当以下条件全部满足时启用：
+    //   1. params.taskDir 存在（moaOrchestrator 传入）
+    //   2. moa.safeExecutionMode 配置为 true（默认 true）
+    //
+    // 启用后，所有 tool calls 会经过 SafeExecutor 拦截：
+    //   - write_file / delete 类：预备份 + manifest 记录
+    //   - execute 类：仅 manifest 记录
+    //   - read / grep / other：仅 manifest 记录
+    const safeModeEnabled = vscode.workspace.getConfiguration('moa').get<boolean>('safeExecutionMode', true);
+    const safeExecutor = (params.taskDir && safeModeEnabled)
+      ? createSafeExecutor(params.taskDir, params.iteration, progress)
+      : undefined;
+    if (safeExecutor) {
+      progress?.(`[MoA Actor] SafeExecutor enabled (manifest will be written to ${params.taskDir}/manifest.json)`);
+    }
+
     // 使用默认 acting agent prompt（不传 systemPrompt override）
     // 把 Actor 的指令通过 aggregatorGuidance 注入
     const result = await runActingAgent(
@@ -120,8 +145,23 @@ export async function callActor(
         // 代价：内存占用增加（保留所有 tool result 文本）。
         // 好处：Layer 2 bug 下 LLM 不输出 JSON 时仍有可审计证据。
         captureToolResults: true,
+        // v0.19.1 §3: SafeExecutor（保守执行模式）
+        safeExecutor,
       }
     );
+
+    // v0.19.1 §3: iter 结束后 flush manifest
+    if (safeExecutor) {
+      try {
+        await safeExecutor.flushManifest();
+        const records = safeExecutor.getRecords();
+        if (records.length > 0) {
+          progress?.(`[MoA Actor] SafeExecutor: ${records.length} action(s) recorded to manifest.json`);
+        }
+      } catch (err) {
+        progress?.(`[MoA Actor] SafeExecutor flushManifest failed: ${err instanceof Error ? err.message.substring(0, 100) : String(err)}`);
+      }
+    }
 
     const elapsed = (Date.now() - start) / 1000;
     progress?.(`[MoA Actor] done in ${elapsed.toFixed(1)}s, ${result.iterations} iterations, ${result.toolCallsSucceeded}/${result.toolCallsSucceeded + result.toolCallsFailed} tool calls OK`);
