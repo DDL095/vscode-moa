@@ -200,13 +200,13 @@ async function singlePickWithCheckbox<T extends { label: string; picked?: boolea
 }
 
 /**
- * v0.14.1: 持久化配置到 VSCode settings。
+ * v0.14.1: 持久化配置到 VSCode settings.
  *
- * 策略变更：**同时写到 User (Global) 和 Workspace 两级**。
+ * 策略变更：**同时写到 User (Global) 和 Workspace 两级**.
  *   - User 级：保证全局生效（其他项目也能用）
  *   - Workspace 级：显式覆盖（保证当前项目必然生效，即使有旧 Workspace 配置）
  *
- * 不再让用户选保存目标 —— 默认 Both，简化 UX，避免"配了但没生效"的困惑。
+ * 不再让用户选保存目标 —— 默认 Both，简化 UX，避免"配了但没生效"的困惑.
  *
  * @param refs       新的 ref 列表（undefined = 不更新）
  * @param aggregatorName 新 aggregator model id（undefined = 不更新）
@@ -348,10 +348,10 @@ export async function configureModels(): Promise<void> {
     return { ...it, picked: isPicked };
   });
 
-  // Step 1/4: refs (multi-select)
+  // Step 1/7: refs (multi-select) — v0.18.2: 原 Step 1/4
   const refPicks = await vscode.window.showQuickPick(refItems, {
-    placeHolder: 'Step 1/4 — Tick reference advisor models (2-8 recommended)',
-    title: 'MoA Configure — Step 1/4: Reference Advisors (equal mode, Hermes prompt)',
+    placeHolder: 'Step 1/7 — Tick reference advisor models (2-8 recommended)',
+    title: 'MoA Configure — Step 1/7: Reference Advisors (equal mode, Hermes prompt)',
     canPickMany: true,
     matchOnDescription: true,
     matchOnDetail: true,
@@ -396,7 +396,7 @@ export async function configureModels(): Promise<void> {
 
   const aggPick = await singlePickWithCheckbox(
     aggItems,
-    `MoA Configure — Step 2/4: Aggregator (${newRefs.length} ref(s) selected)`,
+    `MoA Configure — Step 2/7: Aggregator (${newRefs.length} ref(s) selected)`,
     'Pick ONE aggregator model (synthesizes ref outputs). Click ✓ or press Enter to confirm.'
   );
   if (!aggPick) return;
@@ -405,57 +405,185 @@ export async function configureModels(): Promise<void> {
   const aggKey = modelKey(aggModel);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // v0.14.0 Step 3/4: Recon agent (single-select 对勾)
+  // v0.18.2 Step 3/7: Recon Agents (multi-select, supports parallel)
   //
-  // Recon 是信息收集角色，需要工具调用稳定性。默认 = aggregator（向后兼容
-  // v0.13.x）；用户可显式选其他模型。
+  // v0.18.2: 从单选改为多选，支持并行 Recon（v0.18.0 引入的 reconModels[]）。
+  //   - 勾 "Use aggregator" sentinel（不勾具体模型）= 单模型 fallback 到 aggregator
+  //   - 勾 1 个具体模型 = 单模型模式（Recon Aggregator 仍跑，做标准化）
+  //   - 勾 2+ 个具体模型 = 并行模式（受 moa.parallelRecon 控制）
   //
-  // UI 设计：
-  //   - 顶部加一个特殊选项 "(use aggregator: <name>)" —— 选这个表示 fallback
-  //   - 其余选项是所有可用模型
-  //   - 预勾选当前配置的 reconModel（空则勾 aggregator fallback 项）
+  // 数据源（向后兼容）：
+  //   - seed.reconModels（数组，优先）→ 预勾选这些
+  //   - seed.reconModel（单数，v0.14.x 写法）→ 预勾选这 1 个
+  //   - 两者都空 → 预勾选 "Use aggregator" sentinel
   // ─────────────────────────────────────────────────────────────────────────
-  const existingRecon = seed.reconModel;
-  const RECON_FALLBACK_KEY = '__use_aggregator__';  // 特殊 sentinel key
-  const reconFallbackLabel = `$(sync) Use aggregator (${displayLabel(aggModel)})`;
+  const existingReconArray = Array.isArray(seed.reconModels) ? seed.reconModels : [];
+  const existingReconSingle = seed.reconModel;
+  const RECON_FALLBACK_SENTINEL_LABEL = `$(sync) Use aggregator (${displayLabel(aggModel)})`;
 
-  // 构造 recon 选项列表（fallback 项 + 全部模型）
+  // 解析已有配置的预勾选 modelKey 集合
+  const preSelectedReconKeys = new Set<string>();
+  for (const r of existingReconArray) {
+    if (r?.model && r.model.trim().length > 0) preSelectedReconKeys.add(r.model);
+  }
+  if (existingReconSingle?.model && existingReconSingle.model.trim().length > 0) {
+    preSelectedReconKeys.add(existingReconSingle.model);
+  }
+  const reconUseAggregator = preSelectedReconKeys.size === 0;
+
   const reconItems = [
     {
-      label: reconFallbackLabel,
-      description: 'Recommended — keep recon aligned with aggregator (v0.13.x behavior)',
-      detail: 'Click to use the aggregator model for recon as well',
+      label: RECON_FALLBACK_SENTINEL_LABEL,
+      description: 'Recommended for simple setups — keep recon aligned with aggregator (v0.13.x behavior)',
+      detail: 'If you pick this, do NOT pick any specific model below',
       model: null as vscode.LanguageModelChat | null,  // null = fallback sentinel
-      picked: !existingRecon?.model || existingRecon.model === '',
+      picked: reconUseAggregator,
     },
     ...items.map((it) => ({
       ...it,
-      picked: existingRecon?.model === modelKey(it.model),
+      picked: preSelectedReconKeys.has(modelKey(it.model)),
     })),
   ];
 
-  const reconPick = await singlePickWithCheckbox(
-    reconItems,
-    `MoA Configure — Step 3/4: Recon Agent (aggregator=${displayLabel(aggModel)})`,
-    'Pick ONE recon agent model (information collector). Click ✓ or press Enter to confirm.'
-  );
-  if (!reconPick) return;
+  const reconPicks = await vscode.window.showQuickPick(reconItems, {
+    placeHolder: 'Step 3/7 — Tick recon agent model(s). Pick 1 for single-mode, 2+ for parallel, or pick "Use aggregator" for fallback.',
+    title: 'MoA Configure — Step 3/7: Recon Agents (multi-select for parallel)',
+    canPickMany: true,
+    matchOnDescription: true,
+    matchOnDetail: true,
+  }) as Array<{ label: string; model: vscode.LanguageModelChat | null }> | undefined;
+  if (!reconPicks) return; // Esc / cancel = abandon changes
 
-  // reconKey: 空字符串 = fallback；否则 = m.id
-  const reconModel = (reconPick as any).model as vscode.LanguageModelChat | null;
-  const reconKey = reconModel ? modelKey(reconModel) : '';
+  // 处理选择结果
+  const reconSentinelPicked = reconPicks.some((p) => p.model === null);
+  const reconConcretePicks = reconPicks.filter((p) => p.model !== null) as Array<{ model: vscode.LanguageModelChat }>;
+
+  // 校验：sentinel + 具体模型不能共存（语义冲突）
+  if (reconSentinelPicked && reconConcretePicks.length > 0) {
+    vscode.window.showWarningMessage(
+      'You picked both "Use aggregator" and specific model(s). These are mutually exclusive — please re-run and pick one or the other.'
+    );
+    return;
+  }
+  // 全空也视为 fallback（与 refs 的"清空需确认"不同，recon 空选 = 用 aggregator 是合理默认）
+  let newReconModels: Array<{ model: string }>;
+  let reconKey: string;  // 兼容老字段（reconModel 单数，取第一个）
+  if (reconConcretePicks.length === 0) {
+    newReconModels = [{ model: '' }];
+    reconKey = '';
+  } else {
+    newReconModels = reconConcretePicks.map((p) => ({ model: modelKey(p.model) }));
+    reconKey = newReconModels[0].model;
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // v0.14.0 Step 4/4: L3 Summarizer (single-select 对勾 + 禁用选项)
+  // v0.18.2 Step 4/7: Recon Aggregator (single-select, with "use main aggregator" sentinel)
   //
-  // L3 是大文件精选孙代理（CLAUDE.md §2.4 强制 M3）。
+  // Recon Aggregator 整合并行 Recon 的多份结果（v0.18.0 Plan B）。
+  // 默认 fallback 到主 aggregator。
+  // ─────────────────────────────────────────────────────────────────────────
+  const existingReconAgg = seed.reconAggregator;
+  const RECON_AGG_FALLBACK_LABEL = `$(sync) Use main aggregator (${displayLabel(aggModel)})`;
+  const reconAggItems = [
+    {
+      label: RECON_AGG_FALLBACK_LABEL,
+      description: 'Recommended — Recon Aggregator reuses the main aggregator model',
+      detail: 'Pick this unless you want a separate model for recon result integration',
+      model: null as vscode.LanguageModelChat | null,
+      picked: !existingReconAgg?.model || existingReconAgg.model === '',
+    },
+    ...items.map((it) => ({
+      ...it,
+      picked: existingReconAgg?.model === modelKey(it.model),
+    })),
+  ];
+
+  const reconAggPick = await singlePickWithCheckbox(
+    reconAggItems,
+    `MoA Configure — Step 4/7: Recon Aggregator (recon=${reconConcretePicks.length === 0 ? 'aggregator' : reconConcretePicks.map((p) => p.model.name).join(' + ')})`,
+    'Pick ONE model to integrate parallel Recon outputs (or use main aggregator).',
+  );
+  if (!reconAggPick) return;
+
+  const reconAggModel = (reconAggPick as any).model as vscode.LanguageModelChat | null;
+  const reconAggKey = reconAggModel ? modelKey(reconAggModel) : '';
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // v0.18.2 Step 5/7: Planner (single-select, with "use aggregator" sentinel)
+  //
+  // Planner 在 iter 1 跑一次，做任务拆解 + 给 Recon 方向（v0.15.0）。
+  // 默认 fallback 到主 aggregator（推荐用强推理模型）。
+  // ─────────────────────────────────────────────────────────────────────────
+  const existingPlanner = seed.planner;
+  const PLANNER_FALLBACK_LABEL = `$(sync) Use aggregator (${displayLabel(aggModel)})`;
+  const plannerItems = [
+    {
+      label: PLANNER_FALLBACK_LABEL,
+      description: 'Recommended — Planner reuses the aggregator model (strong reasoning)',
+      detail: 'Pick this unless you want a different model for task planning',
+      model: null as vscode.LanguageModelChat | null,
+      picked: !existingPlanner?.model || existingPlanner.model === '',
+    },
+    ...items.map((it) => ({
+      ...it,
+      picked: existingPlanner?.model === modelKey(it.model),
+    })),
+  ];
+
+  const plannerPick = await singlePickWithCheckbox(
+    plannerItems,
+    `MoA Configure — Step 5/7: Planner (task decomposition, iter 1 only)`,
+    'Pick ONE Planner model (or use aggregator).',
+  );
+  if (!plannerPick) return;
+
+  const plannerModel = (plannerPick as any).model as vscode.LanguageModelChat | null;
+  const plannerKey = plannerModel ? modelKey(plannerModel) : '';
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // v0.18.2 Step 6/7: Actor (single-select, with "use aggregator" sentinel)
+  //
+  // Actor 执行 Aggregator 给出的 action_items（v0.15.0）。
+  // 默认 fallback 到主 aggregator（沿用 v0.14.x acting 行为）。
+  // ─────────────────────────────────────────────────────────────────────────
+  const existingActor = seed.actor;
+  const ACTOR_FALLBACK_LABEL = `$(sync) Use aggregator (${displayLabel(aggModel)})`;
+  const actorItems = [
+    {
+      label: ACTOR_FALLBACK_LABEL,
+      description: 'Recommended — Actor reuses the aggregator model (full tool access)',
+      detail: 'Pick this unless you want a different model for action execution',
+      model: null as vscode.LanguageModelChat | null,
+      picked: !existingActor?.model || existingActor.model === '',
+    },
+    ...items.map((it) => ({
+      ...it,
+      picked: existingActor?.model === modelKey(it.model),
+    })),
+  ];
+
+  const actorPick = await singlePickWithCheckbox(
+    actorItems,
+    `MoA Configure — Step 6/7: Actor (executes action_items with full tools)`,
+    'Pick ONE Actor model (or use aggregator).',
+  );
+  if (!actorPick) return;
+
+  const actorModel = (actorPick as any).model as vscode.LanguageModelChat | null;
+  const actorKey = actorModel ? modelKey(actorModel) : '';
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // v0.14.0 Step 7/7: L3 Summarizer (single-select 对勾 + 禁用选项)
+  // （原 Step 4/4，v0.18.2 改为 Step 7/7）
+  //
+  // L3 是大文件精选孙代理。
   //
   // UI 设计：
   //   - 顶部加 "Disable L3 (use L2 truncation only)" —— 选这个表示禁用
   //   - 其余选项是所有可用模型
   //
   // v0.18.1: 取消"未配置时主动查找 MiniMax-M3 并预勾选"的行为。
-  //   首次配置时默认勾 "Disable L3"（"什么都不做"是更安全的默认），
+  //   首次配置时默认勾 "Disable L3"（"什么都不做"是更安全的默认）,
   //   避免用户在不知情的情况下让某个模型被默认选上。
   // ─────────────────────────────────────────────────────────────────────────
   const existingL3 = seed.l3Summarizer;
@@ -496,7 +624,7 @@ export async function configureModels(): Promise<void> {
 
   const l3Pick = await singlePickWithCheckbox(
     l3Items,
-    `MoA Configure — Step 4/4: L3 Summarizer (recon=${reconKey || 'aggregator'})`,
+    `MoA Configure — Step 7/7: L3 Summarizer (recon=${reconKey || 'aggregator'})`,
     'Pick ONE L3 summarizer model (large file condenser) or the disable option. Click ✓ or press Enter to confirm.'
   );
   if (!l3Pick) return;
@@ -507,11 +635,21 @@ export async function configureModels(): Promise<void> {
   // v0.7.0: store m.id (unique).
   // v0.14.1: saveConfiguration 同时写到 User + Workspace，返回 boolean
   // v0.14.14: 改为 savePreset —— 保存到 moa.presets[targetPresetKey] 而不是扁平字段
+  //
+  // v0.18.2: 修复数据丢失 bug —— presetToSave 现在保留全部 8 个字段：
+  //   refModels / aggregator / reconModel（单数兼容）/ reconModels（数组，v0.18.0）/
+  //   reconAggregator（v0.18.0）/ planner（v0.15.0）/ actor（v0.15.0）/ l3Summarizer
+  // 之前版本只写 6 个字段，导致用户手编 settings.json 的 planner/actor/reconModels/
+  // reconAggregator 在 Configure Models 编辑后被静默清空。
   const presetToSave: MoaPreset = {
     name: targetPresetKey,
     refModels: newRefs,
     aggregator: { model: aggKey, temperature: existingAgg?.temperature ?? 0.4 },
-    reconModel: { model: reconKey },
+    reconModel: { model: reconKey },             // v0.18.2: 取 reconModels[0]，兼容老读取代码
+    reconModels: newReconModels,                  // v0.18.2 新增：数组，优先级高于 reconModel
+    reconAggregator: { model: reconAggKey },      // v0.18.2 新增
+    planner: { model: plannerKey },               // v0.18.2 新增
+    actor: { model: actorKey },                   // v0.18.2 新增
     l3Summarizer: { model: l3Key },
     description: seed.description,
     createdAt: seed.createdAt ?? new Date().toISOString(),
@@ -524,11 +662,20 @@ export async function configureModels(): Promise<void> {
   }
 
   if (saved) {
+    // v0.18.2: 完成消息扩展到 8 字段
+    const reconStr = reconConcretePicks.length === 0
+      ? '(= aggregator)'
+      : reconConcretePicks.length === 1
+        ? displayLabel(reconConcretePicks[0].model)
+        : `${reconConcretePicks.length} models (${reconConcretePicks.map((p) => p.model.name).join(' + ')})`;
     const parts = [
       `preset=${targetPresetKey}${presetChoice.makeActive ? ' (active)' : ''}`,
       `${newRefs.length} ref(s)`,
       `aggregator=${displayLabel(aggModel)}`,
-      `recon=${reconKey ? displayLabel(reconModel!) : '(= aggregator)'}`,
+      `recon=${reconStr}`,
+      `reconAgg=${reconAggKey ? displayLabel(reconAggModel!) : '(= aggregator)'}`,
+      `planner=${plannerKey ? displayLabel(plannerModel!) : '(= aggregator)'}`,
+      `actor=${actorKey ? displayLabel(actorModel!) : '(= aggregator)'}`,
       `L3=${l3Key ? displayLabel(l3Model!) : '(disabled)'}`,
     ];
     vscode.window.showInformationMessage(
@@ -619,7 +766,7 @@ async function pickOrCreatePreset(): Promise<
   }
 
   const picked = await vscode.window.showQuickPick(options, {
-    title: 'MoA Configure — Step 0/4: Preset Group',
+    title: 'MoA Configure — Step 0/7: Preset Group',
     placeHolder: 'Pick a preset to edit, create new, or delete. Esc to edit the active preset.',
     matchOnDescription: true,
     matchOnDetail: true,

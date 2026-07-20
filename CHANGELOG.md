@@ -5,6 +5,54 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.2] - 2026-07-20
+
+### Fixed — Configure Models 数据丢失 bug（严重）
+
+**问题**：v0.15.0/v0.18.0 在 `MoaPreset` 类型上加了 4 个新字段（`planner` / `actor` / `reconModels` / `reconAggregator`），但 `configureModels()` 的 `presetToSave` 只写其中 6 个字段（`refModels` / `aggregator` / `reconModel` / `l3Summarizer` / `description` / `createdAt`）。
+
+**真实影响**：用户按 README 示例在 `settings.json` 手动配置了这 4 个字段后，如果通过 Configure Models 编辑该 preset（哪怕只是改一个 ref），保存后这 4 个字段被静默清空。
+
+**修复**：`presetToSave` 现在保留全部 8 个字段。`reconModel`（单数）仍写入以兼容老读取代码（取 `reconModels[0]`）。
+
+### Added — Configure Models 扩展到 8 步流程，全部角色暴露 UI
+
+v0.14.0 引入的 5 步流程只覆盖 4 个字段。v0.15.0/v0.18.0 又新增了 4 个角色但没暴露 UI，用户必须手编 `settings.json`。v0.18.2 把流程扩展到 8 步，全部 7 个角色 + L3 都有 UI 入口：
+
+| Step | 角色 | UI | 新增/原 |
+|---|---|---|---|
+| 0/7 | Preset group | single-select | 原 |
+| 1/7 | Refs | multi-select | 原 |
+| 2/7 | Aggregator | single-select | 原 |
+| 3/7 | **Recon Agents**（多选，支持并行） | **multi-select** | **改：原单选 → 多选** |
+| 4/7 | **Recon Aggregator** | single-select | **新增** |
+| 5/7 | **Planner** | single-select | **新增** |
+| 6/7 | **Actor** | single-select | **新增** |
+| 7/7 | L3 Summarizer | single-select | 原（Step 4/4 → 7/7） |
+
+**Step 3/7 Recon 改多选的语义**：
+
+- 勾选 "Use aggregator" sentinel（不勾具体模型）= 单模型 fallback 到 aggregator（v0.13.x 行为）
+- 勾 1 个具体模型 = 单模型模式（Recon Aggregator 仍跑，做标准化）
+- 勾 2+ 个具体模型 = 并行模式（受 `moa.parallelRecon` 控制）
+- sentinel + 具体模型不能共存（互斥校验，违反时弹 warning 并中止保存）
+
+**Step 4/5/6/7 新角色的 sentinel 设计**：每个新角色顶部都有 "Use aggregator" / "Disable" sentinel 项，作为新 preset 的推荐默认。用户首次配置时不会看到具体模型被预勾选——只有 "Use aggregator" 被预勾选（与 v0.18.1 的"首次配置不应预选具体模型"原则一致）。
+
+**数据源兼容**：Step 3 的预勾选逻辑同时读 `seed.reconModels`（数组，v0.18.0）和 `seed.reconModel`（单数，v0.14.x），向后兼容。
+
+### Changed — 完成消息扩展到 8 字段
+
+Configure Models 保存成功后的 InformationMessage 现在显示全部角色：
+
+```
+MoA configured: preset=default (active), 4 ref(s), aggregator=GLM-5.2, recon=2 models (DeepSeek-V4-Pro + MiniMax-M3), reconAgg=(= aggregator), planner=(= aggregator), actor=(= aggregator), L3=(disabled). Saved to User + Workspace.
+```
+
+### Changed — README "5 roles" 表格补 UI step 列
+
+README 的角色表格新增 "UI step" 列，明确标出每个角色的配置入口。同时加入 L3 Summarizer 行（之前漏写）。
+
 ## [0.18.1] - 2026-07-20
 
 ### Fixed — Configure Models 不再在首次配置时预勾选具体模型

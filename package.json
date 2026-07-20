@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
   "description": "Mixture-of-Agents for VSCode Copilot Chat. Runs multi-LLM fan-out (recon → N refs → aggregator → acting agent) through the native vscode.lm API. Supports @moa chat participant, moa_recon / moa_analyze / moa_orchestrate LM tools, preset groups, and parallel reference advisors. Vendor-agnostic — works with Copilot, GCMP, or any extension exposing LanguageModelChat.",
-  "version": "0.18.1",
+  "version": "0.18.2",
   "publisher": "dudali095",
   "license": "MIT",
   "repository": {

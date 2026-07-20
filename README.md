@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![VSCode](https://img.shields.io/badge/VSCode-1.95+-blue.svg)](https://code.visualstudio.com)
 [![Marketplace](https://img.shields.io/badge/Marketplace-dudali095.moa--bridge-green.svg)](https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge)
-[![Release](https://img.shields.io/badge/release-v0.18.1-blue.svg)](https://github.com/DDL095/vscode-moa/releases/tag/v0.18.1)
+[![Release](https://img.shields.io/badge/release-v0.18.2-blue.svg)](https://github.com/DDL095/vscode-moa/releases/tag/v0.18.2)
 
 ## What it does
 
@@ -113,17 +113,20 @@ code --extensionDevelopmentPath .
 
 ## First-run configuration
 
-Run **`Moa: Configure Models`** from the command palette — a 5-step flow:
+Run **`Moa: Configure Models`** from the command palette — an 8-step flow:
 
 | Step | What | UI |
 |---|---|---|
-| 0/4 | Pick / create / delete a preset group *(v0.14.14)* | single-select |
-| 1/4 | Reference advisors (2-8 models) | multi-select checkbox |
-| 2/4 | Aggregator | single-select checkbox |
-| 3/4 | Recon model *(optional, default = aggregator)* | single-select checkbox |
-| 4/4 | L3 summarizer *(optional, default = disabled)* | single-select checkbox |
+| 0/7 | Pick / create / delete a preset group *(v0.14.14)* | single-select |
+| 1/7 | Reference advisors (2-8 models) | multi-select checkbox |
+| 2/7 | Aggregator | single-select checkbox |
+| 3/7 | Recon agent(s) — pick 1 for single-mode, 2+ for parallel, or "Use aggregator" for fallback *(v0.18.2: multi-select)* | multi-select checkbox |
+| 4/7 | Recon Aggregator — integrates parallel Recon outputs; "Use main aggregator" is the recommended default *(v0.18.2)* | single-select checkbox |
+| 5/7 | Planner — task decomposition for iter 1; "Use aggregator" is the recommended default *(v0.18.2)* | single-select checkbox |
+| 6/7 | Actor — executes `action_items` with full tools; "Use aggregator" is the recommended default *(v0.18.2)* | single-select checkbox |
+| 7/7 | L3 summarizer *(optional, default = disabled)* | single-select checkbox |
 
-> **v0.18.0 note**: the Configure Models UI currently sets a single Recon model (Step 3/4). To configure parallel multi-model Recon, edit `settings.json` directly and add `preset.reconModels: [{model: "..."}, {model: "..."}]` plus optional `preset.reconAggregator: {model: "..."}`. Multi-select UI for parallel Recon is on the roadmap.
+Every step except refs (Step 1) and recon (Step 3) offers a sentinel "Use aggregator" / "Disable" option as the first item — this is the recommended default for new presets, so users never see a concrete model pre-picked on first configuration. Pick a specific model only when you want to deviate from the aggregator.
 
 Configuration is persisted to **both** User (Global) and Workspace tiers, so it works across windows without manual duplication.
 
@@ -197,14 +200,17 @@ Each channel includes iteration boundary headers (`═══════ iter N 
 
 ### 5 roles (v0.15.0+, redesigned v0.17–v0.18)
 
-| Role | When | Purpose | Default model source | Tools? |
-|---|---|---|---|---|
-| **Planner** | iter 1 only | Clarify task; emit `sub_questions` + `recon_hints` | `moa.aggregator` (shared) | None (pure reasoning) |
-| **Recon** | every iter | Read files / grep / fetch URLs / list symbols; produce context summary | `preset.reconModels[]` (parallel) or `moa.reconModel` (single) | Read-only whitelist (24-pattern hard blacklist + 3-pattern soft blacklist) |
-| **Recon Aggregator** | every iter (v0.18.0 Plan B) | Integrate N parallel Recon outputs; dedupe + label sources + verify cited files | `preset.reconAggregator` (falls back to `moa.aggregator`) | Full tools, prompt-constrained to verification only |
-| **Refs** | every iter | N parallel LLM advisors; each emits `{sufficient, missing, analysis}` JSON | `moa.refModels` (multi-select) | None (pure reasoning) |
-| **Aggregator** | every iter | Fuse ref outputs; emit `completeness` + `next_action` | `moa.aggregator` | None |
-| **Actor** | on `actor_needed` | Execute `action_items` with full tool access; produce artifacts | `moa.aggregator` (shared) | All `vscode.lm.tools` (filtered through read/write split) |
+| Role | When | Purpose | Default model source | Tools? | UI step |
+|---|---|---|---|---|---|
+| **Planner** | iter 1 only | Clarify task; emit `sub_questions` + `recon_hints` | `preset.planner` (falls back to `moa.aggregator`) | None (pure reasoning) | Step 5/7 |
+| **Recon** | every iter | Read files / grep / fetch URLs / list symbols; produce context summary | `preset.reconModels[]` (parallel) or `preset.reconModel` (single) | Read-only whitelist (24-pattern hard blacklist + 3-pattern soft blacklist) | Step 3/7 (multi-select) |
+| **Recon Aggregator** | every iter (v0.18.0 Plan B) | Integrate N parallel Recon outputs; dedupe + label sources + verify cited files | `preset.reconAggregator` (falls back to `moa.aggregator`) | Full tools, prompt-constrained to verification only | Step 4/7 |
+| **Refs** | every iter | N parallel LLM advisors; each emits `{sufficient, missing, analysis}` JSON | `moa.refModels` (multi-select) | None (pure reasoning) | Step 1/7 |
+| **Aggregator** | every iter | Fuse ref outputs; emit `completeness` + `next_action` | `moa.aggregator` | None | Step 2/7 |
+| **Actor** | on `actor_needed` | Execute `action_items` with full tool access; produce artifacts | `preset.actor` (falls back to `moa.aggregator`) | All `vscode.lm.tools` (filtered through read/write split) | Step 6/7 |
+| **L3 Summarizer** | per large file in Recon | Digest single large file (>30K chars) to ~5K chars | `moa.l3Summarizer` (disabled by default) | None | Step 7/7 |
+
+Every role with a "falls back to `moa.aggregator`" note offers a "Use aggregator" sentinel in its UI step — pick that unless you have a specific reason to deviate.
 
 Layer toggles (any combination):
 
