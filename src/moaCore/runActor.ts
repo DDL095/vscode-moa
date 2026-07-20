@@ -21,7 +21,10 @@ import {
 import { getActivePresetConfig } from '../presetConfig';
 import { runActingAgent } from '../actingAgent';
 // v0.19.1 §3: SafeExecutor（保守执行模式）
-import { createSafeExecutor } from './safeExecutor';
+import { createSafeExecutor, SafeActionRecord } from './safeExecutor';
+// v0.19.2 §1.4: 文件读取兜底（从 manifest 反构 executed_actions）
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 /**
  * v0.19.0 §1: Actor 调用 actingAgent 时的最大迭代数。
@@ -241,6 +244,47 @@ export async function callActor(
       progress?.(`[MoA Actor] §1.2 fallback: constructed ${executedActions.length} partial action(s) from ${result.capturedToolCalls.length} captured tool calls`);
     }
 
+    // ── v0.19.2 §1.4: 最终兜底 —— 从 SafeExecutor manifest.json 反构 ────
+    //
+    // 背景：v0.19.1 实测发现 Actor LLM 用 task_complete/run_in_terminal 等
+    //      工具完成后，可能既未输出 JSON 总结也未撞 cap，导致：
+    //        - result.output = ''（不进 §1 result.output 分支）
+    //        - result.hitIterationCap = false（不进 §1.2 fallback）
+    //      此时 executed_actions 仍为 []，但 SafeExecutor 的 manifest.json 已记录
+    //      所有实际工具调用。本兜底从 manifest 反构 executed_actions。
+    //
+    // v0.19.2 §1.3 已在 actingAgent 层注入"task_complete 后强制总结"，但 LLM
+    // 仍可能不服从（继续调用工具或输出非 JSON）。§1.4 是更下游的防线。
+    if (executedActions.length === 0 && params.taskDir) {
+      try {
+        const manifestPath = path.join(params.taskDir, 'manifest.json');
+        const raw = await fs.readFile(manifestPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // 过滤出本轮（params.iteration）的记录
+          const iterRecords = (parsed as SafeActionRecord[]).filter(
+            (r) => r.iter === params.iteration
+          );
+          if (iterRecords.length > 0) {
+            executedActions = iterRecords.map((r) => manifestRecordToAction(r));
+            progress?.(
+              `[MoA Actor] §1.4 fallback: constructed ${executedActions.length} action(s) ` +
+              `from manifest.json (iter=${params.iteration})`
+            );
+            // self_assessment 也调整：reason 标注兜底来源
+            selfAssessment = {
+              all_succeeded: iterRecords.every((r) => r.status === 'success'),
+              missing_dependencies: [],
+              should_recon: false,
+              reason: `Recovered from manifest.json (${iterRecords.length} tool call(s), v0.19.2 §1.4 fallback)`,
+            };
+          }
+        }
+      } catch {
+        // manifest 不存在或解析失败，静默跳过（不阻塞 Actor 返回）
+      }
+    }
+
     return {
       executed_actions: executedActions,
       self_assessment: selfAssessment,
@@ -265,6 +309,73 @@ export async function callActor(
       error: msg,
     };
   }
+}
+
+/**
+ * v0.19.2 §1.4: 把 SafeExecutor manifest 记录转为 ActorActionResult。
+ *
+ * 语义映射：
+ *   - manifest.type='write_file' → action.type='write_file'
+ *   - manifest.type='delete' → action.type='execute'（删除类操作）
+ *   - manifest.type='execute' → action.type='execute'
+ *   - manifest.type='read'/'grep'/'other' → action.type='inform_user'（只读/其他）
+ *
+ * @param r manifest 单条记录
+ * @returns ActorActionResult
+ */
+function manifestRecordToAction(r: SafeActionRecord): ActorActionResult {
+  // action.type 映射
+  let actionType: ActorActionResult['action']['type'];
+  switch (r.type) {
+    case 'write_file':
+      actionType = 'write_file';
+      break;
+    case 'execute':
+      actionType = 'execute';
+      break;
+    case 'delete':
+      // roles.ts 的 action.type 联合中没有 delete，映射到 execute
+      actionType = 'execute';
+      break;
+    case 'read':
+    case 'grep':
+    case 'other':
+    default:
+      // 只读和其他类型映射到 inform_user
+      actionType = 'inform_user';
+      break;
+  }
+
+  // status 映射（manifest 的 'success'/'failed'/'partial' 直接对应）
+  const status: ActorActionResult['status'] = r.status === 'success' ? 'success'
+    : r.status === 'failed' ? 'failed'
+    : r.status === 'partial' ? 'partial'
+    : 'skipped';
+
+  // content 构造：输入摘要 + 输出字符数 + 备份路径（如有）
+  const contentParts: string[] = [
+    `Tool: ${r.tool_name}`,
+    `Input: ${r.input_summary}`,
+  ];
+  if (r.output_chars !== undefined) {
+    contentParts.push(`Output chars: ${r.output_chars}`);
+  }
+  if (r.backup_path) {
+    contentParts.push(`Backup: ${r.backup_path}`);
+  }
+
+  return {
+    action: {
+      type: actionType,
+      target: r.target || r.tool_name,
+      content: contentParts.join('\n'),
+      rationale: `Recovered from manifest.json seq=${r.seq} (v0.19.2 §1.4 fallback)`,
+    },
+    status,
+    output_chars: r.output_chars ?? 0,
+    error_message: r.error,
+    artifacts: r.backup_path ? [r.backup_path] : [],
+  };
 }
 
 /**

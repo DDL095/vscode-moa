@@ -830,6 +830,34 @@ export async function runActingAgent(
       break;
     }
 
+    // v0.19.2 §1.3: 识别 "task_complete" / "taskDone" / "complete" 类工具调用
+    //
+    // 背景：v0.19.1 实测发现 LLM 经常调用 `task_complete`（或类似命名的）
+    // 工具来宣告任务完成，但此时 finalOutput 可能仍为空（因为 LLM 把总结
+    // 放在了 tool input 而非 chat text）。撞 cap 时下游 extractActorJson('')
+    // 返回 null，导致 executed_actions=[]，与实际工作不符。
+    //
+    // 修复：执行完 task_complete 类工具后，立即注入一条 User 消息，要求
+    // LLM 输出结构化 JSON 总结。下一轮 LLM 会进入 `toolCalls.length === 0`
+    // 自然退出分支，finalOutput 被填充。
+    //
+    // 只在 acting 模式（!readOnly）启用。
+    const hasTaskCompleteCall = !readOnly && toolCalls.some(
+      (c) => /task[_-]?complete|task[_-]?done|^(complete|done|finish)$/i.test(c.name)
+    );
+    if (hasTaskCompleteCall) {
+      stream.progress(
+        `[${progressPrefix}] acting: detected task_complete call, requesting JSON summary...`
+      );
+      const forceSummaryMsg = vscode.LanguageModelChatMessage.User(
+        `[SYSTEM] You called task_complete, but the caller requires a structured JSON summary ` +
+        `before the conversation can end. DO NOT call any more tools. ` +
+        `Output ONLY the JSON summary of what you accomplished, using this exact format: ` +
+        `{"executed_actions": [{"action": {"type": "write_file|execute|inform_user|...", "target": "<path or identifier>", "content": "<details>", "rationale": "<why>"}, "status": "success|failed|partial", "output_chars": N, "artifacts": ["..."]}], "self_assessment": {"all_succeeded": true|false, "missing_dependencies": [], "should_recon": false, "reason": "..."}}`
+      );
+      messages.push(forceSummaryMsg);
+    }
+
     // Model wants to call tools. Show progress (does NOT enter chat history).
     // First emit any text the model produced alongside the tool call.
     if (iterationText.trim().length > 0) {

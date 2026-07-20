@@ -106,6 +106,16 @@ export interface IterationRecord {
 
   // ── v0.14.x 兼容字段（recon_request 已被 recon_reason 替代，保留供读取） ──
   recon_request?: { gaps: string[]; prompt: string };
+
+  // ── v0.19.2 §5.1: per-role 耗时记录（秒）──
+  //
+  // 每个 role 执行时记录 start/end 时间戳，渲染 meta.json 时累加。
+  // undefined = 该轮没跑这个 role 或未追踪（向后兼容）。
+  planner_elapsed_sec?: number;
+  recon_elapsed_sec?: number;
+  refs_elapsed_sec?: number;
+  aggregator_elapsed_sec?: number;
+  // actor 已有 actor_result.elapsed_sec，不重复
 }
 
 /**
@@ -557,18 +567,44 @@ function computeTotalToolCalls(state: MoaState): number {
 }
 
 /**
- * v0.19.1 §5: 构建 per-role breakdown。
+ * v0.19.1 §5 / v0.19.2 §5.1: 构建 per-role breakdown。
  *
- * 注意：MoA 不显式追踪 per-role 耗时（recon/refs/aggregator 内部耗时未入 state），
- * 这里只能近似：用 actor_history 累加 elapsed_sec，其他角色用 0 占位。
- * 完整 per-role 耗时需 v0.20.x 在 callRecon / callRefs 等钩子点记录。
+ * v0.19.2 §5.1: 现已使用 IterationRecord 的 *_elapsed_sec 字段（真实耗时）。
+ * 旧任务（v0.19.1 之前）无这些字段，仍返回 0（向后兼容）。
  */
 function computePerRoleBreakdown(state: MoaState): OrchestrationMeta['per_role_breakdown'] {
+  let plannerRounds = 0;
+  let plannerElapsed = 0;
+  let reconRounds = 0;
+  let reconElapsed = 0;
+  let reconToolCalls = 0;
+  let refsRounds = 0;
+  let refsElapsed = 0;
+  let aggregatorRounds = 0;
+  let aggregatorElapsed = 0;
   let actorRounds = 0;
   let actorElapsed = 0;
   let actorActions = 0;
   let actorToolCalls = 0;
+
   for (const h of state.history) {
+    if (h.planner_output) {
+      plannerRounds += 1;
+      plannerElapsed += h.planner_elapsed_sec ?? 0;
+    }
+    if (h.recon_result) {
+      reconRounds += 1;
+      reconElapsed += h.recon_elapsed_sec ?? 0;
+      reconToolCalls += h.recon_result.tool_calls ?? 0;
+    }
+    if (h.ref_outputs && h.ref_outputs.length > 0) {
+      refsRounds += 1;
+      refsElapsed += h.refs_elapsed_sec ?? 0;
+    }
+    if (h.aggregator_output) {
+      aggregatorRounds += 1;
+      aggregatorElapsed += h.aggregator_elapsed_sec ?? 0;
+    }
     if (h.actor_result) {
       actorRounds += 1;
       actorElapsed += h.actor_result.elapsed_sec ?? 0;
@@ -578,10 +614,10 @@ function computePerRoleBreakdown(state: MoaState): OrchestrationMeta['per_role_b
   }
 
   return {
-    planner: { rounds: 1, total_elapsed_sec: 0 },  // 待 v0.20.x 记录
-    recon: { rounds: state.history.filter((h) => h.recon_result).length, total_elapsed_sec: 0, total_tool_calls: state.history.reduce((s, h) => s + (h.recon_result?.tool_calls ?? 0), 0) },
-    refs: { rounds: state.history.length, total_elapsed_sec: 0 },  // 待 v0.20.x 记录
-    aggregator: { rounds: state.history.length, total_elapsed_sec: 0 },  // 待 v0.20.x 记录
+    planner: { rounds: plannerRounds, total_elapsed_sec: Math.round(plannerElapsed) },
+    recon: { rounds: reconRounds, total_elapsed_sec: Math.round(reconElapsed), total_tool_calls: reconToolCalls },
+    refs: { rounds: refsRounds, total_elapsed_sec: Math.round(refsElapsed) },
+    aggregator: { rounds: aggregatorRounds, total_elapsed_sec: Math.round(aggregatorElapsed) },
     actor: { rounds: actorRounds, total_elapsed_sec: Math.round(actorElapsed), actions_executed: actorActions, tool_calls: actorToolCalls },
   };
 }
@@ -604,7 +640,7 @@ function buildModelInvocations(
       iter: h.iteration,
       role: 'planner',
       model: aggregatorModel,  // 待 v0.20.x 独立追踪 planner model
-      elapsed_sec: undefined,
+      elapsed_sec: h.planner_elapsed_sec,
     });
 
     if (h.recon_result) {
@@ -613,6 +649,7 @@ function buildModelInvocations(
         role: 'recon',
         model: '(recon agent)',  // 待 v0.20.x 追踪 recon model
         tool_calls: h.recon_result.tool_calls,
+        elapsed_sec: h.recon_elapsed_sec,
       });
     }
 
@@ -622,6 +659,7 @@ function buildModelInvocations(
         iter: h.iteration,
         role: 'refs',
         model: refModels[0] ?? '(unknown)',
+        elapsed_sec: h.refs_elapsed_sec,
       });
     }
 
@@ -629,6 +667,7 @@ function buildModelInvocations(
       iter: h.iteration,
       role: 'aggregator',
       model: aggregatorModel,
+      elapsed_sec: h.aggregator_elapsed_sec,
     });
 
     if (h.actor_result) {
@@ -637,6 +676,7 @@ function buildModelInvocations(
         role: 'actor',
         model: aggregatorModel,  // 待 v0.20.x 追踪 actor model
         tool_calls: h.actor_result.tool_calls,
+        elapsed_sec: h.actor_result.elapsed_sec,
       });
     }
   }
@@ -1144,15 +1184,18 @@ export async function runIteration(
   let plannerForRecon: PlannerOutput | undefined = state.planner;
   if (iterNum === 1) {
     progress?.(`[MoA Planner] running...`);
+    // v0.19.2 §5.1: per-role 耗时记录
+    const plannerStart = Date.now();
     plannerForRecon = await callPlanner(state.task, token, progress);
+    record.planner_elapsed_sec = (Date.now() - plannerStart) / 1000;
     state.planner = plannerForRecon;
     record.planner_output = plannerForRecon;
     if (plannerForRecon) {
       await saveIterationArtifact(taskId, iterNum, 'planner.json', plannerForRecon);
       // v0.17.0: 把 Planner 输出写到 "MoA Planner" OutputChannel
-      logPipelineBlock('planner', `--- Planner @iter${iterNum} ---`, JSON.stringify(plannerForRecon, null, 2));
+      logPipelineBlock('planner', `--- Planner @iter${iterNum} (${record.planner_elapsed_sec.toFixed(1)}s) ---`, JSON.stringify(plannerForRecon, null, 2));
     } else {
-      logPipelineBlock('planner', `--- Planner @iter${iterNum} (failed/skipped) ---`, '(no output)');
+      logPipelineBlock('planner', `--- Planner @iter${iterNum} (${record.planner_elapsed_sec.toFixed(1)}s, failed/skipped) ---`, '(no output)');
     }
   }
 
@@ -1205,6 +1248,8 @@ export async function runIteration(
     const evidenceBrief = buildEvidenceBrief(state.evidence);
     const actorLog = lastActor ? formatActorLog(lastActor) : undefined;
 
+    // v0.19.2 §5.1: per-role 耗时记录
+    const reconStart = Date.now();
     const callResult = await callRecon({
       userPrompt: state.task,
       planner: plannerForRecon,
@@ -1214,6 +1259,7 @@ export async function runIteration(
       evidenceBrief,
       iteration: iterNum,
     }, token, progress, undefined, toolInvocationToken);
+    record.recon_elapsed_sec = (Date.now() - reconStart) / 1000;
 
     // v0.18.0 方案 B：无论单/并行模式，reconResult 都是 Aggregator merged 的
     //   （下游 refs 看到的格式一致，不关心上游几个模型）
@@ -1285,6 +1331,8 @@ export async function runIteration(
 
   const evidenceBlockStr = evidenceBlock(state.evidence);
 
+  // v0.19.2 §5.1: per-role 耗时记录（refs 整体并行，记总耗时）
+  const refsStart = Date.now();
   const refPromises = refs.map((r) => {
     const { system, user } = buildRefPrompt({
       task: state.task,
@@ -1305,6 +1353,7 @@ export async function runIteration(
     );
   });
   const refOutputs = await Promise.all(refPromises);
+  record.refs_elapsed_sec = (Date.now() - refsStart) / 1000;
   record.ref_outputs = refOutputs;
 
   // v0.16.0: 只写 refs/ 目录（之前 v0.15.0 为兼容 v0.14.x 同时写 workers/ 目录，
@@ -1343,13 +1392,16 @@ export async function runIteration(
 
   let aggOutput: CoreAggregatorOutput;
   try {
+    // v0.19.2 §5.1: per-role 耗时记录
+    const aggregatorStart = Date.now();
     const aggRaw = await callLLM(aggregator.model, aggSys, aggUser, token, 'aggregator');
+    record.aggregator_elapsed_sec = (Date.now() - aggregatorStart) / 1000;
     aggOutput = extractJson(aggRaw) as CoreAggregatorOutput;
     record.aggregator_output = aggOutput;
     await saveIterationArtifact(taskId, iterNum, 'aggregator.json', aggOutput);
     // v0.17.0: 把 Aggregator 原始输出 + 解析后 JSON 都写到 "MoA Aggregator" OutputChannel
     // raw 输出可能含 LLM 的 fence / 解释，parsed 是干净 JSON，都保留便于排查
-    logPipelineBlock('aggregator', `--- Aggregator @iter${iterNum} (raw, ${aggregator.model.name}) ---`, aggRaw);
+    logPipelineBlock('aggregator', `--- Aggregator @iter${iterNum} (raw, ${aggregator.model.name}, ${record.aggregator_elapsed_sec.toFixed(1)}s) ---`, aggRaw);
     logPipelineBlock('aggregator', `--- Aggregator @iter${iterNum} (parsed) ---`, JSON.stringify(aggOutput, null, 2));
   } catch (err) {
     state.status = 'error';
