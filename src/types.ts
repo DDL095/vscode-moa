@@ -86,6 +86,64 @@ export interface ReconConfig {
   temperature?: number;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// v0.15.0: 5 显式角色架构
+//
+// 设计哲学：把原来隐性流水线（recon → refs → aggregator → acting）
+// 显式化为 5 个有名字、可独立配置的角色：
+//
+//   1. Planner  — 任务理解、子问题拆解、首轮规划（强推理）
+//   2. Recon    — 调工具收集证据（量大管饱模型）
+//   3. Refs     — 多视角并行分析（多模型多样性）
+//   4. Aggregator — 融合 + 决策（gate，强推理）
+//   5. Actor    — 执行 action_items（全工具权限）
+//
+// 配置层：PlannerConfig 和 ActorConfig 是 v0.15.0 新增。
+// Refs/Aggregator/Recon 沿用现有配置（RefModelConfig/AggregatorConfig/ReconConfig）。
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * v0.15.0: Planner 角色配置（任务理解 + 规划）。
+ *
+ * 设计：
+ *   - 仅在 orchestrate 首轮调用一次（state.iteration === 0）
+ *   - model='' 表示 fallback 到 aggregator 模型
+ *   - 推荐用强推理模型（用户主会话 LLM 或 aggregator）
+ *
+ * Planner 的产出（clarified_task + sub_questions + recon_hints）
+ * 注入首轮 Recon 的初始方向。
+ */
+export interface PlannerConfig {
+  /**
+   * 模型 ID（vscode.lm 的 m.id）。
+   * 空字符串 = fallback 到 aggregator 模型。
+   */
+  model: string;
+  /** Optional temperature（暂未使用）。 */
+  temperature?: number;
+}
+
+/**
+ * v0.15.0: Actor 角色配置（执行 action_items）。
+ *
+ * 设计：
+ *   - Aggregator 标记 `next_action="actor_needed"` 时触发
+ *   - model='' 表示 fallback 到 aggregator 模型（沿用 v0.14.x acting 行为）
+ *   - 工具权限：全开（readFile/writeFile/run_in_terminal/fetch_webpage/grep/...）
+ *
+ * Actor 失败时不抛错，把失败原因写入 state.actor_history，
+ * 由下一轮 Recon 读取并调查根因。
+ */
+export interface ActorConfig {
+  /**
+   * 模型 ID（vscode.lm 的 m.id）。
+   * 空字符串 = fallback 到 aggregator 模型。
+   */
+  model: string;
+  /** Optional temperature（暂未使用）。 */
+  temperature?: number;
+}
+
 /**
  * v0.14.0: L3 孙代理（大文件精选器）模型配置。
  *
@@ -153,8 +211,61 @@ export interface MoaPreset {
   /**
    * Recon 代理模型配置。
    * model='' 表示 fallback 到 aggregator（向后兼容 v0.13.x）。
+   *
+   * v0.18.0: 此字段仍支持单模型配置（向后兼容），但新增的 `reconModels`
+   *（数组）优先级更高。读取顺序：reconModels（非空数组）→ reconModel
+   *（单数，自动包装成单元素数组）→ fallback [aggregator]。
    */
   reconModel: ReconConfig;
+
+  /**
+   * v0.18.0: 并行 Recon 模型列表。
+   *
+   * 设计：
+   *   - 数组，每个元素是一个 ReconConfig（独立模型 + 可选 temperature）
+   *   - 空数组或 undefined = fallback 到 reconModel（单数）→ [aggregator]
+   *   - 长度 = 1 = 单模型（自动关闭并行 + 关闭 Recon Aggregator）
+   *   - 长度 >= 2 = 并行（受 moa.parallelRecon 开关控制）
+   *
+   * 并行时每个 Recon 用相同 prompt（含 Planner hints + gaps），
+   * 但不同模型对工具的偏好不同（DeepSeek 喜欢多角度搜索，
+   * GLM 喜欢链式深入），产出互补。
+   */
+  reconModels?: ReconConfig[];
+
+  /**
+   * v0.18.0: Recon Aggregator（整合多份 Recon 结果）。
+   *
+   * 设计：
+   *   - 仅当 reconModels.length >= 2 且 moa.parallelRecon=true 时启用
+   *   - **agent 化整合**（有 full 工具权限，复用 runActingAgent）：
+   *     工具用途严格限制在"整合内容所需的辅助操作"
+   *     ✅ 允许：读 recon 引用的文件确认细节、读 recon 提到的 URL 复核、
+   *              必要时写合并产物到 .moa_cache/
+   *     ❌ 禁止：重新做 reconnaissance（新 web search / 学术搜索 / 探索性 grep）
+   *     ❌ 禁止：修改用户的源文件
+   *   - 核心产出：单一 merged summary（完整无偏差，注入下游 evidence 池）
+   *   - model='' = fallback 到 aggregator
+   *
+   * 设计哲学：整合 ≠ 侦察。整合是"把 N 份完整证据合并成一份无偏差的 summary"，
+   * 工具只是辅助手段（如确认 N 个 recon 引用同一文件时的细节），
+   * 不应该夹杂新侦察（新侦察是下一轮 Recon 的事，由 Aggregator 标记 gaps 触发）。
+   */
+  reconAggregator?: ReconConfig;
+
+  /**
+   * v0.15.0: Planner 角色配置（任务理解 + 规划）。
+   * model='' 表示 fallback 到 aggregator。
+   * 未配置（undefined）时：orchestrate 不调用 Planner，走旧逻辑。
+   */
+  planner?: PlannerConfig;
+
+  /**
+   * v0.15.0: Actor 角色配置（执行 action_items）。
+   * model='' 表示 fallback 到 aggregator（沿用 v0.14.x acting 行为）。
+   * 未配置（undefined）时：orchestrate 的 Actor fallback 到 aggregator。
+   */
+  actor?: ActorConfig;
 
   /**
    * L3 孙代理配置。

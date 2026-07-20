@@ -28,7 +28,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 /** 当前 README 模板版本号 —— 改模板时递增。 */
-const CACHE_README_VERSION = 1;
+const CACHE_README_VERSION = 2;
 
 /** 插件仓库 URL（README 里用，便于用户查 issue）。 */
 const REPO_URL = 'https://github.com/DDL095/vscode-moa';
@@ -82,7 +82,18 @@ export function buildCacheReadmeContent(): string {
     '└── <task_id>/                 # moa_orchestrate 的迭代状态（v0.12.0+）',
     '    ├── state.json             #   当前 MoaState（原子覆盖写）',
     '    ├── task.txt               #   原始任务描述',
-    '    ├── iteration_NNN/         #   每轮 recon_request / recon_result / workers / aggregator',
+    '    ├── meta.json              #   跨轮累积元信息（含 ref_models / aggregator_model）',
+    '    ├── timeline.md            #   全轮时序表（iteration / completeness / gaps）',
+    '    ├── final.md               #   最终报告（含 summary + action_items + 收敛来源）',
+    '    ├── iteration_NNN/         #   每轮的完整产物',
+    '    │   ├── planner.json       #     Planner 输出（仅 iter 1）',
+    '    │   ├── recon_result.json  #     Recon Aggregator 整合后的 summary（v0.18.0：始终写入）',
+    '    │   ├── recon/             #     并行 Recon 子细节（v0.18.0：仅 parallel 模式生成）',
+    '    │   │   └── recon_N.json   #       每个并行 recon agent 的 label/model/summary',
+    '    │   ├── refs/              #     每个 ref 的原始输出（一个文件一个 ref）',
+    '    │   │   └── ref1_<model>.json',
+    '    │   ├── aggregator.json    #     Aggregator 综合（含 completeness / next_action）',
+    '    │   └── actor_result.json  #     Actor 执行结果（仅 actor_needed 时）',
     '    └── final.json             #   #moa_finalize 的产出',
     '```',
     '',
@@ -97,6 +108,17 @@ export function buildCacheReadmeContent(): string {
     '3. 看 `00_full_recon.md` 确认 refs 实际看到了什么',
     '4. 看 `02_ref_outputs/` 下每个 ref 独立说了什么',
     '5. 看 `03_aggregator.md` vs `04_final.md` 对比 aggregator 综合 vs 最终输出',
+    '',
+    '### 想知道某次 `#moa_orchestrate` 迭代到第几轮、各轮 recon 收集了什么',
+    '',
+    '1. 进入 `.moa_cache/<task_id>/`',
+    '2. 看 `timeline.md` 总览（9 列时序表：iter / time / completeness / Δ / gaps / recon tools / refs ok / actor / next）',
+    '3. 进入 `iteration_NNN/`：',
+    '   - `recon_result.json` 看 Recon Aggregator 整合后的 summary（始终有）',
+    '   - `recon/recon_*.json` 看每个并行 Recon agent 的独立输出（仅 parallel 模式生成）',
+    '   - `refs/*.json` 看每个 ref 说了什么',
+    '   - `aggregator.json` 看 completeness 评分、next_action 决策、gaps',
+    '   - `actor_result.json` 看 Actor 执行了哪些 action_items',
     '',
     '### 遇到 1213 / "empty content" 类错误',
     '',
@@ -173,6 +195,7 @@ export function buildCacheReadmeContent(): string {
     '| `moa.reconL3Threshold` | `200000` | 单文件超过多少字符才触发 L3 摘要 |',
     '| `moa.reconL3MaxCalls` | `5` | 单次任务最多派几次 L3 孙代理 |',
     '| `moa.maxReconRounds` | `3` | recon 循环轮数（影响 `recon/` 下同任务可多个 round 文件） |',
+    '| `moa.parallelRecon` | `true` | v0.18.0：并行多模型 Recon（影响 `iteration_NNN/recon/` 是否生成） |',
     '',
     '**禁用一切写入**：目前没有一个总开关；最干净的做法是 `moa.enableRecon=false` + `moa.l3Summarizer.model=""`，',
     '剩下 `moa_orchestrate` 工具的状态文件仅在使用该工具时产生（不用即不写）。',

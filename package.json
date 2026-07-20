@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "MoA Bridge - Mixture of Agents for Copilot",
   "description": "Mixture-of-Agents for VSCode Copilot Chat. Runs multi-LLM fan-out (recon → N refs → aggregator → acting agent) through the native vscode.lm API. Supports @moa chat participant, moa_recon / moa_analyze / moa_orchestrate LM tools, preset groups, and parallel reference advisors. Vendor-agnostic — works with Copilot, GCMP, or any extension exposing LanguageModelChat.",
-  "version": "0.14.14",
+  "version": "0.18.1",
   "publisher": "dudali095",
   "license": "MIT",
   "repository": {
@@ -36,7 +36,9 @@
     "onLanguageModelTool:moa_orchestrate",
     "onLanguageModelTool:moa_continue",
     "onLanguageModelTool:moa_finalize",
-    "onChatParticipant:moa-bridge.moa"
+    "onChatParticipant:moa-bridge.moa",
+    "onChatParticipant:moa-bridge.moaloop",
+    "onChatParticipant:moa-bridge.moasingle"
   ],
   "contributes": {
     "chatParticipants": [
@@ -44,7 +46,7 @@
         "id": "moa-bridge.moa",
         "name": "moa",
         "fullName": "MoA Bridge",
-        "description": "Trigger Mixture-of-Agents multi-perspective analysis",
+        "description": "v0.17.0: MoA Loop mode (default) — iterative 5-role pipeline until Aggregator naturally converges",
         "isSticky": true,
         "commands": [
           {
@@ -55,13 +57,62 @@
         "disambiguation": [
           {
             "category": "moa",
-            "description": "Multi-perspective analysis with multiple LLM advisors",
+            "description": "Multi-perspective analysis with multiple LLM advisors (iterative loop mode)",
             "examples": [
               "多视角分析",
               "多模型对比",
               "moa 规划",
               "mixture of agents",
               "@moa 分析单细胞轨迹"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "moa-bridge.moaloop",
+        "name": "moaloop",
+        "fullName": "MoA Bridge (Loop)",
+        "description": "v0.17.0: Explicit Loop mode — same as @moa (iterative until Aggregator decides finalize or MAX_ITER)",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "help",
+            "description": "Show MoA Loop usage"
+          }
+        ],
+        "disambiguation": [
+          {
+            "category": "moa",
+            "description": "Explicit MoA Loop mode (iterative refinement until natural convergence)",
+            "examples": [
+              "moa 迭代",
+              "moa loop",
+              "复杂分析",
+              "@moaloop 重构代码"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "moa-bridge.moasingle",
+        "name": "moasingle",
+        "fullName": "MoA Bridge (Single)",
+        "description": "v0.17.0: Single-shot mode — 1 iteration then forces finalize (faster but may have low confidence if evidence is incomplete)",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "help",
+            "description": "Show MoA Single usage"
+          }
+        ],
+        "disambiguation": [
+          {
+            "category": "moa",
+            "description": "MoA Single-shot mode (fast, 1 iteration only; use @moa or @moaloop for complex tasks)",
+            "examples": [
+              "moa 单次",
+              "moa 快速分析",
+              "@moasingle 查询"
             ]
           }
         ]
@@ -181,8 +232,8 @@
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "moaAnalyze",
         "icon": "$(multiple-windows)",
-        "modelDescription": "Run multi-perspective analysis on a hard question using multiple LLM advisors in parallel + an aggregator that synthesizes them. Good for single-shot questions needing multi-model reasoning: code review, complex debugging, design trade-offs, architectural decisions. For tasks needing iterative refinement across multiple rounds with recon passes, USE #moaOrchestrate instead — this tool is one-shot. For simple questions, answer directly; don't use this. Optional reconContext parameter accepts pre-gathered file contents (e.g. from #moaRecon or copilot_readFile) so refs can give grounded analysis.",
-        "userDescription": "Run the MoA Bridge 4-layer pipeline (ref fan-out → aggregator → acting agent) on a question and return the synthesized Markdown answer. Use this when the question requires grounded multi-perspective analysis (e.g. code review, complex debugging, multi-file refactoring). For simple questions, answer directly.\n\nRecommended workflow (Hermes-style subagent):\n1. Call moa_recon first to gather relevant file contents (it returns structured Markdown).\n2. Pass that content as reconContext=<markdown content> to moa_analyze.\n3. MoA refs see the pre-collected context and produce grounded analysis.\n\nAlternatively, call copilot_readFile yourself and pass the result as reconContext.\n\nIf you skip step 1 and pass only the prompt, MoA will run its own internal Phase 0 recon — but that uses a smaller model and may miss relevant files."
+        "modelDescription": "v0.17.0: Run SINGLE-SHOT (1 iteration only) 5-role MoA analysis (Planner → Recon → Refs → Aggregator → Actor). Forces finalize after iteration 1 regardless of Aggregator's actual suggestion — completeness may be < 80% if evidence is incomplete. For iterative refinement (let Aggregator decide convergence), USE #moaOrchestrate instead. Good for: single-shot questions needing multi-model reasoning (code review, design trade-offs). NOT for: complex tasks requiring iterative recon refinement. Optional reconContext parameter accepts pre-gathered file contents (e.g. from #moaRecon or copilot_readFile) so refs give grounded analysis.",
+        "userDescription": "v0.17.0: Run the MoA 5-role pipeline in SINGLE-SHOT mode (Planner → Recon → Refs → Aggregator → Actor, 1 iteration only). Output is persisted to .moa_cache/<task_id>/ (final.md + timeline.md).\n\n**When to use this vs #moa_orchestrate**:\n- `#moa_analyze` — single-shot (fast, but Aggregator may want more iterations)\n- `#moa_orchestrate` — iterative loop (Aggregator decides convergence, more thorough)\n\n**Recommended workflow (Hermes-style subagent)**:\n1. Call #moaRecon first to gather relevant file contents\n2. Pass that content as reconContext=<markdown content> to #moaAnalyze\n3. MoA refs see the pre-collected context and produce grounded analysis\n\nFor simple questions, answer directly without MoA.\n\n**Intermediate output**: VSCode Output panel (View → Output) shows per-role channels: MoA Planner / MoA Recon / MoA Refs / MoA Aggregator / MoA Actor."
       },
       {
         "name": "moa_orchestrate",
@@ -338,6 +389,12 @@
           "description": "v0.14.14: Fan out reference advisors in parallel (Promise.allSettled). When true (default), all ref requests fire simultaneously → wall-clock time = slowest ref. When false, refs run sequentially (safer for providers that rate-limit concurrent requests). NOTE: pre-v0.14.14 this setting existed but was never read by code; v0.14.14 makes it actually work.",
           "order": 3
         },
+        "moa.parallelRecon": {
+          "type": "boolean",
+          "default": true,
+          "description": "v0.18.0: Fan out Recon agents in parallel when preset.reconModels has 2+ models. When true (default), all recon agents run simultaneously → wall-clock time = slowest. When false, or when only 1 recon model is configured, runs sequentially (single-model mode) and Recon Aggregator is auto-disabled. Parallel recon produces N independent results that are merged by Recon Aggregator (pure LLM integration, no tool calls) into a single summary before injecting to Refs.",
+          "order": 20
+        },
         "moa.presets": {
           "type": "object",
           "default": {},
@@ -345,13 +402,27 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
-              "name": { "type": "string" },
-              "refModels": { "type": "array" },
-              "aggregator": { "type": "object" },
-              "reconModel": { "type": "object" },
-              "l3Summarizer": { "type": "object" },
-              "description": { "type": "string" },
-              "createdAt": { "type": "string" }
+              "name": {
+                "type": "string"
+              },
+              "refModels": {
+                "type": "array"
+              },
+              "aggregator": {
+                "type": "object"
+              },
+              "reconModel": {
+                "type": "object"
+              },
+              "l3Summarizer": {
+                "type": "object"
+              },
+              "description": {
+                "type": "string"
+              },
+              "createdAt": {
+                "type": "string"
+              }
             }
           },
           "order": 50
@@ -468,7 +539,9 @@
         },
         "moa.reconModel": {
           "type": "object",
-          "default": { "model": "" },
+          "default": {
+            "model": ""
+          },
           "description": "v0.14.0: Recon agent 专用模型配置。model 字段为 vscode.lm 模型 ID（如 gcmp.zhipu:::GLM-5.2-CodingPlan）。空字符串 = fallback 到 aggregator 模型（保持 v0.13.x 行为）。通过 'Moa: Configure Models' 命令的 Step 3/4 设置。",
           "properties": {
             "model": {
@@ -485,7 +558,9 @@
         },
         "moa.l3Summarizer": {
           "type": "object",
-          "default": { "model": "" },
+          "default": {
+            "model": ""
+          },
           "description": "v0.14.0: L3 孙代理（大文件精选器）模型配置。model 字段为 vscode.lm 模型 ID。空字符串 = 禁用 L3（所有大文件降级为 L2 语义边界截断）。推荐 MiniMax-M3 (TokenPlan)。通过 'Moa: Configure Models' 命令的 Step 4/4 设置。",
           "properties": {
             "model": {
@@ -504,15 +579,16 @@
     "compile": "webpack",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map",
-    "test-compile": "tsc -p ./"
+    "test-compile": "tsc -p ./",
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.95.0",
     "ts-loader": "^9.5.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.3.0",
     "webpack": "^5.89.0",
     "webpack-cli": "^5.1.0"
   }
 }
-

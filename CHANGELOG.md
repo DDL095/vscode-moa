@@ -5,6 +5,224 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-07-20
+
+### Fixed — Configure Models 不再在首次配置时预勾选具体模型
+
+**问题**：v0.14.0 引入的 5 步 Configure Models 流程中，有两处在用户新建 preset 或未配置某层时**主动预勾选具体模型**，违反"首次选用不应默认选上"原则：
+
+| 步骤 | 原行为（≤ v0.18.0） | 修正后（v0.18.1） |
+|---|---|---|
+| **Step 2/4 Aggregator** | 未配置时 `aggDefaultIdx = 0` → 预勾选列表第一个模型；或预勾选第一个 selected ref | 仅按现有配置预勾选；未配置时全部 `picked: false`（强制用户主动选） |
+| **Step 4/4 L3 Summarizer** | 未配置时 `/MiniMax\.*M3/i` 主动查找 MiniMax-M3 并预勾选 | 未配置时默认勾 "Disable L3"（安全默认；不主动推任何具体模型） |
+
+**动机**：用户在首次配置时不应该发现"某个模型已经被选上了"。这会让人困惑（这个模型是哪里来的？为什么被选？），也可能被误以为是官方推荐而直接接受。修正后，**只有用户显式选择的模型才会被保存**。
+
+**兼容性**：已配置的 preset 不受影响——按现有配置预勾选的行为完全保留。仅"未配置"路径变化。
+
+**交互兜底**：`singlePickWithCheckbox` 在无预勾选时会显示"请选择一个"提示并禁用确认按钮（用户点击任一项即激活），不会被卡住。
+
+### Changed — L3 "Disable" 选项的描述更清晰
+
+- 原 detail：`Choose this if you have no MiniMax-M3 or want simpler behavior`
+- 新 detail：`Default for new presets — pick a model below if you want L3 condensation`
+
+新描述明确告知"这是新 preset 的默认"，避免用户以为是某种 fallback。
+
+## [0.18.0] - 2026-07-20
+
+### Added — Parallel multi-model Recon + Recon Aggregator (Plan B: always aggregate)
+
+v0.17 redesigned the Recon role around a single acting-style agent. v0.18 extends it to **fan out N Recon agents in parallel**, each driven by a different LLM, then **always integrates** them through a new Recon Aggregator role.
+
+#### Pipeline (v0.18.0)
+
+```
+Planner (iter 1 only)
+   │  sub_questions + recon_hints
+   ▼
+Recon agent(s) ── 1 or N parallel ──┐
+                                    │
+                                    ▼
+                       Recon Aggregator (always runs)
+                                    │ merged summary (single source of truth)
+                                    ▼
+                       N Refs (parallel) → Aggregator → Actor
+```
+
+#### Why parallel Recon
+
+Different LLMs exhibit **different tool preferences** and **different search strategies** when given the same Recon task. Running them in parallel and merging captures broader coverage:
+
+- One model might prefer `fetch_webpage` for API docs, another might prefer `grep_search` for code symbols
+- One might follow Planner's `recon_hints` literally, another might deviate productively
+- Failures (rate limit, 1213 errors) from one model no longer tank the whole Recon phase — siblings compensate
+
+#### New config
+
+- **`moa.parallelRecon`** (boolean, default `true`) — When `preset.reconModels` has ≥2 entries, all fire concurrently. Wall-clock = slowest. When `false` (or only 1 model), runs sequentially.
+- **`preset.reconModels: ReconConfig[]`** — Array of Recon models for parallel fan-out. Falls back to `[reconModel]` for backward compat.
+- **`preset.reconAggregator: ReconConfig`** — The integration model. Falls back to the main aggregator when unset.
+
+Example `settings.json`:
+
+```jsonc
+"moa.presets": {
+  "default": {
+    "refModels":     [{ "model": "..." }, { "model": "..." }],
+    "aggregator":    { "model": "gcmp.zhipu:::GLM-5.2-CodingPlan" },
+    "reconModels": [
+      { "model": "gcmp.deepseek:::DeepSeek-V4-Pro" },
+      { "model": "gcmp.minimax:::MiniMax-M3-Token-Plan" }
+    ],
+    "reconAggregator": { "model": "gcmp.zhipu:::GLM-5.2-CodingPlan" }
+  }
+}
+```
+
+#### Plan B — Aggregator always runs (architectural decision)
+
+The Recon Aggregator runs **even in single-model mode**. This is deliberate:
+
+| Mode | What Aggregator does |
+|---|---|
+| `parallel` (≥2 models) | Dedupe + integrate + label sources (`[from recon_1]`) + flag conflicts |
+| `single` (1 model) | Normalize raw output, strip noise, enforce consistent format |
+
+Downstream Refs see the **same shape** regardless of upstream model count. There is no `if single/parallel` branch in `moaOrchestrator.ts` — one code path.
+
+#### Recon Aggregator is an agent, not a pure LLM call
+
+It uses `runActingAgent` with **full tools but constrained use**:
+
+- ✅ Reading files / URLs that Recon already cited (for verification of conflicting claims)
+- ✅ Writing merged summary to `.moa_cache/<task_id>/iteration_NNN/recon_merged.md` for audit
+- ❌ New web search, exploratory grep, fetch uncited URLs (that's Recon's job)
+- ❌ Modifying user source files (read-only on user sources)
+- ❌ Filling gaps (gap-filling is next iteration's Recon's job)
+
+The constraint is enforced via prompt, not capability restriction — Aggregator can call any tool but the prompt instructs it to use them only for verification, not exploration.
+
+#### File layout changes
+
+`.moa_cache/<task_id>/iteration_NNN/` now contains:
+
+- `recon_result.json` — **always written**, contains Aggregator-merged summary + `recon_mode` + `aggregator_model` + `parallel_sources[]` metadata
+- `recon/recon_N.json` — only in parallel mode, one file per parallel Recon agent (raw summary + tool_calls + error)
+
+Old single `recon_result.json` shape (pre-v0.18) is forward-compatible: readers see an enriched object with new optional fields.
+
+### Changed — Recon prompt redesign (carried from v0.17.0)
+
+`buildReconPrompt` was rewritten in v0.17 to make Recon **aggressive** about:
+
+1. **Planner priority**: Planner's `sub_questions` are now marked `⭐ 必须回答的子问题` (was `仅供参考`) — Recon must answer them or report a gap
+2. **Tool diversity**: Prompt suggests `fetch_webpage` / `grep_search` / `list_dir` / `view_image` based on question type, not just `read_file`
+3. **Web search strategy**: Explicit instructions for when to invoke web search (API docs, recent changes, external context)
+4. **Difficulty-based tool budget**: Research/complex questions → 8-15 tool calls; narrow code questions → 1-3 calls
+
+v0.18 inherits this and applies it uniformly across all parallel Recon agents.
+
+### Files
+
+- **NEW** `src/moaCore/runRecon.ts` (~600 LOC): `callRecon` Plan B pipeline, `resolveAllReconModels`, `resolveReconAggregatorModel`, `buildReconAggregatorPrompt`, `callReconAggregator` (uses `runActingAgent`), `runSingleRecon` (extracted helper). Exports `CallReconResult` interface.
+- `src/types.ts`: `MoaPreset.reconModels?: ReconConfig[]` + `MoaPreset.reconAggregator?: ReconConfig` added.
+- `src/presetConfig.ts`: `resolveReconModels()` returns array; `ResolvedPresetConfig` extended with `reconModels` + `reconAggregator` fields; all 3 cases (explicit / fallback / legacy) populate new fields.
+- `src/moaCore/roles.ts`: `buildReconPrompt` redesigned (Planner priority, tool diversity, web search strategy).
+- `src/actingAgent.ts`: `runReconAgent()` gained 7th parameter `customSystemPrompt?: string` — when provided, overrides `buildReconSystemPrompt`. Fixes a v0.17 regression where `callReconAggregator`'s merged system+user prompt was overwritten by the default system prompt.
+- `src/moaOrchestrator.ts`: call site for `callRecon` simplified (no single/parallel branch for result vs merged — both go through `callResult.merged`); writes `recon_result.json` with enriched metadata; writes `recon/<label>.json` only in parallel mode.
+- `src/cacheReadme.ts`: bumped template version 1 → 2; directory tree updated with `iteration_NNN/recon/` + `recon_result.json` + `planner.json` + `actor_result.json`; added "Diagnosing #moa_orchestrate iterations" section; added `moa.parallelRecon` row in config table.
+- `package.json`: version 0.18.0; added `moa.parallelRecon` setting (default `true`, order 20).
+- `src/moaTool.ts`: `moa_collectFiles` → `moa_recon` references (2 places); version string 0.17 → 0.18 in user-facing strings.
+- `src/moaHandler.ts`: footer mentions 5 OutputChannels.
+
+## [0.17.0] - 2026-07-20
+
+### BREAKING — worker → ref terminology normalization
+
+The v0.14.x codebase called parallel multi-model advisors "workers"; v0.15.0 renamed them to "refs" but kept `worker_outputs` / `worker_models` / `worker_errors` as aliases for backward compat. v0.17.0 removes all alias fields:
+
+- `IterationRecord.worker_outputs` field: **removed** (use `ref_outputs`)
+- `OrchestrationMeta.worker_models` field: **removed** (use `ref_models`)
+- `completeness_timeline[].worker_errors` field: **removed** (use `ref_errors`)
+- `resolveRefModels()` return value: no longer includes `workers` alias
+- meta.json: read-time migration (old `worker_models` → `ref_models` automatically on first read; next overwrite normalizes)
+
+Old `.moa_cache/<task_id>/meta.json` files from v0.16.x will be auto-migrated on read; no manual action needed.
+
+### Added — 5 independent OutputChannels for pipeline visibility
+
+The full 5-role pipeline (Planner / Recon / Refs / Aggregator / Actor) now writes intermediate output to **5 separate VSCode OutputChannels**, visible in `View → Output` dropdown (same level as `MoA Bridge Diag`):
+
+| Channel | Contents |
+|---|---|
+| `MoA Planner` | Planner JSON output (iter 1 only) |
+| `MoA Recon` | Recon summary + tool_calls count + elapsed + early_stop reason |
+| `MoA Refs` | Each ref's raw LLM output (failed refs also logged) |
+| `MoA Aggregator` | Aggregator raw + parsed JSON + finalizer output + iteration summary (completeness / next_action / convergence) |
+| `MoA Actor` | Each action_item's status + artifacts + self_assessment |
+
+Each channel includes iteration boundary headers (═══════) so users can scroll through multi-iteration runs without losing track.
+
+### Removed — dead code (3 unused prompt builder functions)
+
+Deleted three legacy prompt builders that had **zero call sites** since v0.15.0 (replaced by params-object-signature versions):
+
+- `buildWorkerPrompt(task, state, label)` — replaced by `buildRefPrompt({task, iteration, ...})`
+- `buildAggregatorPrompt(task, state, workerOutputs)` — replaced by `buildAggregatorPromptV2({task, iteration, refOutputs, ...})`
+- `buildFinalPrompt(task, state)` — replaced by `moaCore.buildFinalPrompt({task, synthesis, evidence, ...})`
+
+These dead functions were the last source of deprecated terms (`worker`, `need_more_analysis`) in the codebase. Removing them cleans up search results and reduces maintenance surface.
+
+### Fixed — `moa_collectFiles` reference pointed to non-existent tool
+
+`moaTool.ts` had two `Tip:` blocks suggesting users call `moa_collectFiles` — a tool that doesn't exist. Fixed to point to the real `moa_recon` tool instead.
+
+### Changed — chat output now mentions Output channels
+
+`@moa` / `@moaloop` / `@moasingle` chat responses and `#moa_analyze` tool results now include a footer pointing users to the 5 Output channels for intermediate pipeline visibility.
+
+## [0.15.1] - 2026-07-20
+
+### Fixed — hotfix 1: Actor evidence extraction crash on missing `action.content`
+
+**Symptom**: `moa_continue` failed with `Iteration failed: Cannot read properties of undefined (reading 'length')` after Actor completed. Result: `iteration_002/` files (Recon/Refs/Aggregator/Actor) were correctly written, but `state.history.push(record)` was never reached → `state.json` stayed at iteration 1 → `timeline.md` only showed iteration 1.
+
+**Root cause**: Actor LLM frequently omits the `action.content` field in its JSON response (only returns `type`/`target`/`rationale`). The original evidence extraction loop accessed `ar.action.content.length` directly, throwing a TypeError.
+
+**Fix**: Extract evidence logic into pure function [`buildActorEvidence`](src/moaCore/actorEvidence.ts) with defensive access (`ar.action?.content` + `typeof` check). When `content` is missing, fallback to constructing the snippet from `artifacts` + `output_chars` + `rationale`.
+
+**Test coverage**: `test/hotfix.test.ts` (8 cases including the real-world crashing data shape from 2026-07-19). Run with `npm test`.
+
+### Fixed — hotfix 2: `final.md`/`final.json` missing on auto-finalize
+
+**Symptom**: When `runIteration` auto-finalized (Aggregator says `finalize` / `MAX_ITER` / `shouldStop`), it set `state.status = 'finalized'` but did NOT call `finalizeTask`. The user would see `finalized` status but `final.md` was missing — they had to manually call `#moa_finalize` to produce it.
+
+**Fix**: At the end of `runIteration`, if `state.status === 'finalized'`, automatically invoke `finalizeTask(taskId, token)` to produce `final.md` + `final.json` + re-render meta/timeline. Failure is non-fatal (logged via `progress?.`, does not block the return).
+
+### Changed — test infrastructure
+
+- Added `tsx` devDependency and `npm test` script
+- New `test/` directory for regression tests (excluded from webpack bundle)
+
+## [0.15.0] - 2026-07-20
+
+### Added — 5-role closed-loop MoA orchestration
+
+`moa_orchestrate` now runs a full Planner → Recon → Refs → Aggregator → Actor closed loop across iterations. The five roles are explicit:
+
+| Role | When | Purpose |
+|---|---|---|
+| **Planner** | iter 1 only | Clarifies task, generates `sub_questions` + `recon_hints` for Recon |
+| **Recon** | every iter | Read-only acting agent, gathers evidence with tool calls |
+| **Refs** | every iter | N LLM advisors in parallel (multi-perspective analysis) |
+| **Aggregator** | every iter | Single gate — decides `finalize` / `actor_needed` / `recon_needed` |
+| **Actor** | on `actor_needed` | Full-tool acting agent, executes `action_items` and produces artifacts |
+
+Actor outputs feed back into `state.evidence` (high confidence) and are evaluated by the next iteration's Refs naturally. The loop terminates on Aggregator's `finalize` decision or MAX_ITER (12).
+
+**Timeline 9-column view** (`timeline.md`): `| Iter | Time | Compl. | Δ | Gaps | Recon Tools | Refs OK | Actor | Next |` — at-a-glance view of the full iteration history.
+
 ## [0.14.14] - 2026-07-19
 
 ### Added — Preset groups + true parallel ref fan-out

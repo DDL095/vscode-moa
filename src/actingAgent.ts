@@ -1223,6 +1223,11 @@ function buildReconSystemPrompt(missingHints?: string[]): string {
  *   - Lower iteration cap (8 vs 12) — recon should be faster than acting
  *   - Progress prefix "MoA recon" for UI clarity
  *
+ * v0.17.0: 新增 customSystemPrompt 参数。当 5 角色管线的 callRecon 调用时，
+ * 它会用 moaCore/roles.ts 的 buildReconPrompt 生成自己的 system prompt（含
+ * Planner hints / Aggregator gaps / Actor log 等动态上下文），传入这里
+ * 覆盖默认的 buildReconSystemPrompt。这避免"两套 system prompt 抢位置"的问题。
+ *
  * @param reconModel       Model to use (usually aggregator model, like acting).
  * @param userPrompt       Original user question.
  * @param toolInvocationToken From ChatRequest.
@@ -1230,6 +1235,9 @@ function buildReconSystemPrompt(missingHints?: string[]): string {
  * @param token            Cancellation token.
  * @param missingHints     Optional hints from previous sufficiency gate
  *                         (Phase 1.5 loop-back). Empty on first recon round.
+ * @param customSystemPrompt v0.17.0: 自定义 system prompt（5 角色管线专用）。
+ *                           传入时覆盖默认的 buildReconSystemPrompt。
+ *                           不传或空字符串 = 用默认（moaRunner.ts 老路径）。
  */
 export async function runReconAgent(
   reconModel: vscode.LanguageModelChat,
@@ -1237,9 +1245,13 @@ export async function runReconAgent(
   toolInvocationToken: vscode.ChatParticipantToolToken | undefined,
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
-  missingHints?: string[]
+  missingHints?: string[],
+  customSystemPrompt?: string
 ): Promise<ReconResult> {
-  const systemPrompt = buildReconSystemPrompt(missingHints);
+  // v0.17.0: 优先用 customSystemPrompt（5 角色管线）；否则用默认（moaRunner 老路径）
+  const systemPrompt = (customSystemPrompt && customSystemPrompt.trim().length > 0)
+    ? customSystemPrompt
+    : buildReconSystemPrompt(missingHints);
 
   // v0.13.0: 最大轮数从配置读取（默认 50，兜底硬上限）
   const config = vscode.workspace.getConfiguration('moa');

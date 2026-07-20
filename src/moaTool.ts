@@ -127,6 +127,49 @@ export class MoaAnalyzeTool implements vscode.LanguageModelTool<{
       },
     };
 
+    // v0.15.0 批次 2: 默认走 5 角色单次流程（Planner → Recon → Refs → Aggregator → Actor）
+    // forceDirect=true 或 maxReconRounds 显式指定时，回退到老路径 runP1Fanout
+    const useNewPipeline = !forceDirect && maxReconRounds === undefined;
+
+    if (useNewPipeline) {
+      try {
+        const { runSingleIterationAnalyze } = await import('./moaOrchestrator');
+        const output = await runSingleIterationAnalyze(prompt, token, {
+          reconContext,
+          reconSources,
+          progress: (msg) => streamShim.progress(msg),
+          toolInvocationToken: options.toolInvocationToken,
+        });
+
+        let resultText = output.summary;
+        // 附加 task_id + 落盘文件路径，方便用户查阅
+        resultText += `\n\n---\n\n> **MoA v0.17 Single-shot** | task_id: \`${output.task_id}\` | iterations: ${output.iterations_used} | confidence: ${(output.confidence * 100).toFixed(0)}%`;
+        resultText += `\n> 落盘文件：\`.moa_cache/${output.task_id}/final.md\` (完整报告) + \`timeline.md\` (时序表)`;
+        resultText += `\n> 中间过程：VSCode Output 面板下拉选择 MoA Planner / MoA Recon / MoA Refs / MoA Aggregator / MoA Actor`;
+
+        if (collectRawFiles) {
+          resultText +=
+            `\n\n---\n\n` +
+            `> **Tip**: For raw file contents collected during recon, call the ` +
+            `\`moa_recon\` tool with the same prompt.`;
+        }
+
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(resultText),
+        ]);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // 新管线失败时自动 fallback 到老路径 runP1Fanout
+        console.warn(`[moa_analyze] 5-role pipeline failed (${msg}), falling back to legacy runP1Fanout`);
+        streamShim.progress(`[MoA Analyze] 5-role pipeline failed, falling back to legacy path: ${msg.substring(0, 100)}`);
+        // 继续走下面的老路径
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Legacy path: runP1Fanout（forceDirect=true / maxReconRounds 指定 / 新管线失败时）
+    // ─────────────────────────────────────────────────────────────────────
+
     // If the caller asks for specific recon behavior, override config for
     // this call only. Reset after.
     const config = vscode.workspace.getConfiguration('moa');
@@ -172,7 +215,7 @@ export class MoaAnalyzeTool implements vscode.LanguageModelTool<{
         resultText +=
           `\n\n---\n\n` +
           `> **Tip**: For raw file contents collected during recon, call the ` +
-          `\`moa_collectFiles\` tool with the same prompt.`;
+          `\`moa_recon\` tool with the same prompt.`;
       }
 
       return new vscode.LanguageModelToolResult([

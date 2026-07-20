@@ -13,7 +13,7 @@
  */
 
 import * as vscode from 'vscode';
-import { moaHandler } from './moaHandler';
+import { moaHandler, moaLoopHandler, moaSingleHandler } from './moaHandler';
 import { configureModels, switchPreset } from './moaConfig';
 import { migrateLegacyToPreset } from './presetConfig';
 import { probeTools } from './probeTools';
@@ -22,6 +22,8 @@ import { registerMoaReconTool } from './moaReconTool';
 import { registerMoaOrchestrateTools } from './moaOrchestrateTools';
 
 const PARTICIPANT_ID = 'moa-bridge.moa';
+const PARTICIPANT_LOOP_ID = 'moa-bridge.moaloop';
+const PARTICIPANT_SINGLE_ID = 'moa-bridge.moasingle';
 
 // v0.12.0 diagnostic: persistent OutputChannel so activation errors are visible
 // even if activate() throws midway.
@@ -49,7 +51,18 @@ export function activate(context: vscode.ExtensionContext): void {
     participant.iconPath = iconPath;
 
     context.subscriptions.push(participant);
-    diag().appendLine('[MoA activate] chat participant registered');
+    diag().appendLine('[MoA activate] chat participant registered (moa, Loop mode default)');
+
+    // v0.16.0: 显式 Loop / Single chat participants
+    const loopParticipant = vscode.chat.createChatParticipant(PARTICIPANT_LOOP_ID, moaLoopHandler);
+    loopParticipant.iconPath = iconPath;
+    context.subscriptions.push(loopParticipant);
+    diag().appendLine('[MoA activate] chat participant registered (moaloop)');
+
+    const singleParticipant = vscode.chat.createChatParticipant(PARTICIPANT_SINGLE_ID, moaSingleHandler);
+    singleParticipant.iconPath = iconPath;
+    context.subscriptions.push(singleParticipant);
+    diag().appendLine('[MoA activate] chat participant registered (moasingle)');
 
     // v0.11.0: Register moa_recon + moa_analyze as LM tools (Hermes subagent pattern).
     registerMoaReconTool(context);

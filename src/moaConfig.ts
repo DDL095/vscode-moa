@@ -376,20 +376,22 @@ export async function configureModels(): Promise<void> {
     model: modelKey(m),
   }));
 
-  // Step 2/4: aggregator (single-select 对勾). Default: existing aggregator, or
-  // first selected ref if no existing aggregator, or first model.
+  // Step 2/4: aggregator (single-select 对勾).
+  // v0.18.1: 取消"新建时默认勾第一个 ref / 第一个模型"行为。
+  //   - 已配置 → 按现有配置预勾选
+  //   - 未配置 → 全部 picked:false（强制用户主动选择，避免"第一个模型被默认选上"）
   // v0.7.0: lookup by m.id first (exact), then fall back to substring match
   // on m.name (for backward compat with v0.6.x configs).
-  const aggDefaultIdx = existingAgg?.model
-    ? models.findIndex((m) => modelKey(m) === existingAgg.model) >= 0
-      ? models.findIndex((m) => modelKey(m) === existingAgg.model)
-      : models.findIndex((m) => m.name.toLowerCase().includes(existingAgg.model!.toLowerCase()))
-    : selectedRefs.length > 0
-      ? models.findIndex((m) => m.id === selectedRefs[0].id)
-      : 0;
+  let aggDefaultIdx = -1;
+  if (existingAgg?.model) {
+    const exactIdx = models.findIndex((m) => modelKey(m) === existingAgg.model);
+    aggDefaultIdx = exactIdx >= 0
+      ? exactIdx
+      : models.findIndex((m) => m.name.toLowerCase().includes(existingAgg.model!.toLowerCase()));
+  }
   const aggItems = items.map((it, i) => ({
     ...it,
-    picked: i === (aggDefaultIdx >= 0 ? aggDefaultIdx : 0),
+    picked: i === (aggDefaultIdx >= 0 ? aggDefaultIdx : -1),
   }));
 
   const aggPick = await singlePickWithCheckbox(
@@ -451,33 +453,30 @@ export async function configureModels(): Promise<void> {
   // UI 设计：
   //   - 顶部加 "Disable L3 (use L2 truncation only)" —— 选这个表示禁用
   //   - 其余选项是所有可用模型
-  //   - 默认推荐 MiniMax-M3（如可用）
+  //
+  // v0.18.1: 取消"未配置时主动查找 MiniMax-M3 并预勾选"的行为。
+  //   首次配置时默认勾 "Disable L3"（"什么都不做"是更安全的默认），
+  //   避免用户在不知情的情况下让某个模型被默认选上。
   // ─────────────────────────────────────────────────────────────────────────
   const existingL3 = seed.l3Summarizer;
   const L3_DISABLE_KEY = '__disable_l3__';
   const l3DisableLabel = `$(circle-slash) Disable L3 (use L2 semantic-boundary truncation only)`;
 
-  // 找 MiniMax-M3 作为推荐默认（仅在用户新配置或现有配置无效时使用）
-  const minimaxM3 = models.find((m) =>
-    /MiniMax.*M3/i.test(m.name) || /MiniMax.*M3/i.test(m.id)
-  );
-
   // 决定预勾选项
-  let l3PrePickedIdx = -1;
+  //   - 已配置（含 model='' 即显式禁用）→ 按配置匹配
+  //   - 未配置（全新 preset / seed.l3Summarizer 为空对象）→ 默认勾 Disable L3
+  let l3PrePickedIdx: number;
   if (existingL3?.model) {
     // 已有配置：按 m.id 匹配
     if (existingL3.model === '') {
       l3PrePickedIdx = 0;  // 禁用
     } else {
       const matchIdx = items.findIndex((it) => modelKey(it.model) === existingL3.model);
-      l3PrePickedIdx = matchIdx >= 0 ? matchIdx + 1 : -1;  // +1 跳过禁用项
+      l3PrePickedIdx = matchIdx >= 0 ? matchIdx + 1 : 0;  // 找不到则默认禁用（+1 跳过禁用项）
     }
-  }
-  if (l3PrePickedIdx < 0) {
-    // 新配置：优先 MiniMax-M3，否则禁用
-    l3PrePickedIdx = minimaxM3
-      ? items.findIndex((it) => it.model === minimaxM3) + 1
-      : 0;  // 无 M3 → 默认禁用
+  } else {
+    // 新配置：默认 Disable L3（不主动推任何具体模型）
+    l3PrePickedIdx = 0;
   }
 
   // 构造 L3 选项列表（禁用项 + 全部模型）
@@ -485,7 +484,7 @@ export async function configureModels(): Promise<void> {
     {
       label: l3DisableLabel,
       description: 'Skip L3 entirely — all large files truncated at semantic boundary',
-      detail: 'Choose this if you have no MiniMax-M3 or want simpler behavior',
+      detail: 'Default for new presets — pick a model below if you want L3 condensation',
       model: null as vscode.LanguageModelChat | null,  // null = disable sentinel
       picked: l3PrePickedIdx === 0,
     },

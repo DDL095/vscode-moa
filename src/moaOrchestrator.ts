@@ -3,8 +3,8 @@
  *
  * Implements the multi-round MoA loop where:
  *   - recon is delegated to #runSubagent (via main Copilot session)
- *   - workers (refs) are lightweight vscode.lm calls with NO tool schema injection
- *   - aggregator (GLM-5.2 default, user-configurable) fuses worker outputs
+ *   - refs are lightweight vscode.lm calls with NO tool schema injection
+ *   - aggregator (GLM-5.2 default, user-configurable) fuses ref outputs
  *   - state persists to disk so iterations survive main-session compaction
  *
  * Three LM tools expose this loop to the main Copilot session:
@@ -16,20 +16,47 @@
  *   <workspace>/.moa_cache/<task_id>/
  *     state.json              — current MoaState (overwritten each step)
  *     task.txt                — original task description
+ *     meta.json               — human-readable metadata (timeline of completeness, models used)
+ *     timeline.md             — at-a-glance iteration progression table
  *     iteration_NNN/
- *       recon_request.json    — gaps to fill (what #runSubagent should look for)
- *       recon_result.json     — subagent result fed back via #moa_continue
- *       workers/<label>.json  — individual worker outputs
- *       aggregator.json       — aggregator synthesis + new gaps
- *     final.json              — #moa_finalize output
+ *       planner.json          — Planner output (iter 1 only)
+ *       recon_request.json    — gaps to fill (legacy v0.14.x compat)
+ *       recon_result.json     — Recon result (注入下游 evidence 的那份 summary;
+ *                                单模式 = 单 recon 结果; 并行模式 = Aggregator merged
+ *                                并行模式会附加 parallel_sources[] + aggregator_model 字段)
+ *       recon/<label>.json    — 仅并行模式: 每个并行 recon 的完整结果 (v0.18.0)
+ *       refs/<label>.json     — individual ref outputs (v0.16.0: only refs/, no workers/ alias)
+ *       aggregator.json       — aggregator synthesis + gate decision
+ *       actor_result.json     — Actor execution result (if triggered)
+ *     final.json              — finalizeTask output (summary + action_items)
+ *     final.md                — human-readable final report
  */
 
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { promises as fs } from 'fs';
-// v0.14.14: 统一通过 preset 读取 worker/aggregator 配置
+// v0.14.14: 统一通过 preset 读取 ref/aggregator 配置
 import { getActivePresetConfig } from './presetConfig';
+// v0.15.0: 5 角色共享模块
+// 注意：只导入新角色（Planner/Recon/Actor）和共享类型，
+// buildRefPrompt/buildAggregatorPrompt/buildFinalPrompt/extractJson 仍用本地版本
+// （本地版本签名向后兼容，不破坏现有代码）
+import {
+  PlannerOutput,
+  ReconResult,
+  ReconReason,
+  RefOutput,
+  AggregatorOutput as CoreAggregatorOutput,
+  AggregatorNextAction,
+  ActorResult,
+  buildFinalPrompt as buildFinalPromptCore,
+} from './moaCore/roles';
+import { runPlanner as callPlanner } from './moaCore/runPlanner';
+import { callRecon } from './moaCore/runRecon';
+import { callActor } from './moaCore/runActor';
+// v0.15.0 hotfix 1: evidence 提取纯函数（独立文件便于单测）
+import { buildActorEvidence } from './moaCore/actorEvidence';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types
@@ -41,21 +68,72 @@ export interface EvidenceItem {
   confidence: 'high' | 'medium' | 'low';
 }
 
+/**
+ * v0.15.0: Ref 输出记录（v0.17.0 删除 worker_outputs alias 字段）。
+ */
+export interface RefOutputRecord {
+  label: string;
+  model: string;
+  output: string;
+  error?: string;
+}
+
+/**
+ * v0.15.0: 单轮 iteration 的完整记录（含 5 角色）。
+ */
 export interface IterationRecord {
   iteration: number;
   started_at: string;
+
+  // ── Planner（仅 iteration 0）──
+  planner_output?: PlannerOutput;
+
+  // ── Recon（每轮跑）──
+  recon_result?: ReconResult;
+  /** 兼容旧字段（v0.14.x recon_result 格式，仅 moa_continue 喂料时填） */
+  recon_result_external?: { content: string; source: string };
+  recon_reason?: ReconReason;
+
+  // ── Refs（并行）──
+  ref_outputs?: RefOutputRecord[];
+
+  // ── Aggregator ──
+  aggregator_output?: CoreAggregatorOutput;
+
+  // ── Actor（仅 aggregator 标记 actor_needed 时）──
+  actor_result?: ActorResult;
+
+  // ── v0.14.x 兼容字段（recon_request 已被 recon_reason 替代，保留供读取） ──
   recon_request?: { gaps: string[]; prompt: string };
-  recon_result?: { content: string; source: string };
-  worker_outputs: Array<{ label: string; model: string; output: string; error?: string }>;
-  aggregator_output?: AggregatorOutput;
 }
 
-export interface AggregatorOutput {
-  synthesis: string;
-  evidence_coverage: number;   // 0-1
-  critical_gaps: string[];
-  next_action: 'recon_needed' | 'finalize' | 'need_more_analysis';
-}
+/**
+ * v0.15.0: AggregatorOutput（重新导出，与旧 export 保持兼容）。
+ *
+ * v0.15.0 关键变更：
+ *   - next_action 去掉 need_more_analysis，新增 actor_needed
+ *   - 加 recon_reason
+ *   - 加 action_items
+ *
+ * @deprecated v0.15.0 请使用 moaCore/roles.ts 的 AggregatorOutput
+ */
+export type AggregatorOutput = CoreAggregatorOutput;
+
+/**
+ * v0.16.0: 收敛来源标记。让用户在 timeline.md / final.md 一眼看出
+ * 「这次是 Aggregator 自然收敛，还是被外部强制收敛」。
+ *
+ * 原因：单次模式（runSingleIterationAnalyze）和 MAX_ITER 强制收敛
+ * 都会让 status='finalized'，但用户看到的 completeness 可能远低于
+ * COMPLETENESS_THRESHOLD（如 55%），需要文案明确说明这是强制收敛
+ * 而非自然完成，避免误导。
+ */
+export type ConvergenceSource =
+  | 'natural'           // Aggregator 在某轮决策 next_action='finalize'
+  | 'single_shot'       // runSingleIterationAnalyze 单次模式强制收敛
+  | 'max_iter'          // 达到 MAX_ITER 强制收敛
+  | 'should_stop'       // shouldStop() 检测到停滞强制收敛
+  | 'manual_finalize';  // 用户手动调 #moa_finalize
 
 export interface MoaState {
   task_id: string;
@@ -70,6 +148,20 @@ export interface MoaState {
   status: 'running' | 'awaiting_recon' | 'finalized' | 'error';
   history: IterationRecord[];
   error?: string;
+
+  // ── v0.15.0 新字段 ──
+  /** Planner 输出（仅首轮，存这里便于恢复） */
+  planner?: PlannerOutput;
+  /** Actor 历史累积（每轮如有） */
+  actor_history?: ActorResult[];
+  /** Recon 历史累积（每轮一条） */
+  recon_history?: ReconResult[];
+
+  // ── v0.16.0 新字段 ──
+  /** 收敛来源（仅 status='finalized' 时有意义；undefined 表示未收敛或老任务） */
+  convergence_source?: ConvergenceSource;
+  /** 收敛时 Aggregator 的原始 next_action 建议（用于 single_shot 模式透明展示） */
+  convergence_raw_next_action?: string;
 }
 
 export interface MoaFinalOutput {
@@ -93,6 +185,87 @@ export interface MoaFinalOutput {
 const MAX_ITER = 12;                  // user-specified: 10-15 range, take middle
 const COMPLETENESS_THRESHOLD = 0.8;   // aggregator says ≥0.8 → can finalize
 const CONVERGENCE_WINDOW = 3;         // last N iterations checked for stall
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.17.0: 5 个独立的 OutputChannel（每个角色一个）
+//
+// 用户希望能在 VSCode Output 面板（View → Output）里看到 MoA 流水线的
+// 完整中间过程，并且按角色拆分到不同的输出端口，避免混杂：
+//
+//   - "MoA Planner"      — 仅 Planner 输出（仅 iter 1）
+//   - "MoA Recon"        — 仅 Recon 输出（每轮 tool_calls / summary / 错误）
+//   - "MoA Refs"         — 每个 Ref 的原始输出（多模型对比）
+//   - "MoA Aggregator"   — Aggregator 的 raw + parsed JSON
+//   - "MoA Actor"        — Actor 的每个 action_item 执行结果 + self_assessment
+//
+// 5 个 channel 都跟老的 "MoA Bridge Diag" / "MoA Bridge — Ref Output"
+// 同一级（下拉可见），用户在排查某角色问题时只看对应 channel，不被其他角色
+// 的输出淹没。
+//
+// 设计：
+//   - 懒创建：第一次 log<Role>() 时才 createOutputChannel（避免 activate 时
+//     就一次性创建 5 个空 channel 占用 UI）
+//   - 失败静默：写入失败只 console.warn，不阻塞状态机
+//   - 全程写：不开开关（落盘 JSON 已有，OutputChannel 是镜像 + 即时可见）
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 5 个角色的 OutputChannel 单例缓存。
+ *
+ * 用 map 而非 5 个独立变量，方便统一懒创建逻辑 + 未来加新角色时不需要
+ * 改 helper 函数签名。
+ */
+type PipelineChannelKey = 'planner' | 'recon' | 'refs' | 'aggregator' | 'actor';
+const _pipelineChannels: Partial<Record<PipelineChannelKey, vscode.OutputChannel>> = {};
+
+const CHANNEL_NAMES: Record<PipelineChannelKey, string> = {
+  planner: 'MoA Planner',
+  recon: 'MoA Recon',
+  refs: 'MoA Refs',
+  aggregator: 'MoA Aggregator',
+  actor: 'MoA Actor',
+};
+
+/**
+ * 获取指定角色的 OutputChannel（懒创建）。
+ */
+function getPipelineChannel(key: PipelineChannelKey): vscode.OutputChannel {
+  let ch = _pipelineChannels[key];
+  if (!ch) {
+    ch = vscode.window.createOutputChannel(CHANNEL_NAMES[key]);
+    _pipelineChannels[key] = ch;
+  }
+  return ch;
+}
+
+/**
+ * 把一行内容追加到指定角色的 OutputChannel。
+ * 任何错误都静默吞掉（OutputChannel 是 render-only，不阻塞状态机）。
+ */
+function logPipeline(key: PipelineChannelKey, line: string): void {
+  try {
+    getPipelineChannel(key).appendLine(line);
+  } catch (err) {
+    console.warn(`[MoA ${key} log] failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * 把带分隔头的多行块写到指定角色的 OutputChannel。
+ *
+ * @param key     角色通道（planner / recon / refs / aggregator / actor）
+ * @param header  块标题（如 "--- Ref advisor_1 (DeepSeek-V4-Flash) ---"）
+ * @param content 块正文（多行字符串）
+ */
+function logPipelineBlock(
+  key: PipelineChannelKey,
+  header: string,
+  content: string
+): void {
+  logPipeline(key, '');
+  logPipeline(key, header);
+  logPipeline(key, content);
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // State persistence
@@ -147,8 +320,324 @@ async function saveIterationArtifact(
   data: unknown
 ): Promise<void> {
   const dir = path.join(await getTaskDir(taskId), `iteration_${String(iteration).padStart(3, '0')}`);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(path.join(dir, filename), JSON.stringify(data, null, 2), 'utf8');
+  const filePath = path.join(dir, filename);
+  // filename may contain subpaths (e.g. "refs/advisor_1.json"), so create
+  // the final file's parent directory, not just dir/ itself.
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.14.15: Human-readable MD audit rendering (parallel to JSON state)
+//
+// 设计原则：
+//   - JSON 是唯一权威状态源，MD 仅为 render-only 视图
+//   - 写入失败只 console.warn，不抛错（保护状态机）
+//   - 原子写入（tmp + rename），防止读到半写状态
+//   - 每轮覆盖写（meta.json + timeline.md），保证反映最新状态
+//
+// 落盘文件：
+//   <task_id>/meta.json       — 跨轮累积元信息（含 completeness_timeline[]）
+//   <task_id>/timeline.md     — 全轮时序表（一目了然）
+//   <task_id>/final.md        — finalize 时的最终产出（含 action_items）
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Orchestration 任务级元信息（每轮覆盖写）。 */
+interface OrchestrationMeta {
+  task_id: string;
+  task: string;
+  created_at: string;
+  last_update: string;
+  /** finalize 后才填，表示任务完成时间。 */
+  finished_at?: string;
+  iteration_count: number;
+  status: MoaState['status'];
+  /** Ref 模型名列表（如 ["DeepSeek-V4-Flash", "DeepSeek-V4-Pro", ...]）。 */
+  ref_models: string[];
+  /** Aggregator 模型名。 */
+  aggregator_model: string;
+  /** 每轮 completeness/gaps 数据点，便于画趋势图或人工检视收敛。 */
+  completeness_timeline: Array<{
+    iteration: number;
+    started_at: string;
+    completeness: number;
+    gaps_count: number;
+    next_action: string;
+    recon_used: boolean;
+    ref_errors: number;
+  }>;
+  total_evidence_items: number;
+  /** finalize 后才填。 */
+  final_confidence?: number;
+}
+
+/**
+ * 原子化 MD/小文件写入工具。
+ * 失败只 console.warn，不抛错（render-only，保护状态机）。
+ *
+ * @param subdir 相对 task_id 目录的子目录（空串表示 task_id 根目录）
+ */
+async function writeMdArtifact(
+  taskId: string,
+  subdir: string,
+  filename: string,
+  content: string
+): Promise<void> {
+  try {
+    const taskDir = await getTaskDir(taskId);
+    const targetDir = subdir ? path.join(taskDir, subdir) : taskDir;
+    const filePath = path.join(targetDir, filename);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const tmp = `${filePath}.tmp`;
+    await fs.writeFile(tmp, content, 'utf8');
+    await fs.rename(tmp, filePath);
+  } catch (err) {
+    console.warn(
+      `[MoA MD render] failed to write ${filename} for ${taskId}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+/**
+ * 读取已存在的 meta.json（用于保留 ref_models / aggregator_model，
+ * 避免每轮重新 resolveRefModels）。失败返回 null。
+ *
+ * v0.17.0: 兼容老 meta.json（worker_models 字段）——读到旧字段时迁移到新字段。
+ */
+async function readExistingMeta(taskId: string): Promise<OrchestrationMeta | null> {
+  try {
+    const metaPath = path.join(await getTaskDir(taskId), 'meta.json');
+    const raw = await fs.readFile(metaPath, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<OrchestrationMeta> & { worker_models?: string[] };
+    // v0.17.0 迁移：worker_models → ref_models（只读迁移，下次覆盖写就自动 normalize）
+    if (parsed.worker_models && !parsed.ref_models) {
+      parsed.ref_models = parsed.worker_models;
+      delete parsed.worker_models;
+    }
+    return parsed as OrchestrationMeta;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 渲染 meta.json（每轮覆盖写）。
+ *
+ * 调用点：
+ *   - runIteration 末尾（saveState 之后）
+ *   - finalizeTask 末尾（写 final.json 之后，补 finished_at + final_confidence）
+ *
+ * @param taskId           任务 ID
+ * @param state            当前 state（唯一权威状态源）
+ * @param refModels        本轮 ref model.name 列表（仅第一次需传，之后从 meta 读）
+ * @param aggregatorModel  本轮 aggregator model.name（同上）
+ */
+async function renderMetaJson(
+  taskId: string,
+  state: MoaState,
+  refModels?: string[],
+  aggregatorModel?: string
+): Promise<void> {
+  // 仅当本轮传入新值时覆盖，否则保留已有 meta 的值（避免每轮重新 resolveRefModels）
+  let resolvedRefModels = refModels;
+  let resolvedAggregator = aggregatorModel;
+  if (!resolvedRefModels || !resolvedAggregator) {
+    const existing = await readExistingMeta(taskId);
+    if (!resolvedRefModels && existing?.ref_models) {
+      resolvedRefModels = existing.ref_models;
+    }
+    if (!resolvedAggregator && existing?.aggregator_model) {
+      resolvedAggregator = existing.aggregator_model;
+    }
+  }
+
+  const meta: OrchestrationMeta = {
+    task_id: state.task_id,
+    task: state.task,
+    created_at: state.created_at,
+    last_update: state.last_update,
+    finished_at: state.status === 'finalized' ? state.last_update : undefined,
+    iteration_count: state.iteration,
+    status: state.status,
+    ref_models: resolvedRefModels ?? [],
+    aggregator_model: resolvedAggregator ?? '',
+    completeness_timeline: state.history.map((h) => ({
+      iteration: h.iteration,
+      started_at: h.started_at,
+      completeness: h.aggregator_output?.evidence_coverage ?? 0,
+      gaps_count: h.aggregator_output?.critical_gaps?.length ?? 0,
+      next_action: h.aggregator_output?.next_action ?? 'unknown',
+      recon_used: !!h.recon_result,
+      ref_errors: (h.ref_outputs ?? []).filter((w) => w.error).length,
+    })),
+    total_evidence_items: state.evidence.length,
+    final_confidence: state.status === 'finalized' ? state.completeness : undefined,
+  };
+
+  await writeMdArtifact(taskId, '', 'meta.json', JSON.stringify(meta, null, 2));
+}
+
+/**
+ * 渲染 timeline.md（每轮覆盖写）。一张表看完整个迭代历程。
+ */
+async function renderTimelineMd(taskId: string, state: MoaState): Promise<void> {
+  const lines: string[] = [
+    `# Timeline — Task \`${taskId}\``,
+    '',
+    `**Task:** ${state.task}`,
+    '',
+    `**Status:** ${state.status} | **Iteration:** ${state.iteration}/${MAX_ITER} | **Created:** ${state.created_at}`,
+    '',
+    '## Iteration Progression',
+    '',
+    // v0.15.0: 改名 Workers→Refs，新增 Recon Tools 列（显示 Recon 调了几次工具）
+    //   新增 Actor 列（显示本轮是否触发 Actor + 成功/失败）
+    // v0.17.0: 删除 worker_outputs alias 后简化为直接读 ref_outputs
+    '| Iter | Time | Compl. | Δ | Gaps | Recon Tools | Refs OK | Actor | Next |',
+    '|---|---|---|---|---|---|---|---|---|',
+  ];
+
+  let prevCompl = 0;
+  for (const h of state.history) {
+    const cov = h.aggregator_output?.evidence_coverage ?? 0;
+    const delta = cov - prevCompl;
+    const deltaStr = delta >= 0 ? `+${delta.toFixed(2)}` : delta.toFixed(2);
+    prevCompl = cov;
+    const refList = h.ref_outputs ?? [];
+    const refsOk = refList.filter((w) => !w.error).length;
+    const ts = h.started_at.length >= 19 ? h.started_at.substring(11, 19) : h.started_at;
+    // v0.15.0: Recon Tools 列（tool_calls 数字，无 recon 显示 —）
+    const reconTools = h.recon_result?.tool_calls;
+    const reconStr = reconTools !== undefined && reconTools > 0
+      ? `${reconTools} calls`
+      : (h.recon_result ? '0' : '—');
+    // v0.15.0: Actor 列（success / failed / skipped / —）
+    let actorStr = '—';
+    if (h.actor_result) {
+      const total = h.actor_result.executed_actions.length;
+      const succ = h.actor_result.executed_actions.filter((a) => a.status === 'success').length;
+      actorStr = `${succ}/${total}`;
+    }
+    lines.push(
+      `| ${h.iteration} | ${ts} | ${cov.toFixed(2)} | ${deltaStr} | ` +
+        `${h.aggregator_output?.critical_gaps?.length ?? 0} | ` +
+        `${reconStr} | ${refsOk}/${refList.length} | ${actorStr} | ` +
+        `${h.aggregator_output?.next_action ?? '-'} |`
+    );
+  }
+
+  lines.push('');
+  lines.push('## Convergence Notes');
+  lines.push('');
+  if (state.status === 'finalized') {
+    // v0.16.0: 区分 4 种收敛来源，让用户看到真实状态而非误导性的「Converged」
+    const complPct = (state.completeness * 100).toFixed(0);
+    const thresholdPct = (COMPLETENESS_THRESHOLD * 100).toFixed(0);
+    const rawNext = state.convergence_raw_next_action ?? '?';
+    switch (state.convergence_source) {
+      case 'natural':
+        lines.push(`✅ **Naturally converged** at iteration ${state.iteration} | completeness: ${complPct}% (≥ threshold ${thresholdPct}%) | Aggregator decided: \`finalize\``);
+        break;
+      case 'single_shot':
+        lines.push(`🔄 **Single-shot mode forced finalize** at iteration ${state.iteration} | completeness: ${complPct}% (below threshold ${thresholdPct}%) | Aggregator's actual suggestion was \`${rawNext}\` — evidence may be incomplete, consider using \`@moaloop\` or \`#moa_orchestrate\` for iterative refinement.`);
+        break;
+      case 'max_iter':
+        lines.push(`🛑 **MAX_ITER=${MAX_ITER} reached, forced finalize** at iteration ${state.iteration} | completeness: ${complPct}% | Aggregator's last suggestion was \`${rawNext}\` — task did not naturally converge within iteration budget.`);
+        break;
+      case 'should_stop':
+        lines.push(`⏸️ **shouldStop() detected stall, forced finalize** at iteration ${state.iteration} | completeness: ${complPct}% | Aggregator's last suggestion was \`${rawNext}\` — further iterations unlikely to improve completeness.`);
+        break;
+      case 'manual_finalize':
+        lines.push(`👤 **Manually finalized** via \`#moa_finalize\` at iteration ${state.iteration} | completeness: ${complPct}% | Aggregator's last suggestion was \`${rawNext}\``);
+        break;
+      default:
+        // 老任务（v0.15.x 无 convergence_source 字段），向后兼容
+        lines.push(`✅ Converged at iteration ${state.iteration} with completeness ${complPct}%.`);
+    }
+  } else if (state.status === 'awaiting_recon') {
+    lines.push(`⏸️  Awaiting recon — ${state.gaps.length} gap(s) need to be filled via \`#moa_continue\`.`);
+    if (state.gaps.length > 0) {
+      lines.push('');
+      for (const g of state.gaps) lines.push(`- ${g}`);
+    }
+  } else if (state.status === 'error') {
+    lines.push(`❌ Error at iteration ${state.iteration}: ${state.error ?? 'unknown'}`);
+  } else if (state.status === 'running') {
+    lines.push(`🏃 Running — will proceed to iteration ${state.iteration + 1}.`);
+  }
+
+  lines.push('');
+  await writeMdArtifact(taskId, '', 'timeline.md', lines.join('\n'));
+}
+
+/**
+ * 渲染 final.md（仅 finalizeTask 末尾调用一次）。
+ * 包含：元信息头 + Summary + Action Items（含 rationale + content）+ Unresolved。
+ */
+async function renderFinalMd(
+  taskId: string,
+  output: MoaFinalOutput,
+  state: MoaState
+): Promise<void> {
+  // v0.16.0: 收敛来源标签（让用户在 final.md 顶部就看到真实状态）
+  const sourceLabel: Record<ConvergenceSource, string> = {
+    natural: '✅ Natural converge',
+    single_shot: '🔄 Single-shot forced',
+    max_iter: '🛑 MAX_ITER forced',
+    should_stop: '⏸️ shouldStop forced',
+    manual_finalize: '👤 Manual finalize',
+  };
+  const sourceStr = state.convergence_source
+    ? `${sourceLabel[state.convergence_source]}${state.convergence_raw_next_action ? ` (Aggregator suggested: \`${state.convergence_raw_next_action}\`)` : ''}`
+    : '(unknown source — pre-v0.16.0 task)';
+
+  const lines: string[] = [
+    `# MoA Final Output — Task \`${taskId}\``,
+    '',
+    `**Task:** ${state.task}`,
+    '',
+    '| Field | Value |',
+    '|---|---|',
+    `| Created | ${state.created_at} |`,
+    `| Finalized | ${state.last_update} |`,
+    `| Iterations used | ${output.iterations_used}/${MAX_ITER} |`,
+    `| Final confidence | ${(output.confidence * 100).toFixed(0)}% |`,
+    `| Convergence source | ${sourceStr} |`,
+    `| Status | ${state.status} |`,
+    '',
+    '---',
+    '',
+    '## Summary',
+    '',
+    output.summary,
+    '',
+  ];
+
+  if (output.action_items.length > 0) {
+    lines.push('## Action Items');
+    lines.push('');
+    for (let i = 0; i < output.action_items.length; i++) {
+      const a = output.action_items[i];
+      lines.push(`### ${i + 1}. [${a.type}] ${a.target}`);
+      lines.push('');
+      lines.push(`**Rationale:** ${a.rationale}`);
+      lines.push('');
+      lines.push('**Content:**');
+      lines.push('```');
+      lines.push(a.content);
+      lines.push('```');
+      lines.push('');
+    }
+  }
+
+  if (output.unresolved.length > 0) {
+    lines.push('## Unresolved Questions');
+    lines.push('');
+    for (const u of output.unresolved) lines.push(`- ${u}`);
+    lines.push('');
+  }
+
+  await writeMdArtifact(taskId, '', 'final.md', lines.join('\n'));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -160,8 +649,12 @@ interface ResolvedModel {
   label: string;
 }
 
-async function resolveModels(): Promise<{
-  workers: ResolvedModel[];
+/**
+ * v0.15.0: 解析 refs 和 aggregator 模型（重命名自 resolveModels）。
+ * v0.17.0: 删除 workers alias 返回值（保留单一 refs 名字）。
+ */
+async function resolveRefModels(): Promise<{
+  refs: ResolvedModel[];
   aggregator: ResolvedModel;
 }> {
   const all = await vscode.lm.selectChatModels({});
@@ -179,16 +672,16 @@ async function resolveModels(): Promise<{
   const refCfg = activePreset.refModels;
   const aggCfg = activePreset.aggregator;
 
-  const workers: ResolvedModel[] = [];
+  const refs: ResolvedModel[] = [];
   for (const cfg of refCfg) {
     let m = real.find((x) => (x.id ?? '') === cfg.model);
     if (!m) m = real.find((x) => x.name.toLowerCase().includes(cfg.model.toLowerCase()));
-    if (m) workers.push({ model: m, label: cfg.role || m.name });
+    if (m) refs.push({ model: m, label: cfg.role || m.name });
   }
 
-  if (workers.length === 0) {
+  if (refs.length === 0) {
     throw new Error(
-      `No usable worker models in preset "${activePreset.activeName}". Run "Moa: Configure Models" to set refs.`
+      `No usable ref models in preset "${activePreset.activeName}". Run "Moa: Configure Models" to set refs.`
     );
   }
 
@@ -199,13 +692,13 @@ async function resolveModels(): Promise<{
     if (!m) m = real.find((x) => x.name.toLowerCase().includes(aggModelKey.toLowerCase()));
     if (m) aggregator = { model: m, label: 'aggregator' };
   }
-  if (!aggregator) aggregator = { model: workers[0].model, label: 'aggregator (fallback to first worker)' };
+  if (!aggregator) aggregator = { model: refs[0].model, label: 'aggregator (fallback to first ref)' };
 
-  return { workers, aggregator };
+  return { refs, aggregator };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Worker / aggregator invocation (NO tool schema injection)
+// Ref / aggregator invocation (NO tool schema injection)
 // ─────────────────────────────────────────────────────────────────────────
 
 async function callLLM(
@@ -239,18 +732,35 @@ function evidenceBlock(evidence: EvidenceItem[]): string {
     .join('\n');
 }
 
-function buildWorkerPrompt(
-  task: string,
-  state: MoaState,
-  label: string
-): { system: string; user: string } {
+// v0.17.0 cleanup: buildWorkerPrompt / buildAggregatorPrompt / buildFinalPrompt
+// 三个旧签名死函数已删除（自 v0.15.0 起被 params 对象签名版本全面替代，无任何调用方）。
+// git 历史可查：git log -p src/moaOrchestrator.ts
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.15.0+: Refs / Aggregator prompt builders（params 对象签名）
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * v0.15.0 wrapper: Refs prompt（新签名）。
+ * 内联实现（与 moaCore buildRefPrompt 行为一致），不依赖本地 buildWorkerPrompt。
+ */
+function buildRefPrompt(params: {
+  task: string;
+  iteration: number;
+  evidenceBlock: string;
+  synthesis: string;
+  gaps: string[];
+  label: string;
+}): { system: string; user: string } {
   const system = [
-    'You are a Mixture-of-Agents worker (label: ' + label + ').',
+    `You are a Mixture-of-Agents Ref (label: ${params.label}).`,
+    '',
     'You are NOT the acting agent — you cannot call tools.',
     'Your role is to analyze the task against the current evidence and surface:',
     '  - new insights the aggregator missed',
     '  - contradictions in the evidence',
     '  - specific gaps that block a confident answer',
+    '  - assessment of previous Actor outputs (if evidence contains actor@iterN)',
     '',
     'Respond in JSON ONLY (no prose, no markdown fences):',
     '{',
@@ -260,113 +770,74 @@ function buildWorkerPrompt(
     '  "identified_gaps": ["<specific missing info>", ...]',
     '}',
     '',
-    'Match the language of the task (Chinese task → Chinese analysis).',
+    'Match the language of the task.',
   ].join('\n');
 
   const user = [
-    'TASK:',
-    task,
-    '',
-    'CURRENT EVIDENCE (iteration ' + state.iteration + '):',
-    evidenceBlock(state.evidence),
-    '',
+    'TASK:', params.task, '',
+    `CURRENT EVIDENCE (iteration ${params.iteration}):`,
+    params.evidenceBlock || '(none yet)', '',
     'CURRENT SYNTHESIS (for critique):',
-    state.synthesis || '(none yet — first iteration)',
-    '',
+    params.synthesis || '(none yet — first iteration)', '',
     'REMAINING GAPS:',
-    state.gaps.length > 0 ? state.gaps.map((g) => '- ' + g).join('\n') : '(none)',
+    params.gaps.length > 0 ? params.gaps.map((g) => '- ' + g).join('\n') : '(none)',
   ].join('\n');
 
   return { system, user };
 }
 
-function buildAggregatorPrompt(
-  task: string,
-  state: MoaState,
-  workerOutputs: Array<{ label: string; output: string }>
-): { system: string; user: string } {
+/**
+ * v0.15.0 wrapper: Aggregator prompt（新签名 + 新 next_action 选项）。
+ */
+function buildAggregatorPromptV2(params: {
+  task: string;
+  iteration: number;
+  evidenceBlock: string;
+  refOutputs: Array<{ label: string; output: string }>;
+  hasActorHistory: boolean;
+}): { system: string; user: string } {
   const system = [
-    'You are the MoA aggregator. Synthesize worker outputs into a coherent view.',
+    'You are the MoA aggregator. Synthesize ref outputs into a coherent view.',
     'You also decide whether enough evidence has been gathered to finalize.',
     '',
     'Respond in JSON ONLY:',
     '{',
-    '  "synthesis": "<coherent narrative combining worker insights>",',
+    '  "synthesis": "<coherent narrative combining ref insights>",',
     '  "evidence_coverage": <0-1, your judgment>,',
     '  "critical_gaps": ["<specific missing info that blocks confidence>", ...],',
-    '  "next_action": "recon_needed" | "finalize" | "need_more_analysis"',
+    '  "next_action": "finalize" | "actor_needed" | "recon_needed",',
+    '  "recon_reason"?: "initial | missing_data | need_deeper_analysis | actor_failed | contradiction",',
+    '  "action_items"?: [{ "type": "write_file|execute|create_roadmap|research_more|inform_user", "target": "...", "content": "...", "rationale": "..." }],',
     '}',
     '',
-    'Rules:',
-    '- next_action="recon_needed": critical_gaps non-empty AND could be filled by reading files/web',
-    '- next_action="finalize": critical_gaps empty OR evidence_coverage >= ' + COMPLETENESS_THRESHOLD,
-    '- next_action="need_more_analysis": gaps remain but require deeper reasoning, not new data',
+    '## next_action 决策规则',
+    '',
+    '- "finalize": 任务已完成；evidence_coverage >= 0.8；refs 没有指出新缺失',
+    `- "actor_needed": evidence_coverage >= 0.6；refs 指向具体执行动作；${params.hasActorHistory ? '本轮 Actor 还没跑过（即上轮跑过后还没再跑）' : '本任务还没执行过 Actor'}`,
+    '- "recon_needed": evidence_coverage < 0.6 OR refs 指出新缺失 OR 有 research_more action',
+    '  - 配合 recon_reason 区分场景',
+    '',
+    '## 节约成本原则',
+    '',
+    '**不要为了让流程"看起来完整"而强行多轮。**简单任务 1-2 轮就 finalize。',
     '',
     'Match the language of the task.',
   ].join('\n');
 
   const user = [
-    'TASK:',
-    task,
-    '',
-    'WORKER OUTPUTS (iteration ' + state.iteration + '):',
-    ...workerOutputs.map((w) => '--- ' + w.label + ' ---\n' + w.output),
-    '',
-    'CURRENT EVIDENCE:',
-    evidenceBlock(state.evidence),
-  ].join('\n');
-
-  return { system, user };
-}
-
-function buildFinalPrompt(task: string, state: MoaState): { system: string; user: string } {
-  const system = [
-    'You are the MoA finalizer. Convert the accumulated synthesis into action items.',
-    '',
-    'Respond in JSON ONLY:',
-    '{',
-    '  "summary": "<1-paragraph final summary>",',
-    '  "action_items": [',
-    '    {',
-    '      "type": "write_file" | "execute" | "create_roadmap" | "research_more" | "inform_user",',
-    '      "target": "<file path / command / roadmap title / etc.>",',
-    '      "content": "<specific content>",',
-    '      "rationale": "<why this action>"',
-    '    }',
-    '  ],',
-    '  "confidence": <0-1>,',
-    '  "unresolved": ["<open questions for the user>", ...]',
-    '}',
-    '',
-    'Action item types:',
-    '- write_file: concrete file to create/overwrite (target=path, content=full text)',
-    '- execute: shell command to run (target=command)',
-    '- create_roadmap: high-level plan document (target=title)',
-    '- research_more: follow-up investigation needed (target=topic)',
-    '- inform_user: just tell the user (target=subject, content=message)',
-    '',
-    'Match the language of the task.',
-  ].join('\n');
-
-  const user = [
-    'TASK:',
-    task,
-    '',
-    'FINAL SYNTHESIS:',
-    state.synthesis,
-    '',
-    'EVIDENCE GATHERED (' + state.evidence.length + ' items):',
-    evidenceBlock(state.evidence.slice(-20)),
-    '',
-    'ITERATIONS: ' + state.iteration,
-    'FINAL COMPLETENESS: ' + state.completeness,
+    'TASK:', params.task, '',
+    `CURRENT EVIDENCE (iteration ${params.iteration}):`,
+    params.evidenceBlock || '(none yet)', '',
+    `REF OUTPUTS (iteration ${params.iteration}):`,
+    ...params.refOutputs.map((r) => '--- ' + r.label + ' ---\n' + r.output), '',
+    `ACTOR HISTORY: ${params.hasActorHistory ? '有上轮 Actor 产出（evidence 中以 actor@iterN 标注）' : '无'}`,
   ].join('\n');
 
   return { system, user };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// JSON extraction (workers may wrap in fences despite instruction)
+// JSON extraction (refs may wrap in fences despite instruction)
 // ─────────────────────────────────────────────────────────────────────────
 
 function extractJson(text: string): unknown {
@@ -404,25 +875,46 @@ export async function createOrchestration(task: string): Promise<MoaState> {
     completeness: 0,
     status: 'awaiting_recon',
     history: [],
+    // v0.15.0: 显式初始化新字段，避免 runIteration/render functions 访问 undefined
+    planner: undefined,
+    actor_history: [],
+    recon_history: [],
   };
 
   await saveState(state);
   const dir = await getTaskDir(taskId);
   await fs.writeFile(path.join(dir, 'task.txt'), task, 'utf8');
 
+  // v0.14.15: 任务创建时立即写一份初始 meta.json + timeline.md，
+  // 让用户能在第一轮 refs 跑完前就看到"任务已启动"的状态
+  await renderMetaJson(taskId, state);
+  await renderTimelineMd(taskId, state);
+
   return state;
 }
 
 /**
- * Run one full iteration: workers + aggregator.
- * If subagentResult is provided, it is recorded as the recon_result for this
- * iteration BEFORE workers run.
+ * v0.15.0: Run one full iteration with 5 roles: Planner → Recon → Refs → Aggregator → Actor.
+ *
+ * 流程：
+ *   1. Planner（仅 iteration 0，调用一次，注入首轮 Recon 方向）
+ *   2. Recon（每轮跑，调工具收集证据）
+ *   3. Refs（并行，基于 evidence 池分析）
+ *   4. Aggregator（综合 + gate 决策：finalize / actor_needed / recon_needed）
+ *   5. Actor（仅 actor_needed 时执行，产出进 evidence，下轮 Refs 自然评估）
+ *
+ * @param taskId               任务 ID
+ * @param subagentResult       外部喂料（保留 v0.14.x moa_continue 机制）
+ * @param token                取消令牌
+ * @param progress             进度回调
+ * @param toolInvocationToken  v0.15.0 新增：VSCode 工具调用 token（Recon/Actor 调内置工具必需）
  */
 export async function runIteration(
   taskId: string,
   subagentResult: { content: string; source: string } | undefined,
   token: vscode.CancellationToken,
-  progress?: (msg: string) => void
+  progress?: (msg: string) => void,
+  toolInvocationToken?: vscode.ChatParticipantToolToken
 ): Promise<MoaState> {
   const state = await loadState(taskId);
   if (!state) throw new Error('Task not found: ' + taskId);
@@ -432,18 +924,78 @@ export async function runIteration(
 
   state.iteration += 1;
   const iterNum = state.iteration;
-  progress?.(`[MoA] starting iteration ${iterNum}`);
+  progress?.(`[MoA v0.15] starting iteration ${iterNum}`);
+
+  // v0.17.0: iteration 起始分隔头分别写到 5 个角色的 OutputChannel
+  //   ——每个 channel 自成一体（用户在某个角色 channel 里能看到该角色每轮的完整边界）
+  const iterHeaderTop = `═══════════════════════════════════════════════════════════════════════`;
+  const iterHeaderBody = `=== MoA iteration ${iterNum} started @ ${new Date().toISOString()} ===`;
+  const iterHeaderTask = `Task: ${state.task}`;
+  for (const key of ['planner', 'recon', 'refs', 'aggregator', 'actor'] as PipelineChannelKey[]) {
+    logPipeline(key, '');
+    logPipeline(key, iterHeaderTop);
+    logPipeline(key, iterHeaderBody);
+    logPipeline(key, iterHeaderTask);
+    logPipeline(key, iterHeaderTop);
+  }
 
   const record: IterationRecord = {
     iteration: iterNum,
     started_at: new Date().toISOString(),
-    worker_outputs: [],
+    ref_outputs: [],
   };
 
-  // 1. Ingest subagent recon result (if provided)
+  // 初始化 v0.15.0 新字段
+  if (!state.actor_history) state.actor_history = [];
+  if (!state.recon_history) state.recon_history = [];
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 阶段 1：Planner（仅 iteration 0）
+  // ═══════════════════════════════════════════════════════════════════════
+  let plannerForRecon: PlannerOutput | undefined = state.planner;
+  if (iterNum === 1) {
+    progress?.(`[MoA Planner] running...`);
+    plannerForRecon = await callPlanner(state.task, token, progress);
+    state.planner = plannerForRecon;
+    record.planner_output = plannerForRecon;
+    if (plannerForRecon) {
+      await saveIterationArtifact(taskId, iterNum, 'planner.json', plannerForRecon);
+      // v0.17.0: 把 Planner 输出写到 "MoA Planner" OutputChannel
+      logPipelineBlock('planner', `--- Planner @iter${iterNum} ---`, JSON.stringify(plannerForRecon, null, 2));
+    } else {
+      logPipelineBlock('planner', `--- Planner @iter${iterNum} (failed/skipped) ---`, '(no output)');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 阶段 2：Recon（每轮跑）
+  // ═══════════════════════════════════════════════════════════════════════
+  let reconReason: ReconReason = iterNum === 1 ? 'initial' : 'missing_data';
+  // 如果上轮 aggregator 标了 recon_reason，用它
+  const lastAgg = state.history.length > 0 ? state.history[state.history.length - 1].aggregator_output : undefined;
+  if (lastAgg?.recon_reason) {
+    reconReason = lastAgg.recon_reason;
+  }
+
+  // 检查上轮 Actor 是否失败 → recon_reason='actor_failed'
+  const lastActor = state.actor_history.length > 0 ? state.actor_history[state.actor_history.length - 1] : undefined;
+  if (lastActor && !lastActor.self_assessment.all_succeeded) {
+    reconReason = 'actor_failed';
+  }
+
+  // 接受外部 subagentResult（v0.14.x moa_continue 机制，向后兼容）
+  // 如果有外部喂料，跳过内置 Recon，直接用外部结果
+  let reconResult: ReconResult | undefined;
   if (subagentResult) {
-    record.recon_result = subagentResult;
-    // Add to evidence as one chunk — workers/aggregator will pull specifics
+    record.recon_result_external = subagentResult;
+    reconResult = {
+      summary: subagentResult.content,
+      tool_calls: 0,
+      elapsed_sec: 0,
+      log: [],
+    };
+    record.recon_result = reconResult;
+    record.recon_reason = 'missing_data';  // 外部喂料视为补缺数据
     state.evidence.push({
       source: subagentResult.source || `subagent@iter${iterNum}`,
       snippet: subagentResult.content.length > 4000
@@ -451,75 +1003,189 @@ export async function runIteration(
         : subagentResult.content,
       confidence: 'high',
     });
-    progress?.(`[MoA] ingested subagent result from ${subagentResult.source}`);
+    progress?.(`[MoA] ingested external subagent result from ${subagentResult.source} (${subagentResult.content.length} chars)`);
+    // v0.17.0: 外部喂料也写 "MoA Recon" OutputChannel
+    logPipelineBlock(
+      'recon',
+      `--- Recon (external @iter${iterNum}, source=${subagentResult.source}, ${subagentResult.content.length} chars) ---`,
+      subagentResult.content
+    );
+  } else {
+    // 内置 Recon（v0.18.0: 支持并行多模型 + Recon Aggregator 整合）
+    progress?.(`[MoA Recon] iteration ${iterNum}, reason=${reconReason}`);
+    const evidenceBrief = buildEvidenceBrief(state.evidence);
+    const actorLog = lastActor ? formatActorLog(lastActor) : undefined;
+
+    const callResult = await callRecon({
+      userPrompt: state.task,
+      planner: plannerForRecon,
+      reason: reconReason,
+      gaps: state.gaps,
+      actorLog,
+      evidenceBrief,
+      iteration: iterNum,
+    }, token, progress, undefined, toolInvocationToken);
+
+    // v0.18.0 方案 B：无论单/并行模式，reconResult 都是 Aggregator merged 的
+    //   （下游 refs 看到的格式一致，不关心上游几个模型）
+    //
+    // 落盘约定：
+    //   - iteration_NNN/recon_result.json  始终写，是 Aggregator 整合后的 summary
+    //   - iteration_NNN/recon/<label>.json 仅并行模式写，保留每个并行 recon 的细节
+    reconResult = callResult.merged;
+
+    // 并行模式：落盘每个 recon 的细节 + 写 OutputChannel
+    if (callResult.mode === 'parallel') {
+      for (const r of callResult.results) {
+        await saveIterationArtifact(taskId, iterNum, `recon/${r.label}.json`, r);
+        const header = r.result.error
+          ? `--- ${r.label} (${r.model}) FAILED ---`
+          : `--- ${r.label} (${r.model}): ${r.result.tool_calls} calls, ${r.result.elapsed_sec.toFixed(1)}s ---`;
+        logPipelineBlock('recon', header, r.result.summary || '(no summary)');
+      }
+    }
+
+    // Recon Aggregator 的 merged summary 始终写到 "MoA Recon" channel
+    //   （单模式也写，让用户看到 Aggregator 整理后的结果）
+    logPipelineBlock(
+      'recon',
+      `--- Recon Aggregator (${callResult.aggregatorModel}) ${callResult.mode === 'parallel' ? 'merged' : 'normalized'} ---`,
+      callResult.merged.summary || '(no merged summary)'
+    );
+
+    // 统一落盘 recon_result.json（含 Aggregator 元信息）
+    await saveIterationArtifact(taskId, iterNum, 'recon_result.json', {
+      ...reconResult,
+      // v0.18.0 扩展字段（让审计时能看出是单/并行 + Aggregator 用的什么模型）
+      recon_mode: callResult.mode,
+      aggregator_model: callResult.aggregatorModel,
+      parallel_sources: callResult.mode === 'parallel'
+        ? callResult.results.map((r) => ({
+            label: r.label,
+            model: r.model,
+            tool_calls: r.result.tool_calls,
+            error: r.result.error,
+          }))
+        : undefined,
+    });
+
+    record.recon_result = reconResult;
+    record.recon_reason = reconReason;
+
+    // 把 Recon merged summary 加入 evidence（始终是 Aggregator 整理过的）
+    if (reconResult.summary && !reconResult.error) {
+      state.evidence.push({
+        source: `recon@iter${iterNum}`,
+        snippet: reconResult.summary.length > 8000
+          ? reconResult.summary.substring(0, 8000) + '\n...(truncated)'
+          : reconResult.summary,
+        confidence: 'high',
+      });
+    }
+    state.recon_history.push(reconResult);
   }
 
-  // 2. Resolve models
-  const { workers, aggregator } = await resolveModels();
-  progress?.(`[MoA] using ${workers.length} workers + aggregator ${aggregator.label}`);
+  // ═══════════════════════════════════════════════════════════════════════
+  // 阶段 3：Refs（并行）
+  // ═══════════════════════════════════════════════════════════════════════
+  const { refs, aggregator } = await resolveRefModels();
+  progress?.(`[MoA Refs] using ${refs.length} refs + aggregator ${aggregator.label}`);
 
-  // 3. Run workers in parallel (NO tools injected → lightweight prompts)
-  const workerPrompts = workers.map((w) => {
-    const { system, user } = buildWorkerPrompt(state.task, state, w.label);
-    return callLLM(w.model, system, user, token, w.label).then(
-      (output) => ({ label: w.label, model: w.model.name, output, error: undefined as string | undefined }),
+  const refModelNames = refs.map((r) => r.model.name);
+  const aggregatorModelName = aggregator.model.name;
+
+  const evidenceBlockStr = evidenceBlock(state.evidence);
+
+  const refPromises = refs.map((r) => {
+    const { system, user } = buildRefPrompt({
+      task: state.task,
+      iteration: iterNum,
+      evidenceBlock: evidenceBlockStr,
+      synthesis: state.synthesis,
+      gaps: state.gaps,
+      label: r.label,
+    });
+    return callLLM(r.model, system, user, token, r.label).then(
+      (output) => ({ label: r.label, model: r.model.name, output, error: undefined as string | undefined }),
       (err) => ({
-        label: w.label,
-        model: w.model.name,
+        label: r.label,
+        model: r.model.name,
         output: '',
         error: err instanceof Error ? err.message : String(err),
       })
     );
   });
-  const workerOutputs = await Promise.all(workerPrompts);
-  record.worker_outputs = workerOutputs;
+  const refOutputs = await Promise.all(refPromises);
+  record.ref_outputs = refOutputs;
 
-  // Persist worker outputs
-  for (const w of workerOutputs) {
-    await saveIterationArtifact(taskId, iterNum, `workers/${w.label}.json`, w);
+  // v0.16.0: 只写 refs/ 目录（之前 v0.15.0 为兼容 v0.14.x 同时写 workers/ 目录，
+  // 但实际无任何代码读 workers/<label>.json 文件——所有读取都走 state.history[].ref_outputs
+  // 字段。双写导致落盘文件重复，占用磁盘 + 让用户困惑"两份一样的是不是 bug"）。
+  for (const r of refOutputs) {
+    await saveIterationArtifact(taskId, iterNum, `refs/${r.label}.json`, r);
+    // v0.17.0: 把每个 Ref 的原始输出写到 "MoA Refs" OutputChannel
+    // （失败的 ref 也写，便于排查）
+    const refHeader = r.error
+      ? `--- Ref ${r.label} (${r.model}) @iter${iterNum} FAILED ---`
+      : `--- Ref ${r.label} (${r.model}) @iter${iterNum} ---`;
+    logPipelineBlock('refs', refHeader, r.error ? `Error: ${r.error}` : r.output);
   }
-  progress?.(`[MoA] ${workerOutputs.filter((w) => !w.error).length}/${workerOutputs.length} workers succeeded`);
+  progress?.(`[MoA Refs] ${refOutputs.filter((r) => !r.error).length}/${refOutputs.length} refs succeeded`);
 
-  // 4. Run aggregator
-  const successfulOutputs = workerOutputs.filter((w) => !w.error && w.output);
-  if (successfulOutputs.length === 0) {
+  // ═══════════════════════════════════════════════════════════════════════
+  // 阶段 4：Aggregator（Gate 决策）
+  // ═══════════════════════════════════════════════════════════════════════
+  const successfulRefOutputs = refOutputs.filter((r) => !r.error && r.output);
+  if (successfulRefOutputs.length === 0) {
     state.status = 'error';
-    state.error = 'All workers failed in iteration ' + iterNum;
+    state.error = `All refs failed in iteration ${iterNum}`;
     state.history.push(record);
     await saveState(state);
     return state;
   }
 
-  const { system: aggSys, user: aggUser } = buildAggregatorPrompt(
-    state.task,
-    state,
-    successfulOutputs.map((w) => ({ label: w.label, output: w.output }))
-  );
+  const { system: aggSys, user: aggUser } = buildAggregatorPromptV2({
+    task: state.task,
+    iteration: iterNum,
+    evidenceBlock: evidenceBlockStr,
+    refOutputs: successfulRefOutputs.map((r) => ({ label: r.label, output: r.output })),
+    hasActorHistory: (state.actor_history?.length ?? 0) > 0,
+  });
 
-  let aggOutput: AggregatorOutput;
+  let aggOutput: CoreAggregatorOutput;
   try {
     const aggRaw = await callLLM(aggregator.model, aggSys, aggUser, token, 'aggregator');
-    aggOutput = extractJson(aggRaw) as AggregatorOutput;
+    aggOutput = extractJson(aggRaw) as CoreAggregatorOutput;
     record.aggregator_output = aggOutput;
     await saveIterationArtifact(taskId, iterNum, 'aggregator.json', aggOutput);
+    // v0.17.0: 把 Aggregator 原始输出 + 解析后 JSON 都写到 "MoA Aggregator" OutputChannel
+    // raw 输出可能含 LLM 的 fence / 解释，parsed 是干净 JSON，都保留便于排查
+    logPipelineBlock('aggregator', `--- Aggregator @iter${iterNum} (raw, ${aggregator.model.name}) ---`, aggRaw);
+    logPipelineBlock('aggregator', `--- Aggregator @iter${iterNum} (parsed) ---`, JSON.stringify(aggOutput, null, 2));
   } catch (err) {
     state.status = 'error';
     state.error = `Aggregator failed in iteration ${iterNum}: ${err instanceof Error ? err.message : String(err)}`;
     state.history.push(record);
     await saveState(state);
+    // v0.17.0: Aggregator 失败也写 "MoA Aggregator" OutputChannel
+    logPipelineBlock(
+      'aggregator',
+      `--- Aggregator FAILED @iter${iterNum} ---`,
+      `Error: ${err instanceof Error ? err.message : String(err)}`
+    );
     return state;
   }
 
-  // 5. Update state from aggregator
+  // 更新 state
   state.synthesis = aggOutput.synthesis;
   state.completeness = aggOutput.evidence_coverage;
-  state.gaps = aggOutput.critical_gaps;
+  state.gaps = aggOutput.critical_gaps ?? [];
 
-  // 6. Extract new evidence from worker findings
-  for (const w of workerOutputs) {
-    if (w.error || !w.output) continue;
+  // 提取 ref 的 new_findings 进 evidence
+  for (const r of refOutputs) {
+    if (r.error || !r.output) continue;
     try {
-      const parsed = extractJson(w.output) as { new_findings?: EvidenceItem[] };
+      const parsed = extractJson(r.output) as RefOutput;
       if (Array.isArray(parsed.new_findings)) {
         for (const f of parsed.new_findings.slice(0, 3)) {
           if (f.source && f.snippet) {
@@ -532,31 +1198,155 @@ export async function runIteration(
         }
       }
     } catch {
-      // worker output not parseable — skip extraction, the raw text still in record
+      // ref 输出非 JSON，跳过提取
     }
   }
 
-  // 7. Decide next status
-  if (shouldStop(state)) {
+  // ═══════════════════════════════════════════════════════════════════════
+  // 阶段 5：Gate 决策（finalize / actor_needed / recon_needed）
+  // ═══════════════════════════════════════════════════════════════════════
+  // 硬保底：iteration 上限
+  if (state.iteration >= MAX_ITER) {
     state.status = 'finalized';
-    progress?.(`[MoA] converged at iteration ${iterNum}, completeness=${state.completeness.toFixed(2)}`);
-  } else if (aggOutput.next_action === 'recon_needed' && state.gaps.length > 0) {
-    state.status = 'awaiting_recon';
-    // Build recon request for main session to feed #runSubagent
-    record.recon_request = {
-      gaps: state.gaps,
-      prompt: buildReconPrompt(state),
-    };
-    await saveIterationArtifact(taskId, iterNum, 'recon_request.json', record.recon_request);
-    progress?.(`[MoA] iteration ${iterNum} needs recon for ${state.gaps.length} gap(s)`);
-  } else {
+    state.convergence_source = 'max_iter';
+    state.convergence_raw_next_action = aggOutput.next_action;
+    progress?.(`[MoA] MAX_ITER=${MAX_ITER} reached, forcing finalize (last aggregator suggestion: ${aggOutput.next_action})`);
+  } else if (aggOutput.next_action === 'finalize') {
+    state.status = 'finalized';
+    state.convergence_source = 'natural';
+    state.convergence_raw_next_action = aggOutput.next_action;
+    progress?.(`[MoA] naturally converged at iteration ${iterNum}, completeness=${state.completeness.toFixed(2)}`);
+  } else if (shouldStop(state)) {
+    state.status = 'finalized';
+    state.convergence_source = 'should_stop';
+    state.convergence_raw_next_action = aggOutput.next_action;
+    progress?.(`[MoA] shouldStop() triggered at iteration ${iterNum}, forcing finalize (last aggregator suggestion: ${aggOutput.next_action})`);
+  } else if (aggOutput.next_action === 'actor_needed' && aggOutput.action_items && aggOutput.action_items.length > 0) {
+    // Actor 执行
+    progress?.(`[MoA Actor] running with ${aggOutput.action_items.length} action(s)...`);
+    const actorResult = await callActor({
+      task: state.task,
+      actionItems: aggOutput.action_items,
+      iteration: iterNum,
+    }, token, progress, undefined, toolInvocationToken);
+    record.actor_result = actorResult;
+    state.actor_history.push(actorResult);
+    await saveIterationArtifact(taskId, iterNum, 'actor_result.json', actorResult);
+
+    // v0.17.0: 把 Actor 执行结果写到 OutputChannel
+    //   - 每个 action_item 的 status / artifacts / error_message
+    //   - self_assessment（all_succeeded / should_recon）
+    const actorLogLines: string[] = [];
+    actorLogLines.push(`Elapsed: ${actorResult.elapsed_sec.toFixed(1)}s | Tool calls: ${actorResult.tool_calls}`);
+    actorLogLines.push('');
+    actorLogLines.push('Executed actions:');
+    for (let i = 0; i < actorResult.executed_actions.length; i++) {
+      const ar = actorResult.executed_actions[i];
+      actorLogLines.push(
+        `  ${i + 1}. [${ar.action.type}] ${ar.action.target} → ${ar.status}` +
+        (ar.error_message ? ` (${ar.error_message})` : '') +
+        (ar.artifacts.length > 0 ? ` [${ar.artifacts.join(', ')}]` : '')
+      );
+    }
+    actorLogLines.push('');
+    actorLogLines.push(
+      `Self-assessment: all_succeeded=${actorResult.self_assessment.all_succeeded}, ` +
+      `should_recon=${actorResult.self_assessment.should_recon}, ` +
+      `reason=${actorResult.self_assessment.reason}`
+    );
+    if (actorResult.error) {
+      actorLogLines.push('');
+      actorLogLines.push(`Actor error: ${actorResult.error}`);
+    }
+    logPipelineBlock('actor', `--- Actor @iter${iterNum} ---`, actorLogLines.join('\n'));
+    if (actorResult.error) {
+      logPipelineBlock('actor', `--- Actor FAILED @iter${iterNum} ---`, actorResult.error);
+    }
+
+    // Actor 产出进 evidence（high confidence，下轮 Refs 自然评估质量）
+    // v0.15.0 hotfix 1: Actor LLM 经常不回填 action.content，必须防御性访问
+    //   （否则抛 "Cannot read properties of undefined (reading 'length')"，导致 history 不入栈）
+    for (const ar of actorResult.executed_actions) {
+      const ev = buildActorEvidence(ar, iterNum);
+      if (ev) state.evidence.push(ev);
+    }
+    // 状态设为 running，下轮 Recon 会读 Actor 产出
     state.status = 'running';
-    progress?.(`[MoA] iteration ${iterNum} complete, continuing without new recon`);
+    progress?.(`[MoA] iteration ${iterNum} complete (Actor done), continuing to next iteration`);
+  } else {
+    // recon_needed：什么都不做，下一轮 Recon 自然会基于 gaps 调查
+    state.status = 'running';
+    // 兼容 v0.14.x：写一份 recon_request.json（虽然现在不用主会话喂了）
+    if (state.gaps.length > 0) {
+      record.recon_request = {
+        gaps: state.gaps,
+        prompt: '(v0.15.0 auto-recon — main session does not need to feed back)',
+      };
+      await saveIterationArtifact(taskId, iterNum, 'recon_request.json', record.recon_request);
+    }
+    progress?.(`[MoA] iteration ${iterNum} complete (recon_needed), continuing with reason=${aggOutput.recon_reason ?? 'missing_data'}`);
   }
+
+  // v0.17.0: iteration 结尾汇总写到 "MoA Aggregator" OutputChannel
+  //   —— 这些字段（completeness / next_action / status）本质上是 Aggregator 决策的产物，
+  //   归在 aggregator channel 最合适，用户看 Aggregator 时能完整看到决策结果。
+  logPipeline('aggregator', '');
+  logPipeline('aggregator', `--- iteration ${iterNum} summary ---`);
+  logPipeline('aggregator', `  status:         ${state.status}`);
+  logPipeline('aggregator', `  completeness:   ${state.completeness.toFixed(2)}`);
+  logPipeline('aggregator', `  gaps count:     ${state.gaps.length}`);
+  logPipeline('aggregator', `  evidence items: ${state.evidence.length}`);
+  logPipeline('aggregator', `  next_action:    ${aggOutput.next_action}`);
+  if (state.convergence_source) {
+    logPipeline('aggregator', `  convergence:    ${state.convergence_source}`);
+  }
+  logPipeline('aggregator', `=== iteration ${iterNum} complete @ ${new Date().toISOString()} ===`);
+  logPipeline('aggregator', '');
 
   state.history.push(record);
   await saveState(state);
+
+  // v0.14.15+: 渲染 MD 视图
+  await renderMetaJson(taskId, state, refModelNames, aggregatorModelName);
+  await renderTimelineMd(taskId, state);
+
+  // v0.15.0 hotfix: 自动收敛时（next_action='finalize' 或 MAX_ITER 或 shouldStop）
+  // 直接调 finalizeTask 生成 final.md/final.json + 再次覆盖 meta/timeline。
+  // 否则用户看到 status=finalized 但 final.md 缺失，需要手动再调 #moa_finalize。
+  // 注意：finalizeTask 内部会重新 saveState + render，开销可接受（多 1 次 LLM 调用做 summary）。
+  if (state.status === 'finalized') {
+    progress?.(`[MoA] auto-finalizing at iteration ${iterNum}, generating final.md...`);
+    try {
+      await finalizeTask(taskId, token);
+    } catch (err) {
+      // finalizeTask 失败不应阻塞 runIteration 返回（state 已 finalize）
+      progress?.(`[MoA] auto-finalize warning: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   return state;
+}
+
+/**
+ * v0.15.0: 构建给 Recon prompt 用的 evidence 摘要（防止重复查）。
+ */
+function buildEvidenceBrief(evidence: EvidenceItem[]): string {
+  if (evidence.length === 0) return '';
+  // 取最近 8 条作为 brief
+  const recent = evidence.slice(-8);
+  return recent.map((e, i) => `${i + 1}. [${e.confidence}] ${e.source}: ${e.snippet.substring(0, 200)}${e.snippet.length > 200 ? '...' : ''}`).join('\n');
+}
+
+/**
+ * v0.15.0: 格式化 Actor 日志供 Recon prompt 用。
+ */
+function formatActorLog(actor: ActorResult): string {
+  const lines: string[] = [];
+  for (const ar of actor.executed_actions) {
+    lines.push(`- [${ar.action.type}] ${ar.action.target}: ${ar.status}${ar.error_message ? ' (' + ar.error_message + ')' : ''}`);
+  }
+  lines.push(`Self-assessment: all_succeeded=${actor.self_assessment.all_succeeded}, should_recon=${actor.self_assessment.should_recon}, reason=${actor.self_assessment.reason}`);
+  return lines.join('\n');
 }
 
 function buildReconPrompt(state: MoaState): string {
@@ -601,8 +1391,16 @@ export async function finalizeTask(
   const state = await loadState(taskId);
   if (!state) throw new Error('Task not found: ' + taskId);
 
-  const { aggregator } = await resolveModels();
-  const { system, user } = buildFinalPrompt(state.task, state);
+  const { aggregator } = await resolveRefModels();
+  // v0.17.0: 改用 moaCore 的 buildFinalPrompt（params 对象签名）
+  //   旧的本地 buildFinalPrompt(task, state) 已删除（死代码）
+  const { system, user } = buildFinalPromptCore({
+    task: state.task,
+    synthesis: state.synthesis,
+    evidence: state.evidence,
+    iterations: state.iteration,
+    completeness: state.completeness,
+  });
   const raw = await callLLM(aggregator.model, system, user, token, 'finalizer');
 
   let parsed: Partial<MoaFinalOutput>;
@@ -617,23 +1415,199 @@ export async function finalizeTask(
     };
   }
 
+  // v0.17.0: 把 finalizer raw + parsed 写到 "MoA Aggregator" OutputChannel
+  //   —— finalizer 本质是 aggregator 在收敛后做的 summary，归在 aggregator channel 合理
+  logPipelineBlock('aggregator', `--- Finalizer (raw, ${aggregator.model.name}) ---`, raw);
+  logPipelineBlock('aggregator', '--- Finalizer (parsed) ---', JSON.stringify(parsed, null, 2));
+
   const output: MoaFinalOutput = {
     task_id: taskId,
     summary: parsed.summary || '(no summary produced)',
     action_items: Array.isArray(parsed.action_items) ? parsed.action_items : [],
-    confidence: parsed.confidence ?? state.completeness,
+    // v0.16.0: confidence 统一用 state.completeness（Aggregator 在每轮迭代里的真实评估）
+    // 不再采用 finalizer 阶段 Aggregator 给的 confidence（那个是「强制收尾时再问一次」的值，
+    // 与迭代过程中的 completeness 打架，导致 55% vs 90% 不一致）
+    confidence: state.completeness,
     unresolved: Array.isArray(parsed.unresolved) ? parsed.unresolved : state.gaps,
     iterations_used: state.iteration,
   };
 
   state.status = 'finalized';
+  // v0.16.0: 标记收敛来源（finalizeTask 被显式调用时，说明不是 runIteration 自动收敛）
+  // 如果上游已经设了 convergence_source（如 single_shot），保留它
+  if (!state.convergence_source) {
+    state.convergence_source = 'manual_finalize';
+  }
   state.history = state.history;  // unchanged
   await saveState(state);
 
   const dir = await getTaskDir(taskId);
   await fs.writeFile(path.join(dir, 'final.json'), JSON.stringify(output, null, 2), 'utf8');
 
+  // v0.14.15: 渲染 MD 视图
+  // - final.md（仅此处生成，含 action_items + summary + 元信息头）
+  // - 再次覆盖 meta.json（补 finished_at + final_confidence）
+  // - 再次覆盖 timeline.md（状态变为 finalized，Convergence Notes 显示收敛）
+  await renderFinalMd(taskId, output, state);
+  await renderMetaJson(taskId, state);
+  await renderTimelineMd(taskId, state);
+
   return output;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.15.0 批次 2: moa_analyze 走 5 角色单次流程（轻量代理方案）
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 单次 analyze 流程：启动 orchestrate → 跑 1 轮 → 自动 finalize。
+ *
+ * 用于 #moa_analyze 工具，让 analyze 复用 orchestrate 的 5 角色架构
+ * （Planner → Recon → Refs → Aggregator → Actor），但只跑一轮就收敛。
+ *
+ * 与 runP1Fanout 的差异：
+ *   - runP1Fanout 是老路径（1700+ 行，streaming UI + dump 逻辑 + Phase 0 recon）
+ *   - runSingleIterationAnalyze 是新路径（5 角色 + 自动 Actor + final.md 落盘）
+ *
+ * @returns MoaFinalOutput + task_id（用于 chat 展示落盘文件路径）
+ */
+export async function runSingleIterationAnalyze(
+  prompt: string,
+  token: vscode.CancellationToken,
+  options?: {
+    /** 预收集的 recon context（跳过 Recon，直接注入 evidence） */
+    reconContext?: string;
+    /** reconContext 来源（文件路径列表，仅用于日志） */
+    reconSources?: string[];
+    /** progress 回调（用于 chat UI 显示进度） */
+    progress?: (msg: string) => void;
+    /** toolInvocationToken（必需，让内置工具可调） */
+    toolInvocationToken?: vscode.ChatParticipantToolToken;
+  }
+): Promise<MoaFinalOutput & { task_id: string }> {
+  const reconContext = options?.reconContext?.trim();
+  const reconSources = options?.reconSources ?? [];
+  const progress = options?.progress;
+  const toolInvocationToken = options?.toolInvocationToken;
+
+  // 1. 启动 orchestrate 任务
+  progress?.(`[MoA Single] starting 5-role single-shot pipeline (will force finalize after iter 1)...`);
+  const initialState = await createOrchestration(prompt);
+  const taskId = initialState.task_id;
+
+  // 2. 跑 1 轮（如果 reconContext 提供，作为 subagentResult 注入 evidence）
+  progress?.(`[MoA Single] running iteration 1 (Planner → Recon → Refs → Aggregator → Actor)...`);
+  let subagentResult: { content: string; source: string } | undefined;
+  if (reconContext && reconContext.length > 0) {
+    subagentResult = {
+      content: reconContext,
+      source: reconSources.length > 0 ? reconSources.join(', ') : 'caller-supplied',
+    };
+    progress?.(`[MoA Single] using pre-collected reconContext (${reconContext.length} chars from ${reconSources.length} source(s)) — Recon phase will be skipped`);
+  }
+
+  await runIteration(taskId, subagentResult, token, progress, toolInvocationToken);
+
+  // 3. 检查状态，如果未 finalized，强制 finalize（单次语义）+ 标记 single_shot 收敛来源
+  const stateAfter = await loadState(taskId);
+  if (!stateAfter) throw new Error(`Analyze failed: task ${taskId} state lost`);
+  if (stateAfter.status !== 'finalized') {
+    // v0.16.0: 标记为 single_shot（强制收敛，Aggregator 的真实建议被覆盖）
+    stateAfter.convergence_source = 'single_shot';
+    // convergence_raw_next_action 在 runIteration 阶段已被记录（aggOutput.next_action）
+    await saveState(stateAfter);
+    progress?.(`[MoA Single] forcing finalize (single-shot semantic, status was ${stateAfter.status}, Aggregator's actual suggestion: ${stateAfter.convergence_raw_next_action ?? '?'})`);
+    const output = await finalizeTask(taskId, token);
+    return output;
+  }
+
+  // 4. 已 finalized（Aggregator 在第 1 轮就决定 finalize，罕见但可能）
+  // 这种情况 convergence_source 已在 runIteration 里设为 'natural'
+  const dir = await getTaskDir(taskId);
+  const finalJsonPath = path.join(dir, 'final.json');
+  const finalJsonRaw = await fs.readFile(finalJsonPath, 'utf8');
+  const finalOutput = JSON.parse(finalJsonRaw) as MoaFinalOutput;
+  return finalOutput;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.16.0: @moa / @moaloop 默认走完整 loop 模式
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 完整 loop analyze：启动 orchestrate → 循环 runIteration 直到自然收敛 / MAX_ITER。
+ *
+ * 与 runSingleIterationAnalyze 的差异：
+ *   - 单次模式：1 轮强制收敛（不论 Aggregator 建议）
+ *   - loop 模式：让 Aggregator 自然决策，recon_needed 就继续，直到 finalize / MAX_ITER
+ *
+ * @param maxIterations 可选上限（默认 MAX_ITER=12；用户可设更小值如 3-5 限制 chat 耗时）
+ */
+export async function runMoaLoopAnalyze(
+  prompt: string,
+  token: vscode.CancellationToken,
+  options?: {
+    reconContext?: string;
+    reconSources?: string[];
+    progress?: (msg: string) => void;
+    toolInvocationToken?: vscode.ChatParticipantToolToken;
+    /** 最大迭代数（默认 MAX_ITER=12） */
+    maxIterations?: number;
+  }
+): Promise<MoaFinalOutput & { task_id: string }> {
+  const reconContext = options?.reconContext?.trim();
+  const reconSources = options?.reconSources ?? [];
+  const progress = options?.progress;
+  const toolInvocationToken = options?.toolInvocationToken;
+  const maxIter = options?.maxIterations ?? MAX_ITER;
+
+  progress?.(`[MoA Loop] starting 5-role iterative pipeline (max ${maxIter} iterations, will let Aggregator decide convergence)...`);
+  const initialState = await createOrchestration(prompt);
+  const taskId = initialState.task_id;
+
+  // 首轮（如有 reconContext，作为 subagentResult 注入）
+  let subagentResult: { content: string; source: string } | undefined;
+  if (reconContext && reconContext.length > 0) {
+    subagentResult = {
+      content: reconContext,
+      source: reconSources.length > 0 ? reconSources.join(', ') : 'caller-supplied',
+    };
+    progress?.(`[MoA Loop] using pre-collected reconContext (${reconContext.length} chars from ${reconSources.length} source(s)) — Recon phase will be skipped in iter 1`);
+  }
+
+  let state = await runIteration(taskId, subagentResult, token, progress, toolInvocationToken);
+  let iterCount = 1;
+
+  // 循环直到 finalized 或达到 maxIter
+  while (state.status !== 'finalized' && iterCount < maxIter) {
+    if (token.isCancellationRequested) {
+      progress?.(`[MoA Loop] cancelled by user at iteration ${iterCount}`);
+      break;
+    }
+    iterCount += 1;
+    progress?.(`[MoA Loop] proceeding to iteration ${iterCount} (Aggregator said: ${state.history[state.history.length - 1].aggregator_output?.next_action ?? '?'})...`);
+    // 后续轮次不再注入 reconContext（只首轮使用，避免重复）
+    state = await runIteration(taskId, undefined, token, progress, toolInvocationToken);
+  }
+
+  // 兜底：如果达到 maxIter 仍未 finalized（理论上 runIteration 内部会处理 MAX_ITER，
+  // 但用户传的 maxIter < MAX_ITER 时需要这里兜底）
+  if (state.status !== 'finalized') {
+    progress?.(`[MoA Loop] reached maxIterations=${maxIter}, forcing finalize`);
+    state.convergence_source = 'max_iter';
+    state.convergence_raw_next_action = state.history[state.history.length - 1]?.aggregator_output?.next_action;
+    await saveState(state);
+    const output = await finalizeTask(taskId, token);
+    return output;
+  }
+
+  // 已 finalized（自然收敛或 MAX_ITER），读 final.json
+  const dir = await getTaskDir(taskId);
+  const finalJsonPath = path.join(dir, 'final.json');
+  const finalJsonRaw = await fs.readFile(finalJsonPath, 'utf8');
+  const finalOutput = JSON.parse(finalJsonRaw) as MoaFinalOutput;
+  progress?.(`[MoA Loop] done in ${iterCount} iteration(s) | convergence: ${state.convergence_source} | completeness: ${(state.completeness * 100).toFixed(0)}%`);
+  return finalOutput;
 }
 
 // ─────────────────────────────────────────────────────────────────────────

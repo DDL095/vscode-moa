@@ -30,6 +30,8 @@ import type {
   ReconConfig,
   L3Config,
   MoaPreset,
+  PlannerConfig,
+  ActorConfig,
 } from './types';
 
 /** Sentinel returned when there's no config at all (fresh install). */
@@ -47,7 +49,28 @@ export interface ResolvedPresetConfig {
   refModels: RefModelConfig[];
   aggregator: AggregatorConfig;
   reconModel: ReconConfig;
+  /**
+   * v0.18.0: 并行 Recon 模型列表（resolved）。
+   *
+   * 解析顺序：
+   *   1. preset.reconModels（数组，非空）→ 直接用
+   *   2. preset.reconModel（单数，非空 model）→ 包装成单元素数组
+   *   3. fallback → [aggregator]
+   *
+   * 长度 = 1 时调用方应自动关闭并行 + 关闭 Recon Aggregator。
+   */
+  reconModels: ReconConfig[];
+  /**
+   * v0.18.0: Recon Aggregator 配置（整合多份 Recon）。
+   * 仅当 reconModels.length >= 2 且 parallelRecon=true 时有意义。
+   * model='' = fallback 到 aggregator。
+   */
+  reconAggregator: ReconConfig;
   l3Summarizer: L3Config;
+  /** v0.15.0: Planner 配置（可能为 undefined，表示未配置，fallback 到 aggregator）。 */
+  planner?: PlannerConfig;
+  /** v0.15.0: Actor 配置（可能为 undefined，fallback 到 aggregator）。 */
+  actor?: ActorConfig;
 }
 
 export type ActivePresetConfig = ResolvedPresetConfig | EmptyPresetConfig;
@@ -145,6 +168,31 @@ export async function migrateLegacyToPreset(): Promise<MoaPreset | undefined> {
  * back to the first key (and log a warning via console.warn — caller can
  * surface this in UI if desired).
  */
+
+/**
+ * v0.18.0: 解析并行 Recon 模型列表。
+ *
+ * 解析顺序（与文档一致）：
+ *   1. preset.reconModels（数组，长度 >= 1，且至少一个 model 非空）→ 用数组
+ *   2. preset.reconModel（单数，model 非空）→ 包装成单元素数组
+ *   3. fallback → [{ model: '' }]（占位，调用方会 fallback 到 aggregator）
+ *
+ * 注意：返回值始终是非空数组（至少 1 个元素），让调用方不用处理 undefined。
+ */
+function resolveReconModels(p: MoaPreset): ReconConfig[] {
+  // 1. 数组优先
+  if (Array.isArray(p.reconModels) && p.reconModels.length > 0) {
+    const valid = p.reconModels.filter((r) => r && typeof r.model === 'string');
+    if (valid.length > 0) return valid;
+  }
+  // 2. 单数 fallback
+  if (p.reconModel && typeof p.reconModel.model === 'string') {
+    return [p.reconModel];
+  }
+  // 3. 最终 fallback（占位，调用方解析时 fallback 到 aggregator）
+  return [{ model: '' }];
+}
+
 export function getActivePresetConfig(): ActivePresetConfig {
   const cfg = vscode.workspace.getConfiguration('moa');
   const presets = cfg.get<Record<string, MoaPreset>>('presets') ?? {};
@@ -160,7 +208,11 @@ export function getActivePresetConfig(): ActivePresetConfig {
       refModels: p.refModels ?? [],
       aggregator: p.aggregator ?? { model: '' },
       reconModel: p.reconModel ?? { model: '' },
+      reconModels: resolveReconModels(p),
+      reconAggregator: p.reconAggregator ?? { model: '' },
       l3Summarizer: p.l3Summarizer ?? { model: '' },
+      planner: p.planner,
+      actor: p.actor,
     };
   }
 
@@ -179,7 +231,11 @@ export function getActivePresetConfig(): ActivePresetConfig {
       refModels: p.refModels ?? [],
       aggregator: p.aggregator ?? { model: '' },
       reconModel: p.reconModel ?? { model: '' },
+      reconModels: resolveReconModels(p),
+      reconAggregator: p.reconAggregator ?? { model: '' },
       l3Summarizer: p.l3Summarizer ?? { model: '' },
+      planner: p.planner,
+      actor: p.actor,
     };
   }
 
@@ -193,7 +249,14 @@ export function getActivePresetConfig(): ActivePresetConfig {
       refModels: legacy.refModels,
       aggregator: legacy.aggregator,
       reconModel: legacy.reconModel,
+      // v0.18.0: legacy 配置没有 reconModels/reconAggregator，
+      //   自动把单数 reconModel 包装成单元素数组（关闭并行）
+      reconModels: resolveReconModels(legacy),
+      reconAggregator: { model: '' },
       l3Summarizer: legacy.l3Summarizer,
+      // v0.15.0: legacy 配置没有 planner/actor，返回 undefined（调用方 fallback 到 aggregator）
+      planner: undefined,
+      actor: undefined,
     };
   }
 

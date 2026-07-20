@@ -71,7 +71,12 @@ export class MoaOrchestrateTool implements vscode.LanguageModelTool<OrchestrateI
 
       // Immediately run the first iteration (no subagent_result yet —
       // workers analyze the bare task to surface initial gaps).
-      const updated = await runIteration(state.task_id, undefined, token);
+      // v0.15.0: 传入 toolInvocationToken，让内置 Recon/Actor 能调内置工具
+      const updated = await runIteration(
+        state.task_id, undefined, token,
+        undefined,
+        options.toolInvocationToken
+      );
 
       const md = [
         formatStatusMarkdown(updated),
@@ -145,7 +150,7 @@ export class MoaContinueTool implements vscode.LanguageModelTool<ContinueInput> 
       const updated = await runIteration(task_id, result, token, (msg) => {
         // Progress is best-effort — no telemetry hook here.
         void msg;
-      });
+      }, options.toolInvocationToken);
 
       const md = [
         formatStatusMarkdown(updated),
