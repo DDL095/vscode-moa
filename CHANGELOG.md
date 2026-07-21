@@ -5,6 +5,28 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.2] - 2026-07-21
+
+### Changed — 扩展 icon 重做（用户反馈）
+
+旧 icon（紫色 3 节点 + 桥接线条）信息密度低，无法体现 MoA 5-role 管线的迭代闭环。
+
+**新 icon 设计**：
+- 5 层垂直节点链（白色）：
+  - Layer 1（顶部）：Task input（1 节点）
+  - Layer 2：Planner（1 节点）
+  - Layer 3（中层）：3 个 Refs 节点（多模型并行 fan-out）
+  - Layer 4：Aggregator（1 节点 fan-in + next_action 决策）
+  - Layer 5（底部）：Actor/Finalize（1 节点）
+- 右侧金色折线反馈环（带金色三角箭头）：**Aggregator** → 右上 → Planner，代表 MoA Loop 的迭代机制
+  - 设计依据：`next_action='recon_needed'` 由 Aggregator 决策，触发新一轮 Recon；Actor 是终态执行者（写文件/跑命令），不参与迭代决策
+
+### Fixed — GitHub Release v0.21.1 Contributors 误显示 @moa
+
+原 release notes 里 "`@moa` chat participant" 被 GitHub 当成用户 mention，在 Contributors 区域显示了多余的 [@moa](https://github.com/moa)（一个不相关的 GitHub 用户）。已改用纯文本 "MoA chat participant" + 反引号代码块，mention 已彻底清除。
+
+---
+
 ## [0.21.1] - 2026-07-21
 
 ### Fixed — 实地使用反馈修复（用户原话 2026-07-21）

@@ -5,9 +5,11 @@
       Layer 1: Task input           (1 node, 顶部)
       Layer 2: Planner              (1 node)
       Layer 3: Refs fan-out         (3 nodes 多模型并行)
-      Layer 4: Aggregator           (1 node 融合)
+      Layer 4: Aggregator           (1 node 融合 + next_action 决策)
       Layer 5: Actor/Finalize       (1 node 底部)
-    右侧反馈线: 从 Actor 回到 Planner（带箭头，代表 MoA Loop 的迭代）
+    右侧反馈线: 从 Aggregator (Layer 4) 回到 Planner (Layer 2)
+      代表 MoA Loop 的迭代——Aggregator 决策 next_action='recon_needed' 时触发新一轮
+      （Actor 是终态执行者，不触发循环；反馈源应是 Aggregator）
   -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -41,8 +43,8 @@
   <!-- Layer4 (Aggregator, y=80) → Layer5 (Actor, y=104) -->
   <line x1="56" y1="84" x2="56" y2="98" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round"/>
 
-  <!-- 反馈线（金色）：从 Actor 右侧 (y=104) → 向右 (x=104) → 向上 (y=32) → 向左指向 Planner -->
-  <polyline points="62,104 100,104 100,32 64,32"
+  <!-- 反馈线（金色）：从 Aggregator (62,80) → 向右 (100,80) → 向上 (100,32) → 指向 Planner (64,32) -->
+  <polyline points="62,80 100,80 100,32 64,32"
             fill="none" stroke="#fbbf24" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round"
             marker-end="url(#arrow)"/>
@@ -60,5 +62,6 @@
   <!-- Layer 5: Actor/Finalize（底部，略大） -->
   <circle cx="56" cy="104" r="7" fill="#ffffff"/>
 </svg>
+
 
 
