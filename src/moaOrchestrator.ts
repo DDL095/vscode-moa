@@ -321,7 +321,8 @@ async function getTaskDir(taskId: string): Promise<string> {
 
 export async function saveState(state: MoaState): Promise<void> {
   const dir = await getTaskDir(state.task_id);
-  state.last_update = new Date().toISOString();
+  // v0.21.1: state.json 时间戳也用本地时间（与 meta.json / timeline.md 一致）
+  state.last_update = formatLocalTimestamp();
   const statePath = path.join(dir, 'state.json');
   const tmp = `${statePath}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(state, null, 2), 'utf8');
@@ -344,7 +345,7 @@ async function saveIterationArtifact(
   filename: string,
   data: unknown,
   options?: {
-    /** 角色标签（如 'planner' / 'recon/advisor_1'），提供时自动生成自描述文件名 */
+    /** 角色标签（如 'planner' / 'recon/recon_1' / 'refs/advisor_1'），提供时自动生成自描述文件名 */
     role?: string;
     /** 模型名（如 'GLM-5.2'），提供时拼入文件名 */
     model?: string;
@@ -352,20 +353,40 @@ async function saveIterationArtifact(
     keepLegacy?: boolean;
   }
 ): Promise<void> {
-  const dir = path.join(await getTaskDir(taskId), `iteration_${String(iteration).padStart(3, '0')}`);
+  const iterDirName = `iteration_${String(iteration).padStart(3, '0')}`;
+  const dir = path.join(await getTaskDir(taskId), iterDirName);
 
-  // v0.21.0 IV-1: 自描述文件名 iteration_NNN__role__model.json
-  let finalFilename = filename;
+  // v0.21.1: 自描述文件名 + role 子目录双层结构
+  //   - role='recon/recon_1'   → iteration_NNN/recon/iteration_NNN__recon__recon_1__model.json
+  //   - role='refs/advisor_1'  → iteration_NNN/refs/iteration_NNN__refs__advisor_1__model.json
+  //   - role='planner'         → iteration_NNN/iteration_NNN__planner__model.json（无子目录）
+  //   - role='aggregator'      → iteration_NNN/iteration_NNN__aggregator__model.json（无子目录）
+  //   - role 缺省              → 按 filename 原样落盘（向后兼容）
+  //
+  // 设计目的：role 子目录便于人工浏览汇总（recon/、refs/ 各自独立），
+  //          自描述文件名保留 model 信息（无需打开文件即知模型）。
+  let finalRelPath: string;  // 相对 iteration_NNN/ 的路径
   if (options?.role) {
-    const iterPart = `iteration_${String(iteration).padStart(3, '0')}`;
+    const iterPart = iterDirName;
     const rolePart = options.role.replace(/\//g, '__');
     const modelPart = options.model
       ? '__' + options.model.replace(/[^A-Za-z0-9._-]/g, '_')
       : '';
-    finalFilename = `${iterPart}__${rolePart}${modelPart}.json`;
+    const selfDescName = `${iterPart}__${rolePart}${modelPart}.json`;
+    const slashIdx = options.role.indexOf('/');
+    if (slashIdx > 0) {
+      // 形如 'recon/recon_1' / 'refs/advisor_1'：抽取首段作子目录
+      const subDir = options.role.substring(0, slashIdx);
+      finalRelPath = path.join(subDir, selfDescName);
+    } else {
+      // 形如 'planner' / 'aggregator'：无子目录
+      finalRelPath = selfDescName;
+    }
+  } else {
+    finalRelPath = filename;
   }
 
-  const finalPath = path.join(dir, finalFilename);
+  const finalPath = path.join(dir, finalRelPath);
   await fs.mkdir(path.dirname(finalPath), { recursive: true });
 
   // v0.21.0 IV-1: JSON 内部注入 _meta 字段（task_id / iter / role / model / saved_at）
@@ -387,7 +408,7 @@ async function saveIterationArtifact(
   await fs.writeFile(finalPath, JSON.stringify(dataWithMeta, null, 2), 'utf8');
 
   // 向后兼容：同时写旧命名（仅当 keepLegacy=true 且新旧文件名不同）
-  if (options?.keepLegacy && finalFilename !== filename) {
+  if (options?.keepLegacy && finalRelPath !== filename) {
     const legacyPath = path.join(dir, filename);
     await fs.mkdir(path.dirname(legacyPath), { recursive: true });
     await fs.writeFile(legacyPath, JSON.stringify(dataWithMeta, null, 2), 'utf8');
@@ -661,21 +682,20 @@ function buildIterationTimings(state: MoaState): OrchestrationMeta['iteration_ti
 /**
  * v0.19.1 §5: 计算任务总耗时（秒）。
  *
- * 策略：用 history 中每条 started_at 的时间戳，取首末差值。
- * 兜底：created_at → last_update。
+ * v0.21.1 策略变更：累加 iteration_timings 的 per-iter total 字段
+ *   （之前用 started_at 差值，但 v0.21.1 把 started_at 改成本地时间格式
+ *    非 ISO，new Date() 解析失败；改为累加 per-role elapsed_sec 更可靠）
+ * 兜底：返回 0。
  */
 function computeTotalElapsedSec(state: MoaState): number {
-  try {
-    if (state.history.length === 0) return 0;
-    const first = new Date(state.history[0].started_at).getTime();
-    const lastTs = state.history[state.history.length - 1]?.started_at;
-    if (!lastTs) return 0;
-    const last = new Date(lastTs).getTime();
-    const diffMs = last - first;
-    return diffMs > 0 ? Math.round(diffMs / 1000) : 0;
-  } catch {
-    return 0;
+  let total = 0;
+  for (const h of state.history) {
+    const sum = (v: number | undefined | null) => (v === undefined || v === null ? 0 : v);
+    total += sum(h.planner_elapsed_sec) + sum(h.recon_elapsed_sec)
+      + sum(h.refs_elapsed_sec) + sum(h.aggregator_elapsed_sec);
+    if (h.actor_result?.elapsed_sec) total += h.actor_result.elapsed_sec;
   }
+  return Math.round(total);
 }
 
 /**
@@ -1214,7 +1234,8 @@ function extractJson(text: string): unknown {
 
 export async function createOrchestration(task: string): Promise<MoaState> {
   const taskId = 'moa_' + Date.now().toString(36) + '_' + crypto.randomBytes(3).toString('hex');
-  const now = new Date().toISOString();
+  // v0.21.1: created_at / last_update 用本地时间戳（便于人工阅读）
+  const now = formatLocalTimestamp();
 
   const state: MoaState = {
     task_id: taskId,
@@ -1284,8 +1305,9 @@ export async function runIteration(
 
   // v0.17.0: iteration 起始分隔头分别写到 5 个角色的 OutputChannel
   //   ——每个 channel 自成一体（用户在某个角色 channel 里能看到该角色每轮的完整边界）
+  // v0.21.1: iter header 用本地时间戳（与 state.json / meta.json 一致）
   const iterHeaderTop = `═══════════════════════════════════════════════════════════════════════`;
-  const iterHeaderBody = `=== MoA iteration ${iterNum} started @ ${new Date().toISOString()} ===`;
+  const iterHeaderBody = `=== MoA iteration ${iterNum} started @ ${formatLocalTimestamp()} ===`;
   const iterHeaderTask = `Task: ${state.task}`;
   for (const key of ['planner', 'recon', 'refs', 'aggregator', 'actor'] as PipelineChannelKey[]) {
     logPipeline(key, '');
@@ -1297,7 +1319,7 @@ export async function runIteration(
 
   const record: IterationRecord = {
     iteration: iterNum,
-    started_at: new Date().toISOString(),
+    started_at: formatLocalTimestamp(),
     ref_outputs: [],
   };
 
@@ -1817,7 +1839,7 @@ export async function runIteration(
   if (state.convergence_source) {
     logPipeline('aggregator', `  convergence:    ${state.convergence_source}`);
   }
-  logPipeline('aggregator', `=== iteration ${iterNum} complete @ ${new Date().toISOString()} ===`);
+  logPipeline('aggregator', `=== iteration ${iterNum} complete @ ${formatLocalTimestamp()} ===`);
   logPipeline('aggregator', '');
 
   state.history.push(record);
@@ -2056,7 +2078,7 @@ export async function executeFinalActions(
   const logLines: string[] = [
     `# MoA Autopilot Log`,
     `# task_id: ${taskId}`,
-    `# started_at: ${new Date().toISOString()}`,
+    `# started_at: ${formatLocalTimestamp()}`,
     `# action_items: ${executable.length}`,
     ``,
   ];
@@ -2072,7 +2094,7 @@ export async function executeFinalActions(
   }, token, progress, options?.stream, options?.toolInvocationToken);
 
   logLines.push(
-    `# completed_at: ${new Date().toISOString()}`,
+    `# completed_at: ${formatLocalTimestamp()}`,
     `# elapsed_sec: ${result.elapsed_sec.toFixed(2)}`,
     `# tool_calls: ${result.tool_calls}`,
     `# self_assessment: ${JSON.stringify(result.self_assessment)}`,

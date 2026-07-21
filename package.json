@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.21.0",
+  "version": "0.21.1",
 
   "publisher": "dudali095",
   "license": "MIT",
@@ -14,6 +14,7 @@
   "bugs": {
     "url": "https://github.com/DDL095/vscode-moa/issues"
   },
+  "icon": "resources/moa-icon.png",
   "keywords": [
     "mixture-of-agents",
     "moa",

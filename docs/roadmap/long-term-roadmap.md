@@ -36,17 +36,17 @@
 | 阶段 | 原计划版本 | 实际完成版本 | 状态 |
 |---|---|---|---|
 | I-1 Settings UI 双语化 | v0.19.x | v0.20.2（超额：覆盖 20+ 项 vs 原计划 17 项） | ✅ DONE |
-| I-2 OutputChannel 日志格式 | v0.19.x | — | 🚧 **NEXT v0.21.0** |
-| I-3 meta.json 扩充（per_role + model_invocations） | v0.19.x | v0.19.2 §5.1（部分完成，缺 pipeline_architecture / actor_actions_log） | ⏠ 部分完成 |
-| II-1 MoA Webview Panel | v0.20.x | — | ⏸ PAUSED（依赖 I-2 完成） |
+| I-2 OutputChannel 日志格式 | v0.19.x | v0.21.0 | ✅ DONE |
+| I-3 meta.json 扩充（per_role + model_invocations） | v0.19.x | v0.19.2 §5.1（部分完成）+ v0.21.0（pipeline_architecture / iteration_timings） | ✅ DONE |
+| II-1 MoA Webview Panel | v0.20.x | — | ⏸ PAUSED（依赖 I-2 完成，现已解除） |
 | II-2 任务历史列表 | v0.20.x | — | ⏸ PAUSED（依赖 II-1） |
 | III-1 Actor 开关（enableActorInLoop） | v0.21.x | v0.18.4（基础）+ v0.20.0（超额：approvalMode 4 档） | ✅ DONE |
 | III-2 保守执行模式（SafeExecutor + manifest） | v0.21.x | v0.19.1（基础）+ v0.20.0（超额：executionPreset + autopilot） | ✅ DONE |
 | III-3 全工具 subagent | v0.21.x | v0.13.0（移除前缀过滤）+ v0.19.1（SafeExecutor 语义黑名单） | ✅ DONE |
-| IV-1 JSON 文件名加轮次标记 | v0.22.x | — | 🚧 **NEXT v0.21.0** |
+| IV-1 JSON 文件名加轮次标记 | v0.22.x | v0.21.0（自描述文件名 + role 子目录，v0.21.1 加固） | ✅ DONE |
 | IV-2 recon 顶层文件夹总览 | v0.22.x | — | ⏸ 低优先级 |
 | IV-3 aggregator JSON 扩充（merged_from_refs / conflicts_detected） | v0.22.x | — | ⏸ 低优先级 |
-| IV-4 meta.json pipeline_architecture 字段 | v0.22.x | — | 🚧 **NEXT v0.21.0** |
+| IV-4 meta.json pipeline_architecture 字段 | v0.22.x | v0.21.0 | ✅ DONE |
 | V-1 自动 CHANGELOG 生成 | v0.23+ | — | ⏸ 低优先级 |
 | V-2 Pipeline 可视化编辑器 | v0.23+ | — | ⏸ 低优先级 |
 | V-3 跨任务知识图谱 | v0.23+ | — | ⏸ 低优先级 |
@@ -55,15 +55,62 @@
 
 ---
 
-## 🚧 下一阶段 — v0.21.0（聚焦：日志 + 自描述缓存）
+## ✅ v0.21.0（已完成，2026-07-21 发布）
 
-**目标**：完成 I-2 + IV-1 + IV-4 三项。预计工作量 8-11 小时。
+**目标**：完成 I-2 + IV-1 + IV-4 三项。
 
-**为什么是这三项**：
-1. **I-2** 是用户原话 #8 #9 明确要求过的"信息粒度不够详细、缺乏全局性查看运行状态"。
-2. **IV-1 + IV-4** 是用户原话 #13 #14 明确要求过的"json 文件名加轮次标记、能自组织架构"。
-3. **I-2 是 II-1 Webview 的前置条件** —— Webview 要展示日志数据，日志格式不规整就没东西可展示。
-4. 三项工作量都小（各 2-6 小时），可在单次 sprint 内完成。
+**实际产出**：
+- **I-2 OutputChannel 结构化日志**：新增 `moaLogUtils.ts`，5 个角色 channel 每条日志带本地时间戳 + iter 号 + role + model + elapsed；新增 task started / finalized 边界。
+- **IV-1 自描述文件名**：`saveIterationArtifact` 支持 `options.role / model`，生成 `iteration_NNN__{role}__{model}.json`，并在 JSON 内注入 `_meta` 字段（task_id / iter / role / model / saved_at 全部本地时间戳）。
+- **IV-4 pipeline_architecture + iteration_timings**：新增 `pipelineArchitecture.ts`，meta.json 自动注入 pipeline 自描述（角色顺序 / 终止条件 / 文件布局 / 设置快照）+ 每轮每角色耗时表。
+- **配套**：14 个新增单元测试（`moaLogUtils.test.ts`），共 34/34 通过；README 重写（460+ → 180 行）+ 新增 ARCHITECTURE.md / CONFIGURATION.md。
+
+---
+
+## 🚧 下一阶段 — v0.21.1（聚焦：实地使用反馈修复）
+
+**目标**：修复 v0.21.0 实地使用暴露的 4 个问题。预计工作量 3-4 小时。
+
+**问题清单**（用户原话 2026-07-21）：
+
+1. **role 子目录缺失**：v0.21.0 的扁平命名 `iteration_NNN__recon__recon_1__model.json` 不利于人工浏览汇总。v0.21.1 改为双层结构：
+   ```
+   iteration_NNN/
+     planner__model.json                    ← 无子目录
+     recon/                                  ← role 子目录
+       iteration_NNN__recon__recon_1__model.json
+       iteration_NNN__recon__recon_2__model.json
+     refs/                                   ← role 子目录
+       iteration_NNN__refs__advisor_1__model.json
+       ...
+     iteration_NNN__recon_aggregator__model.json
+     iteration_NNN__aggregator__model.json
+   ```
+2. **顶层状态文件时间戳未本地化**：v0.21.0 只改了 saveIterationArtifact 内部 `_meta.saved_at`，但 `state.json` / `meta.json` / `timeline.md` 的 created_at / last_update / finished_at 仍是 UTC ISO（`2026-07-21T07:39:25.569Z`）。v0.21.1 全部改为 `formatLocalTimestamp()` 输出（`2026-07-21 16:00:06 Asia/Shanghai (UTC+08:00)`）。
+3. **@moa chat participant 图标裂开**：扩展顶层缺 `icon` 字段，VSCode 无法找到图标资源。v0.21.1 添加 `resources/moa-icon.svg`（三节点 + 桥接线条，呼应 "MoA Bridge"）。
+4. **total_elapsed_sec 计算可靠化**：原用 `new Date(started_at)` 差值，v0.21.1 改为累加 per-role elapsed_sec（兼容本地时间格式）。
+
+---
+
+## ⏸ 暂缓阶段 — v0.22.0+（聚焦：可视化）
+
+**目标**：II-1 MoA Webview Panel（I-2 已完成，前置解除）。
+**预计工作量**：12-16 小时。
+
+### 已知问题（待 v0.22 排期）
+
+**Recon agent 后续轮次空跑（用户原话 2026-07-21）**
+
+实地观察（task `moa_mrucetq9_cdcf5d`）：
+- iter 1: 115 工具调用，evidence 显著增长
+- iter 2/3/4: 0 工具调用，Recon 角色被调用但 LLM 决定不查证新 gaps
+
+**根因**：`buildEvidenceBrief` 把最近 8 条 evidence 注入 Recon prompt，LLM 看到已有 evidence 后倾向于"不再查证"而非"针对 critical_gaps 补查"。这是 LLM 行为问题，不是代码 bug。
+
+**候选修复**（v0.22 排期）：
+- 选项 A：改 Recon prompt，明确要求"必须针对每个 critical_gap 至少调一次工具查证"
+- 选项 B：当 critical_gaps 非空时跳过 evidence brief 注入，强制 Recon 从 gaps 出发
+- 选项 C：当 Recon tool_calls=0 时记录 warning，让 Aggregator 下轮降级 next_action
 
 ---
 

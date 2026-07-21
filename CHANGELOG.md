@@ -5,6 +5,51 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1] - 2026-07-21
+
+### Fixed — 实地使用反馈修复（用户原话 2026-07-21）
+
+**问题 1：role 子目录缺失，recon / refs 内容散落在 iteration 顶层**
+
+v0.21.0 的扁平命名 `iteration_NNN__recon__recon_1__model.json` 不利于人工浏览汇总（用户原话："recon与ref，不能像是原来的方式，提前整合到文件夹中"）。v0.21.1 改为双层结构：
+
+```
+iteration_001/
+  iteration_001__planner__GLM-5.2.json
+  recon/                                                ← 新增子目录
+    iteration_001__recon__recon_1__DeepSeek-V4-Flash.json
+    iteration_001__recon__recon_2__MiniMax-M3.json
+  iteration_001__recon_aggregator__GLM-5.2.json
+  refs/                                                 ← 新增子目录
+    iteration_001__refs__advisor_1__DeepSeek-V4-Flash.json
+    ...
+  iteration_001__aggregator__GLM-5.2.json
+```
+
+**修改**：`saveIterationArtifact` 当 `options.role` 含 `/`（如 `'recon/recon_1'`）时，自动抽取首段作为子目录；不含 `/` 的 role（`'planner'` / `'aggregator'`）仍写在 iteration 顶层。
+
+**问题 2：顶层状态文件时间戳未本地化**
+
+v0.21.0 只改了 `saveIterationArtifact` 内部 `_meta.saved_at`，但 `state.json` / `meta.json` / `timeline.md` 的 `created_at` / `last_update` / `finished_at` 仍是 UTC ISO（如 `2026-07-21T07:39:25.569Z`）。用户原话："meta.json、state.json、timeline 的时间没有修订，还是标准格林威治时间"。
+
+**修改**：4 处替换为 `formatLocalTimestamp()`：
+- `createOrchestration` 的 `now`（state.created_at / last_update 初始化）
+- `saveState` 的 `state.last_update`
+- `runIteration` 的 `record.started_at` 与 iteration header（5 个角色 channel 同步）
+- `executeFinalActions` 的 autopilot.log `# started_at` / `# completed_at`
+
+**问题 3：@moa chat participant 图标裂开**
+
+扩展顶层缺 `icon` 字段，VSCode 无法在 @ 菜单找到图标资源，显示裂图。
+
+**修改**：新增 `resources/moa-icon.svg`（128×128，三节点 + 桥接线条，呼应 "MoA Bridge"），并在 `package.json` 顶层添加 `"icon": "resources/moa-icon.svg"`。
+
+### Changed — total_elapsed_sec 计算可靠化
+
+原实现用 `new Date(state.history[0].started_at)` 差值，但 v0.21.1 把 `started_at` 改为本地时间格式（非 ISO）后解析失败。改为累加 per-role `*_elapsed_sec` 字段（与 started_at 格式无关）。
+
+---
+
 ## [0.21.0] - 2026-07-21
 
 ### Added — I-2 OutputChannel 日志格式增强（用户原话 #8 #9）
