@@ -1,15 +1,17 @@
 # vscode-moa
 
-**Mixture-of-Agents (MoA) for VSCode Copilot Chat** — a streamlined 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor) that orchestrates multiple LLMs entirely through the native `vscode.lm` API.
+> 🌐 **Languages / 语言**: [English](./README.en.md) | **中文（当前 / Current）**
 
 **面向 VSCode Copilot Chat 的混合专家智能体** — 通过原生 `vscode.lm` API 编排精简的 5 角色流水线（规划 → 侦察 → 参考 → 聚合 → 执行）。
+>
+> *English description: Mixture-of-Agents (MoA) for VSCode Copilot Chat — a streamlined 5-role pipeline that orchestrates multiple LLMs entirely through the native `vscode.lm` API. English users please see [README.en.md](./README.en.md) for the English version.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![VSCode](https://img.shields.io/badge/VSCode-1.95+-blue.svg)](https://code.visualstudio.com)
 [![Marketplace](https://img.shields.io/badge/Marketplace-dudali095.moa--bridge-green.svg)](https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge)
 [![GitHub Release](https://img.shields.io/github/v/release/DDL095/vscode-moa?color=blue&label=release)](https://github.com/DDL095/vscode-moa/releases/latest)
 
-## What it does
+## What it does / 它能做什么
 
 `@moa <your question>` runs a multi-model fan-out directly in Copilot Chat. Three entry points, two loop shapes:
 
@@ -28,28 +30,135 @@ Each MoA iteration runs all 5 roles in sequence. The loop terminates when the Ag
 
 ```mermaid
 flowchart TD
-    U([User prompt]) --> P[Planner<br/>iter 1 only<br/>clarify task + emit<br/>sub_questions / recon_hints]
-    P --> R{Recon reason?<br/>initial / gap / actor_evidence}
-    R --> R0[R0: Planner hints]
-    R0 --> RA1[Recon Agent #1<br/>model: DeepSeek-V4-Pro<br/>read_file / grep / fetch_webpage]
-    R0 --> RA2[Recon Agent #2<br/>model: MiniMax-M3<br/>read_file / grep / fetch_webpage]
-    R0 --> RA3[Recon Agent #N<br/>model: ...]
-    RA1 --> AGG[Recon Aggregator<br/>always runs v0.18 Plan B<br/>dedupe + integrate + label sources<br/>tools: verify cited files only]
+    %% ━━ 阶段 0: 用户输入 ━━
+    U([👤 User prompt])
+
+    %% ━━ 阶段 1: Planner（仅 iter 1） ━━
+    U --> P
+    P["📋 Planner (iter 1 only)
+    ━━━━━━━━━━━
+    model: GLM-5.2
+    input  : task + workspace ctx
+    process: clarify + decompose
+    output : sub_questions[]
+            recon_hints[]"]
+
+    %% ━━ 阶段 2: Recon fan-out ━━
+    P -->|"sub_questions[]
+            recon_hints[]"| R
+    R{"Recon reason?
+      initial / gap
+      / actor_evidence"}
+    R -->|"initial"| R0["🔀 Recon fan-out"]
+    R -->|"gap"| R0
+    R -->|"actor_evidence"| R0
+
+    R0 --> RA1
+    R0 --> RA2
+    R0 --> RA3
+
+    RA1["🔍 Recon Agent #1
+    ━━━━━━━━━━━
+    model: DeepSeek-V4-Pro
+    tools : read / grep / fetch_webpage
+    output: evidence chunks
+            + source labels"]
+    RA2["🔍 Recon Agent #2
+    ━━━━━━━━━━━
+    model: MiniMax-M3
+    tools : read / grep / fetch_webpage
+    output: evidence chunks
+            + source labels"]
+    RA3["🔍 Recon Agent #N
+    ━━━━━━━━━━━
+    model: ...
+    output: evidence chunks"]
+
+    %% ━━ Recon Aggregator (Plan B, v0.18) ━━
+    RA1 --> AGG
     RA2 --> AGG
     RA3 --> AGG
-    AGG -->|merged summary<br/>single source of truth| REF1[Ref #1<br/>pure LLM]
-    AGG --> REF2[Ref #2<br/>pure LLM]
-    AGG --> REF3[Ref #N<br/>pure LLM]
-    REF1 --> A[Aggregator<br/>fuse N ref outputs<br/>emit completeness + next_action]
+
+    AGG["🔀 Recon Aggregator (always runs, v0.18 Plan B)
+    ━━━━━━━━━━━
+    model: GLM-5.2
+    input  : N raw evidence streams
+    process: dedupe + integrate + label sources
+    output : unified_evidence (single source of truth)"]
+
+    %% ━━ 阶段 3: Refs fan-out (pure LLM) ━━
+    AGG -->|"unified_evidence"| REF1
+    AGG --> REF2
+    AGG --> REF3
+
+    REF1["💡 Ref #1 (pure LLM)
+    ━━━━━━━━━━━
+    model: DeepSeek-V4-Flash
+    input : unified_evidence + task
+    output: JSON {
+      findings[], confidence,
+      sufficient(bool), missing[]
+    }"]
+    REF2["💡 Ref #2 (pure LLM)
+    ━━━━━━━━━━━
+    model: MiniMax-M3
+    output: same JSON shape"]
+    REF3["💡 Ref #N (pure LLM)
+    ━━━━━━━━━━━
+    model: ...
+    output: same JSON shape"]
+
+    %% ━━ 阶段 4: Aggregator (fuse N refs) ━━
+    REF1 -->|"ref JSON"| A
     REF2 --> A
     REF3 --> A
-    A -->|next_action: actor_needed| AC[Actor<br/>full tools<br/>execute action_items<br/>write artifacts]
-    AC --> EV[(state.evidence<br/>actor artifacts<br/>high confidence)]
-    EV -.->|feed into next iter| R
-    A -->|next_action: recon_needed| G[(state.gaps<br/>missing hints)]
-    G -.->|feed into next iter| R
-    A -->|next_action: finalize<br/>OR completeness ge 0.8<br/>OR iter ge MAX_ITER| F([#moa_finalize<br/>action_items + summary])
-    F -.->|disk-persisted| CACHE[(.moa_cache/&lt;task_id&gt;/<br/>state.json<br/>timeline.md<br/>final.md)]
+
+    A["🔀 Aggregator (fuse N refs)
+    ━━━━━━━━━━━
+    model: GLM-5.2
+    input  : N ref JSONs + evidence
+    process: cross-ref + resolve conflicts + completeness score
+    output : synthesis
+            + completeness (0.0-1.0)
+            + gaps[]
+            + next_action"]
+
+    %% ━━ 阶段 5: Actor 或 finalize 或 loop ━━
+    A -->|"next_action:
+            actor_needed"| AC
+    AC["⚙️ Actor (full tools)
+    ━━━━━━━━━━━
+    model: GLM-5.2
+    input  : action_items[] from Aggregator
+    process: write_file / execute / inform_user
+    output : executed_actions[]
+            + self_assessment"]
+
+    AC -->|"action artifacts
+            (high confidence)"| EV
+    EV[("state.evidence")]
+    EV -.->|"feed into next iter"| R
+
+    A -->|"next_action:
+            recon_needed"| G[("state.gaps
+            missing hints")]
+    G -.->|"feed into next iter"| R
+
+    A -->|"next_action: finalize
+            OR completeness ≥ 0.8
+            OR iter ≥ MAX_ITER"| F([🏁 #moa_finalize])
+    F --> CACHE
+
+    CACHE[(".moa_cache/<task_id>/
+    ━━━━━━━━━━━
+    state.json  (live state)
+    meta.json   (aggregated)
+    timeline.md (human log)
+    final.md    (markdown)
+    final.json  (action_items)
+    autopilot.log (v0.20+)")]
+
+    %% ━━ 样式 ━━
     classDef plain fill:#fff,stroke:#333,stroke-width:1px
     classDef role fill:#e8f4fd,stroke:#1976d2,stroke-width:2px,color:#0d47a1
     classDef terminal fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#e65100
@@ -57,7 +166,12 @@ flowchart TD
     class P,RA1,RA2,RA3,AGG,REF1,REF2,REF3,A,AC role
     class U,F terminal
     class EV,G,CACHE store
+    class R0 plain
 ```
+
+> **ℹ️ Rendering note**: GitHub and VSCode Marketplace render this diagram natively. **VSCode's built-in markdown preview does NOT support mermaid** — install the [Markdown Preview Mermaid Support](https://marketplace.visualstudio.com/items?itemName=bierner.markdown-mermaid) extension, or view this file on GitHub.
+
+> **ℹ️ 渲染说明**：GitHub 和 VSCode Marketplace 原生支持 mermaid。**VSCode 自带的 markdown preview 不支持** —— 请安装 [Markdown Preview Mermaid Support](https://marketplace.visualstudio.com/items?itemName=bierner.markdown-mermaid) 扩展，或在 GitHub 上查看本文件。
 
 **Single-model mode**: when `preset.reconModels` has only 1 entry (or `moa.parallelRecon: false`), the parallel fan-out collapses to a single Recon Agent. The Aggregator still runs — its job changes from "dedupe across models" to "normalize raw output + strip noise". Downstream Refs see the same shape either way (Plan B, see [CHANGELOG v0.18.0](./CHANGELOG.md#0180---2026-07-20)).
 

@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.20.2",
+  "version": "0.20.3",
 
   "publisher": "dudali095",
   "license": "MIT",

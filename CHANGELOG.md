@@ -5,6 +5,191 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.3] - 2026-07-21
+
+### Fixed — README mermaid 渲染错误 + 双语拆分
+
+- **Mermaid syntax error**: GitHub parser reported `Expecting 'AMP', 'COLON', ... got 'LINK_ID'` on the `CACHE[(.moa_cache/...)]` cylindrical node because `/` in unquoted text was parsed as a link separator. Fix: wrap all node labels containing special chars in double quotes (`["..."]` / `[("...")]`).
+- **Mermaid 信息密度增强**: rewrote the 5-role pipeline diagram with explicit per-role I/O annotations (model / input / process / output) and edge labels showing data flow between roles (e.g. `unified_evidence`, `ref JSON`, `action artifacts`). Each role now clearly shows what it produces and who consumes it.
+- **VSCode mermaid rendering**: added explicit note at the diagram pointing users to the [Markdown Preview Mermaid Support](https://marketplace.visualstudio.com/items?itemName=bierner.markdown-mermaid) extension, since VSCode's built-in markdown preview does not render mermaid.
+- **双语 README 拆分**: split `README.md` (Chinese-primary with English annotations) and new `README.en.md` (English-primary). Cross-linked at the top of each file.
+
+## [0.20.2] - 2026-07-21
+
+### Changed — 全量双语化 + 灵活上限 + cacheTtlDays=0
+
+**i18n** — All 20+ `moa.*` config items now have bilingual (Chinese + English) descriptions in `package.json`:
+- Every `description` field: Chinese paragraph followed by `---` separator and English paragraph.
+- Every `enumDescriptions` (executionPreset / approvalMode / refDisplayMode): bilingual per option.
+- Sub-field descriptions (role / model / systemHint / temperature): bilingual.
+- `package.nls.zh-cn.json`: added English sections to 4 previously CN-only keys (enableActorInLoop / safeExecutionMode / cacheTtlDays / cacheRootDir).
+- `package.nls.json`: updated cacheTtlDays description to mention v0.20.2 zero-disables semantics.
+
+**Warnings added**:
+- `moa.refDisplayMode`: thinking marked as STRONGLY RECOMMENDED; verbose has `⚠️ WARNING — context pollution risk` (refs accumulate in Copilot context window, may confuse aggregator which should read in-memory JSON).
+- `moa.forceDirect`: `⚠️ WARNING — bypasses multi-model safety net`, lists 3 capabilities lost (cross-model verification + recon evidence + aggregator synthesis).
+- `moa.autoExecuteAfterFinalize` + `moa.approvalMode`: explicit `⚠️ Only effective when executionPreset='custom'` warning.
+
+**Flexible upper limits** (defaults unchanged, only allow larger user overrides):
+
+| Config | v0.20.1 max | v0.20.2 max |
+|---|---|---|
+| `moa.maxReconRounds` | 10 | **20** |
+| `moa.maxReconIterations` | 200 | **500** |
+| `moa.reconEarlyStopStagnant` | 10 | **50** |
+| `moa.reconEarlyStopSaturated` | 5000 | **50000** |
+| `moa.reconL3Threshold` | min 50000 | **min 10000** |
+| `moa.reconL3MaxCalls` | 20 | **100** |
+| `moa.reconL3TargetChars` | (no max) | **max 500000** |
+
+**New: cacheTtlDays=0 disables cleanup**:
+- `minimum: 1 → 0` — `0` means never auto-delete (tasks persist until manually removed).
+- `maximum: 365 → 36500` (~100 years, effectively unlimited for archival).
+- `src/cacheManager.ts`: added early-return when `ttlDays <= 0` (scans but does not delete).
+
+**README**: new `### Cache & lifecycle` section with cacheTtlDays semantics + common patterns (default 30 days / 0=never / 365=1 year / custom cacheRootDir).
+
+## [0.20.1] - 2026-07-21
+
+### Fixed — activationEvents + Recon 上限 + 中文 i18n
+
+- **`activationEvents` missing `onLanguageModelTool:moa_execute`**: prevented manual `#moa_execute` from activating the extension when it wasn't already active. Fix: added the missing entry to `package.json`.
+- **i18n gap**: `package.nls.zh-cn.json` was missing all 3 v0.20.0 keys (executionPreset / autoExecuteAfterFinalize / approvalMode). Fix: added complete Chinese translations with detailed tables + scenario guidance.
+- **i18n enrichment**: rewrote English markdown descriptions in `package.nls.json` with detailed tables (preset matrix + Gate-A/Gate-B explanation + recommended workflows). VSCode settings UI now shows rich bilingual content.
+- **Recon upper limits raised**:
+  - `moa.maxReconRounds` max: 5 → 10 (complex research tasks).
+  - `moa.maxReconIterations` max: 100 → 200 (large monorepos / deep research).
+- **README**: new `### Actor execution control (v0.20.0+)` section with preset matrix, execution flow diagram, Gate-A/Gate-B explanation, audit/recovery, and bilingual scenario table.
+
+## [0.20.0] - 2026-07-21
+
+### Added — Actor Autopilot + Batch Approval Gate
+
+Major release: Actor role can now auto-execute finalized `action_items` with multi-layer approval gates. Replaces v0.19.x's "finalize returns markdown; main-session manually executes" pattern.
+
+**New: `moa.executionPreset`** (top-level shortcut) — 4+1 modes:
+
+| Preset | Auto-execute after finalize? | Approval gate | SafeExecutor backup |
+|---|---|---|---|
+| `manual` (default) | ❌ | `batch` (Gate-A QuickPick) | ✅ |
+| `supervised` | ✅ | `batch` (Gate-A QuickPick per round) | ✅ |
+| `autopilot` | ✅ | `none` | ✅ (only safety net) |
+| `yolo` | ✅ | `none` | ❌ (irreversible) |
+| `custom` | controlled by fine-grained configs | controlled by `approvalMode` | controlled by `safeExecutionMode` |
+
+**New: `moa.autoExecuteAfterFinalize`** (boolean, default false) — when true, `finalizeTask()` automatically invokes Actor. Only effective when `executionPreset='custom'`.
+
+**New: `moa.approvalMode`** (enum, default `batch`) — controls approval popups for destructive tool calls:
+- `none`: no popups (autopilot safety net = backup only)
+- `batch`: Gate-A QuickPick multi-select at Actor entry (user can deselect unwanted items)
+- `per_call`: Gate-B Yes/No/YesToAll/RejectAll before each destructive tool call
+- `batch_plus_per_call`: both gates (most conservative)
+
+**New: `#moa_execute` LM tool** — manual trigger for executing finalized `action_items`. Subject to approval gates. Automatically skipped when `executionPreset='autopilot'` (already runs after finalize).
+
+**New: autopilot.log** — human-readable execution log at `<taskDir>/autopilot.log` with `started_at` / `elapsed_sec` / `tool_calls` / per-action status. Useful for CI logs.
+
+**SafeExecutor enhancements**:
+- Added `ApprovalRejectedError` class (source: `gate_a` | `gate_b` | `reject_all`).
+- Added `resolveExecutionConfig()` as single source of truth (preset → 3 fine-grained configs).
+- Added Gate-A `requestBatchApproval()` (QuickPick multi-select) and Gate-B `requestCallApproval()` (Yes/No/YesToAll/RejectAll).
+- `wrapToolCall`: Gate-B intercept between backup & invoke when approvalMode requires it.
+- `yesToAllActivated` / `rejectAllActivated` per-task state fields.
+- Constructor extended to 4th param `{ approvalMode?, callApprovalImpl?, batchApprovalImpl? }` for test mock injection.
+- vscode module lazy `require('vscode')` via `getVscode()` helper to support test environment (avoids top-level resolution).
+
+**Actor entry (runActor.ts)**:
+- Gate-A `requestBatchApproval()` filters action_items before execution.
+- Gate-A 全拒绝短路 return.
+- `rejectedResults: ActorActionResult[]` hoisted above try-block for catch-block lexical visibility.
+- Normal return merges `rejectedResults` prepended to executed_actions.
+
+**Roles (roles.ts)**:
+- Status type extended: `'success' | 'failed' | 'skipped' | 'partial' | 'rejected_by_user'`.
+- ActorActionResult.status extends to `'rejected_by_user'`.
+
+**MoaOrchestrator**:
+- New export `executeFinalActions(taskId, actionItems, taskText, token, options?)` — filters executable types (write_file/execute/create_roadmap, skip research_more/inform_user), writes autopilot.log.
+- `finalizeTask` 末尾追加 autopilot trigger: when `execConfigFinal.autoExecute && output.action_items.length > 0`, calls `executeFinalActions()`.
+
+**Tests**: new `test/safeExecutor-approval.test.ts` (13 tests covering Gate-A 4 scenarios / Gate-B 4 scenarios / ApprovalRejectedError 2 / wrapToolCall integration 3). Strategy: Module._resolveFilename + Module._load hooks to inject vscode stub before importing safeExecutor.
+
+## [0.19.2] - 2026-07-21
+
+### Fixed — Actor JSON 兜底链路 + per-role 耗时记录
+
+This version hardens the Actor role's recovery path when the LLM doesn't produce structured JSON output, and adds per-role timing breakdown to `meta.json`.
+
+**§1.3 — task_complete 后强制总结** ([src/actingAgent.ts](src/actingAgent.ts)):
+- Symptom: Actor LLM frequently calls `task_complete` (or similar) to signal completion, but at that point `finalOutput` may still be empty (LLM put the summary in tool input instead of chat text). Hitting iteration cap then calls `extractActorJson('')` which returns null → `executed_actions=[]`, inconsistent with actual work done.
+- Fix: after executing a `task_complete`-class tool call, immediately inject a User message requiring LLM to output structured JSON summary. Next iteration LLM enters the `toolCalls.length === 0` natural-exit branch, `finalOutput` gets populated.
+- Pattern match: `/task[_-]?complete|task[_-]?done|^(complete|done|finish)$/i`.
+
+**§1.4 — manifest.json 反构兜底** ([src/moaCore/runActor.ts](src/moaCore/runActor.ts)):
+- Symptom: even with §1.3, LLM may still not comply (keeps calling tools or outputs non-JSON). §1.4 is the downstream defense.
+- Fix: when `executedActions.length === 0 && params.taskDir`, read SafeExecutor `manifest.json`, filter records matching current iteration, reconstruct `executed_actions` via `manifestRecordToAction()`.
+- `self_assessment.reason` annotated as `Recovered from manifest.json (N tool call(s), v0.19.2 §1.4 fallback)` for auditability.
+
+**§5.1 — per-role 耗时记录** ([src/moaOrchestrator.ts](src/moaOrchestrator.ts)):
+- Added `OrchestrationMeta.per_role_breakdown`:
+  ```json
+  {
+    "planner": { "rounds": 1, "total_elapsed_sec": 3 },
+    "recon": { "rounds": 7, "total_elapsed_sec": 87, "total_tool_calls": 412 },
+    "refs": { "rounds": 10, "total_elapsed_sec": 156 },
+    "aggregator": { "rounds": 10, "total_elapsed_sec": 45 },
+    "actor": { "rounds": 3, "total_elapsed_sec": 67, "actions_executed": 5, "tool_calls": 12 }
+  }
+  ```
+- Added `OrchestrationMeta.model_invocations[]`: per-call `{ iter, role, model, elapsed_sec, tool_calls }`.
+- Added `OrchestrationMeta.total_elapsed_sec`.
+- `IterationRecord` extended with `*_elapsed_sec` fields (real wall-clock per role).
+
+## [0.19.1] - 2026-07-20
+
+### Added — SafeExecutor 保守执行模式 + 缓存生命周期
+
+Major safety release: introduces SafeExecutor to wrap all Actor side-effecting operations with backup + audit trail.
+
+**New: `moa.safeExecutionMode`** (boolean, default true) — when enabled, Actor's tool calls are wrapped by SafeExecutor:
+- `write_file` / `apply_patch` / `insert_edit` / `replace_string`: original file backed up to `<target>.bak.<timestamp>` before execution.
+- `delete` / `remove`: file moved to `.moa_cache/<task_id>/_trash/` instead of actually deleting.
+- All side-effecting actions logged to `.moa_cache/<task_id>/manifest.json` with `iter` / `seq` / `type` / `target` / `tool_name` / `input_summary` / `status` / `backup_path` / `output_chars` / `timestamp`.
+- Iter end: `safeExecutor.flushManifest()` writes accumulated records to disk atomically.
+
+**New: `moa.cacheTtlDays`** (number, default 30) — tasks older than this TTL (in days) will be cleaned up when running the `MoA: Cleanup Old Tasks` command.
+
+**New: `moa.cacheRootDir`** (string, default empty) — override cache root directory. Default empty uses `<workspaceFolder>/.moa_cache/`. Set to absolute path to centralize caches across workspaces.
+
+**New module**: [src/safeExecutor.ts](src/safeExecutor.ts):
+- `class SafeExecutor` encapsulates all side-effecting operations.
+- Built-in tool whitelist + path safety checks.
+- Atomic writes (write to `.tmp`, then rename).
+- manifest.json standardization for future audit / rollback features.
+
+**New: [src/cacheManager.ts](src/cacheManager.ts)**:
+- TTL cleanup (`cleanupExpiredTasks()`).
+- Workspace fingerprinting (task_id prefix = sha1 of workspace path, first 6 chars).
+- `MoA: Cleanup Old Tasks` command registered.
+
+## [0.19.0] - 2026-07-20
+
+### Fixed — Actor Layer 2 bug + capturedToolCalls 兜底
+
+**§1.1 — iteration cap 强制 JSON 总结** ([src/actingAgent.ts](src/actingAgent.ts)):
+- When hitting iteration cap, inject a User message in the last iteration forcing LLM to output structured JSON summary.
+- Without this, hitting cap with empty `finalOutput` produces `executed_actions=[]`.
+
+**§1.2 — capturedToolCalls 兜底** ([src/moaCore/runActor.ts](src/moaCore/runActor.ts)):
+- Symptom: Layer 2 bug — when `actingAgent` main loop hits cap, `finalOutput` is empty string, the `result.output` branch is not entered, `executed_actions` remains `[]`.
+- Fix: when `result.hitIterationCap && executedActions.length === 0 && result.capturedToolCalls.length > 0`, construct minimal `executed_actions` from `capturedToolCalls` to preserve partial progress.
+- `captureToolResults: true` now passed to `runActingAgent` (was false pre-v0.19.0).
+- Cost: memory usage increases (all tool result text retained). Benefit: auditable evidence when LLM doesn't output JSON.
+
+**§2 — partial status preservation**: partial executed_actions get `status: 'partial'` with `error_message` indicating iteration cap hit.
+
+---
+
 ## [0.18.4] - 2026-07-20
 
 ### Fixed — Actor 空跑 + 版本号漂移修复
