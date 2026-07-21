@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.20.0",
+  "version": "0.20.1",
 
   "publisher": "dudali095",
   "license": "MIT",
@@ -37,6 +37,7 @@
     "onLanguageModelTool:moa_orchestrate",
     "onLanguageModelTool:moa_continue",
     "onLanguageModelTool:moa_finalize",
+    "onLanguageModelTool:moa_execute",
     "onChatParticipant:moa-bridge.moa",
     "onChatParticipant:moa-bridge.moaloop",
     "onChatParticipant:moa-bridge.moasingle"
@@ -547,21 +548,21 @@
           ],
           "default": "manual",
           "enumDescriptions": [
-            "v0.20.0 (default): v0.19.x-compatible behavior. Finalize returns action_items as markdown; main session drives #moa_execute manually. approval=batch (Gate-A QuickPick multi-select). Backup enabled.",
-            "v0.20.0: Full-link autopilot, but with batch approval gate before each round of action_items. Auto-executes after finalize, but user can deselect unwanted items in QuickPick. Backup enabled.",
-            "v0.20.0: Fully automatic, zero human-in-the-loop. Auto-executes after finalize, no approval gate. ONLY SafeExecutor backup provides a safety net — restore .bak.<timestamp> files if needed. Recommended for trusted CI / repeated retry pipelines.",
-            "v0.20.0 (extreme): fully automatic AND no SafeExecutor backup. For sandboxed/CI use only. UI shows a warning.",
-            "Use the 3 fine-grained configs below (autoExecuteAfterFinalize / approvalMode / safeExecutionMode). executionPreset is ignored when this is selected."
+            "manual（默认，v0.19.x 兼容）：finalize 后只返回 markdown 给主会话，需要用户/主会话显式调用 #moa_execute 才会执行 action_items。approvalMode=batch、safeMode=true。",
+            "supervised（半自动 + 人工审批）：finalize 后自动执行 action_items，但每个 action 执行前会弹 QuickPick 让用户多选/反选。safeMode=true。适合多数有人值守的场景。",
+            "autopilot（全自动，推荐用于可信 CI/重试流水线）：finalize 后自动执行，无任何审批弹窗。安全网 = SafeExecutor 自动备份 (.bak.<时间戳>)。用户仍可从 .moa_cache/<task_id>/manifest.json 审计。",
+            "yolo（极端，仅沙盒/CI）：全自动 + 完全关闭 SafeExecutor 备份。任何变更不可逆。UI 会显示警告。",
+            "custom（自定义）：手动控制下方 3 个细粒度配置 (autoExecuteAfterFinalize / approvalMode / safeExecutionMode)，executionPreset 字段本身被忽略。"
           ],
           "markdownDescription": "%moa.config.executionPreset%",
-          "description": "v0.20.0: Top-level execution mode shortcut. Pick a preset to cover the most common combinations of autoExecute + approvalMode + safeMode. Set to 'custom' to control the three fine-grained configs independently.",
+          "description": "v0.20.0：顶层执行模式快捷方式。选择一个 preset 即可覆盖最常见的 autoExecute + approvalMode + safeMode 组合。设为 custom 可独立控制 3 个细粒度配置。",
           "order": 6.5
         },
         "moa.autoExecuteAfterFinalize": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "%moa.config.autoExecuteAfterFinalize%",
-          "description": "v0.20.0: When true, finalizeTask automatically invokes Actor to execute final.json's action_items (subject to approvalMode). When false, finalize returns action_items as markdown and main session must call #moa_execute explicitly. Only effective when executionPreset='custom'.",
+          "description": "v0.20.0：true = finalizeTask 自动调用 Actor 执行 final.json 的 action_items（受 approvalMode 约束）。false = finalize 只返回 markdown，主会话需显式调用 #moa_execute。仅在 executionPreset='custom' 时生效；其他 preset 下此值被 preset 覆盖。",
           "order": 6.6
         },
         "moa.approvalMode": {
@@ -574,13 +575,13 @@
           ],
           "default": "batch",
           "enumDescriptions": [
-            "No approval popups. Rely solely on SafeExecutor backup (recommended only with safeMode=true).",
-            "Gate-A batch approval: at the entry of each Actor call, show a QuickPick multi-select listing all action_items. User deselects unwanted ones.",
-            "Gate-B per-call approval: before each destructive tool call (write_file / delete / execute), show a Yes/No/Yes to All/Reject All dialog.",
-            "Both gates — most conservative. Batch at entry + per-call before each destructive tool call."
+            "none（不弹窗）：完全依赖 SafeExecutor 备份作为安全网。建议仅与 safeMode=true 一起使用。",
+            "batch（默认，Gate-A 批量审批）：每次 Actor 调用入口弹 QuickPick 多选框，列出所有 action_items，用户可反选不想要的项。",
+            "per_call（Gate-B 逐次审批）：每个破坏性工具调用前（write_file / delete / execute）弹 Yes/No/Yes to All/Reject All 对话框。",
+            "batch_plus_per_call（双门，最保守）：Gate-A 入口批量 + Gate-B 每次破坏性调用前。"
           ],
           "markdownDescription": "%moa.config.approvalMode%",
-          "description": "v0.20.0: Approval gate mode. Controls how destructive Actor tool calls are gated before execution. Only effective when executionPreset='custom'.",
+          "description": "v0.20.0：审批门模式，控制破坏性 Actor 工具调用在执行前如何被门控。仅在 executionPreset='custom' 时生效。",
           "order": 6.7
         },
         "moa.enableRecon": {
@@ -593,8 +594,8 @@
           "type": "number",
           "default": 3,
           "minimum": 1,
-          "maximum": 5,
-          "description": "Maximum number of recon rounds. Each round = 1 recon pass + N ref fan-out. If refs report 'sufficient=false' in their JSON output, the next recon round uses their 'missing' hints to fill gaps. Loop exits early when a majority of refs say sufficient=true. Hard cap at 5 to bound cost.",
+          "maximum": 10,
+          "description": "Maximum number of recon rounds. Each round = 1 recon pass + N ref fan-out. If refs report 'sufficient=false' in their JSON output, the next recon round uses their 'missing' hints to fill gaps. Loop exits early when a majority of refs say sufficient=true. v0.20.1 raised hard cap from 5 to 10 (complex research tasks may need more rounds).",
           "order": 8
         },
         "moa.reconContextChars": {
@@ -613,8 +614,8 @@
           "type": "number",
           "default": 50,
           "minimum": 4,
-          "maximum": 100,
-          "description": "Recon agent 单次任务的最大工具调用迭代数（兜底硬上限）。默认 50。实际多数任务会在 LLM 自主判断 + 早停机制触发后更早收敛。配置项 moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated 控制主动早停。",
+          "maximum": 200,
+          "description": "Recon agent 单次任务的最大工具调用迭代数（兜底硬上限）。默认 50。v0.20.1 提高上限到 200（大型 monorepo 或深度研究任务可能需要更多迭代）。实际多数任务会在 LLM 自主判断 + 早停机制触发后更早收敛。配置项 moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated 控制主动早停。",
           "order": 11
         },
         "moa.reconAllowTerminal": {

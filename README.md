@@ -317,13 +317,13 @@ All settings live under the `moa.*` namespace. Edit via `settings.json` or use *
 | `moa.enableRecon` | boolean | `true` | Toggle Phase 0. |
 | `moa.enableActingAgent` | boolean | `true` | Toggle Phase 3. |
 | `moa.forceDirect` | boolean | `false` | Skip the whole pipeline — direct acting agent. |
-| `moa.maxReconRounds` | number (1-5) | `3` | Sufficiency-loop cap. |
+| `moa.maxReconRounds` | number (1-10) | `3` | Sufficiency-loop cap. v0.20.1 raised hard cap from 5 → 10 (complex research tasks may need more rounds). |
 
 ### Recon tuning (v0.13.0+)
 
 | Key | Default | Description |
 |---|---|---|
-| `moa.maxReconIterations` | `50` | Hard cap on tool calls per recon task. |
+| `moa.maxReconIterations` | `50` | Hard cap on tool calls per recon task. v0.20.1 raised max from 100 → 200. |
 | `moa.reconContextChars` | `500000` | **[DEPRECATED v0.14.5]** No longer enforces a cap; only recorded to `meta.json` as an audit metric. Original v0.13.0 role (character budget truncation) was removed because refs are single-turn history-less and 1M-context models can digest any size — if recon truly overflows, that's a search-direction problem for the LLM to handle, not a truncation problem. Kept for backward compat. |
 | `moa.reconAllowTerminal` | `false` | Allow terminal tools in recon (off by default for safety). |
 | `moa.reconEarlyStopStagnant` | `2` | Stop after N consecutive identical tool signatures. |
@@ -331,6 +331,96 @@ All settings live under the `moa.*` namespace. Edit via `settings.json` or use *
 | `moa.reconL3Threshold` | `200000` | Single-file size (chars) that triggers L3 summarization. v0.14.4 raised from 60k → 200k — modern 1M-context models rarely need L3; only truly huge files (generated schemas, minified bundles) trigger it. |
 | `moa.reconL3MaxCalls` | `5` | Max L3 grandchild calls per MoA task. `0` disables. |
 | `moa.reconL3TargetChars` | `50000` | L3 target output length (chars). v0.14.4 raised from 10k → 50k to avoid over-compression. |
+
+### Actor execution control (v0.20.0+)
+
+The Actor role (Phase 5) actually *executes* the Aggregator's `action_items` — it can write files, run terminal commands, and produce side effects. v0.20.0 introduces a layered control system to gate this power.
+
+**At a glance — the 4+1 `executionPreset` modes**:
+
+| Preset | Auto-execute after finalize? | Approval popups | Backup `.bak.<ts>` | Use case |
+|---|---|---|---|---|
+| `manual` (default) | ❌ returns markdown; user calls `#moa_execute` | `batch` (Gate-A QuickPick) | ✅ | First-time use, exploratory tasks |
+| `supervised` | ✅ | `batch` (Gate-A QuickPick multi-select per round) | ✅ | Trusted but human-monitored workflows |
+| `autopilot` | ✅ | `none` (zero human-in-the-loop) | ✅ (only safety net) | Trusted CI / repeated retry pipelines |
+| `yolo` | ✅ | `none` | ❌ (irreversible) | Sandboxed / throwaway runs |
+| `custom` | controlled by `autoExecuteAfterFinalize` | controlled by `approvalMode` | controlled by `safeExecutionMode` | Manual fine-grained control |
+
+**Execution flow under each preset**:
+
+```
+finalize completes
+   │
+   ├─ manual:        return markdown → user/main session calls #moa_execute → Gate-A QuickPick → execute
+   ├─ supervised:    auto-call Actor → Gate-A QuickPick multi-select → execute (safeMode on)
+   ├─ autopilot:     auto-call Actor → execute immediately (safeMode on, no popups)
+   ├─ yolo:          auto-call Actor → execute immediately (safeMode off, no popups, no backup)
+   └─ custom:        behavior driven by 3 fine-grained configs below
+```
+
+**The 3 fine-grained configs** (only effective when `executionPreset='custom'`; otherwise preset overrides):
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `moa.autoExecuteAfterFinalize` | boolean | `false` | When `true`, `finalizeTask()` auto-invokes Actor. When `false`, returns markdown for manual `#moa_execute`. |
+| `moa.approvalMode` | `none` \| `batch` \| `per_call` \| `batch_plus_per_call` | `batch` | Approval gate before destructive tool calls. `batch` = Gate-A QuickPick at Actor entry; `per_call` = Gate-B Yes/No dialog before each destructive call; `batch_plus_per_call` = both gates. |
+| `moa.safeExecutionMode` | boolean | `true` | When `true`, SafeExecutor backs up every `write_file` to `<target>.bak.<timestamp>` and records all actions to `manifest.json`. When `false`, no backup (irreversible). |
+
+**Approval gates — two flavors**:
+
+- **Gate-A (batch)**: QuickPick multi-select dialog at the entry of each Actor call. Lists all `action_items` with type + target + rationale. User can deselect unwanted items. Rejected items are recorded as `status: rejected_by_user` in `manifest.json` for auditability.
+- **Gate-B (per-call)**: Yes/No/Yes to All/Reject All dialog before each destructive tool call (`write_file` / `delete` / `execute`). `Yes to All` skips subsequent Gate-B prompts in the same task. `Reject All` throws `ApprovalRejectedError` and aborts the Actor.
+
+**Auditing & recovery**:
+
+- Every side-effecting action (in any preset) is logged to `.moa_cache/<task_id>/manifest.json` with `iter` / `seq` / `type` / `target` / `tool_name` / `input_summary` / `status` / `backup_path` / `output_chars` / `timestamp`.
+- Backups go to `<target>.bak.<timestamp>` next to the original file. To roll back, delete the new file and rename `.bak.<ts>` back.
+- `autopilot.log` (v0.20.0) in the task dir is a human-readable summary: `started_at` / `elapsed_sec` / `tool_calls` / per-action status. Useful for CI logs.
+
+**Recommended preset for each scenario**:
+
+| Scenario | Recommended preset | Reason |
+|---|---|---|
+| First-time user trying MoA | `manual` | See what the pipeline produces before executing |
+| Daily coding assistant (you watch the screen) | `supervised` | Auto-execute + visual approval |
+| Nightly batch / CI pipeline | `autopilot` | Zero human-in-the-loop, backup is the safety net |
+| Sandboxed experiment (VM / container) | `yolo` | Fast iteration, no backup overhead |
+| Need to mix-and-match behaviors | `custom` | Independent control of the 3 axes |
+
+---
+
+### Actor 执行控制（中文版）
+
+Actor 角色（Phase 5）会**真正执行** Aggregator 给出的 `action_items` —— 可能写文件、跑终端命令、产生副作用。v0.20.0 引入分层控制系统来门控这种权力。
+
+**速查表 —— 4+1 个 `executionPreset` 模式**：
+
+| Preset | finalize 后自动执行？ | 审批弹窗 | `.bak.<ts>` 备份 | 适用场景 |
+|---|---|---|---|---|
+| `manual`（默认） | ❌ 只返回 markdown，需用户/主会话显式调用 `#moa_execute` | `batch`（Gate-A QuickPick） | ✅ | 首次使用、探索性任务 |
+| `supervised` | ✅ | `batch`（每轮 Gate-A QuickPick 多选） | ✅ | 有人值守的常规任务 |
+| `autopilot` | ✅ | `none`（零人工介入） | ✅（唯一安全网） | 可信 CI / 重试流水线 |
+| `yolo` | ✅ | `none` | ❌（不可逆） | 沙盒 / 一次性运行 |
+| `custom` | 由 `autoExecuteAfterFinalize` 控制 | 由 `approvalMode` 控制 | 由 `safeExecutionMode` 控制 | 手动细粒度控制 |
+
+**3 个细粒度配置**（仅在 `executionPreset='custom'` 时生效；其他 preset 会覆盖）：
+
+| Key | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `moa.autoExecuteAfterFinalize` | boolean | `false` | `true` = `finalizeTask()` 自动调用 Actor；`false` = 只返回 markdown，需手动 `#moa_execute`。 |
+| `moa.approvalMode` | `none` \| `batch` \| `per_call` \| `batch_plus_per_call` | `batch` | 破坏性工具调用前的审批门。`batch` = Gate-A 入口 QuickPick；`per_call` = Gate-B 每次破坏性调用前 Yes/No 对话框；`batch_plus_per_call` = 双门。 |
+| `moa.safeExecutionMode` | boolean | `true` | `true` = SafeExecutor 把每个 `write_file` 备份到 `<目标>.bak.<时间戳>`，所有操作记录到 `manifest.json`。`false` = 无备份（不可逆）。 |
+
+**审批门 —— 两种风格**：
+
+- **Gate-A（批量）**：每次 Actor 调用入口弹 QuickPick 多选框，列出所有 `action_items`（type + target + rationale），用户可反选不想要的项。被拒绝的项以 `status: rejected_by_user` 记入 `manifest.json` 以便审计。
+- **Gate-B（逐次）**：每个破坏性工具调用前（`write_file` / `delete` / `execute`）弹 Yes/No/Yes to All/Reject All 对话框。`Yes to All` 在本任务内跳过后续 Gate-B 提示；`Reject All` 抛 `ApprovalRejectedError` 并中止 Actor。
+
+**审计与回滚**：
+
+- 任何 preset 下的每个副作用操作都被记录到 `.moa_cache/<task_id>/manifest.json`，字段含 `iter` / `seq` / `type` / `target` / `tool_name` / `input_summary` / `status` / `backup_path` / `output_chars` / `timestamp`。
+- 备份写入 `<target>.bak.<timestamp>`（原文件旁边）。要回滚：删新文件，把 `.bak.<ts>` 改回原名即可。
+- 任务目录里的 `autopilot.log`（v0.20.0）是人类可读摘要：`started_at` / `elapsed_sec` / `tool_calls` / 每个 action 的 status。适合 CI 日志。
 
 ## File layout
 
