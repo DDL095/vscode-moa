@@ -60,6 +60,10 @@ import { EXTENSION_VERSION } from './extension';
 
 // v0.22.0 P0-5: SystemContext builder(基础设施层 4 段动态注入)
 import { buildSystemContext, renderForRole, disposeSystemContext, type SystemContext } from './systemContext';
+// v0.22.0 P0-7: Role Setup Preset (角色身份层注入)
+import { getActivePreset, renderRoleSetup, renderFewShots } from './roleSetupPreset';
+// v0.22.0 P0-8: Plan Mode Report
+import { setLastPlanReport, type MoaPlanReport } from './planModeReport';
 // v0.15.0 hotfix 1: evidence 提取纯函数（独立文件便于单测）
 import { buildActorEvidence } from './moaCore/actorEvidence';
 // v0.21.0 I-2 / IV-1 / IV-4: 结构化日志 + 本地时间戳 + 自描述文件名 + pipeline 自描述
@@ -1373,7 +1377,11 @@ export async function runIteration(
   subagentResult: { content: string; source: string } | undefined,
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,
-  toolInvocationToken?: vscode.ChatParticipantToolToken
+  toolInvocationToken?: vscode.ChatParticipantToolToken,
+  options?: {
+    /** v0.22.0 P0-1: 入口类型（@moa/@moasingle/moa_analyze/moa_orchestrate） */
+    entryType?: string;
+  }
 ): Promise<MoaState> {
   const state = await loadState(taskId);
   if (!state) throw new Error('Task not found: ' + taskId);
@@ -1422,13 +1430,15 @@ export async function runIteration(
     //   Planner 自己也看 systemContext(基础设施层),用于消化工作环境
     const plannerSysCtx = await getOrBuildSystemContext(taskId, progress);
     const plannerSysCtxText = plannerSysCtx ? renderForRole(plannerSysCtx, 'planner') : undefined;
-    // v0.22.0 P0-1: 入口类型注入(暂用 '@moa' 默认值;P0-8 实施后会从 moaHandler 真实检测)
-    // TODO(P0-1+): 从 moaHandler 的入口追踪器读取真实 entryType
-    const plannerEntryType = '@moa';
+    // v0.22.0 P0-1: 入口类型注入(从 options.entryType 读取,默认 '@moa' 兼容旧调用)
+    const plannerEntryType = options?.entryType ?? '@moa';
+    // v0.22.0 P0-7: 从 Role Setup Preset 加载 few-shot 示例(默认空字符串)
+    const activePreset = getActivePreset();
+    const fewShotsText = renderFewShots(activePreset);
     plannerForRecon = await callPlanner(state.task, token, progress, {
       entryType: plannerEntryType,
       systemContextText: plannerSysCtxText,
-      // fewShotsText 在 P0-7 实施后从 Role Setup Preset 加载(v3 默认空字符串)
+      fewShotsText,
     });
     record.planner_elapsed_sec = (Date.now() - plannerStart) / 1000;
     state.planner = plannerForRecon;
@@ -1524,7 +1534,17 @@ export async function runIteration(
       evidenceBrief,
       iteration: iterNum,
       systemContextText: reconSysCtxText,
-      // roleSetupText 在 P0-1 实施后从 PlannerOutput.role_setup.recon 构建
+      // v0.22.0 P0-7: role_setup 渲染为 roleSetupText 注入到 Recon
+      roleSetupText: plannerForRecon?.role_setup?.recon?.tone
+        ? renderRoleSetup({
+            tone: plannerForRecon.role_setup.recon.tone,
+            perspective: plannerForRecon.role_setup.recon.perspective ?? '',
+            tool_priority: plannerForRecon.role_setup.recon.tool_priority,
+            cautions: plannerForRecon.role_setup.recon.cautions,
+          })
+        : undefined,
+      // v0.22.0 P0-7: Planner 驱动模式下,透传 recon_aggregator role_setup
+      reconAggregatorRoleSetup: plannerForRecon?.role_setup?.recon_aggregator,
     }, token, progress, undefined, toolInvocationToken);
     record.recon_elapsed_sec = (Date.now() - reconStart) / 1000;
 
@@ -1842,7 +1862,15 @@ export async function runIteration(
         iteration: iterNum,
         taskDir: actorTaskDir,
         systemContextText: actorSysCtxText,
-        // roleSetupText 在 P0-1 实施后从 PlannerOutput.role_setup.actor 构建
+        // v0.22.0 P0-7: role_setup 渲染为 roleSetupText 注入到 Actor
+        roleSetupText: plannerForRecon?.role_setup?.actor?.tone
+          ? renderRoleSetup({
+              tone: plannerForRecon.role_setup.actor.tone,
+              perspective: plannerForRecon.role_setup.actor.perspective ?? '',
+              tool_priority: plannerForRecon.role_setup.actor.tool_priority,
+              cautions: plannerForRecon.role_setup.actor.cautions,
+            })
+          : undefined,
       }, token, progress, undefined, toolInvocationToken);
       record.actor_result = actorResult;
       state.actor_history.push(actorResult);
@@ -2250,6 +2278,8 @@ export async function runSingleIterationAnalyze(
     progress?: (msg: string) => void;
     /** toolInvocationToken（必需，让内置工具可调） */
     toolInvocationToken?: vscode.ChatParticipantToolToken;
+    /** v0.22.0 P0-1: 入口类型（@moa/@moasingle/moa_analyze/moa_orchestrate） */
+    entryType?: string;
   }
 ): Promise<MoaFinalOutput & { task_id: string }> {
   const reconContext = options?.reconContext?.trim();
@@ -2320,6 +2350,8 @@ export async function runMoaLoopAnalyze(
     toolInvocationToken?: vscode.ChatParticipantToolToken;
     /** 最大迭代数（默认 MAX_ITER=12） */
     maxIterations?: number;
+    /** v0.22.0 P0-1: 入口类型（@moa/@moasingle/moa_analyze/moa_orchestrate） */
+    entryType?: string;
   }
 ): Promise<MoaFinalOutput & { task_id: string }> {
   const reconContext = options?.reconContext?.trim();
@@ -2342,7 +2374,9 @@ export async function runMoaLoopAnalyze(
     progress?.(`[MoA Loop] using pre-collected reconContext (${reconContext.length} chars from ${reconSources.length} source(s)) — Recon phase will be skipped in iter 1`);
   }
 
-  let state = await runIteration(taskId, subagentResult, token, progress, toolInvocationToken);
+  let state = await runIteration(taskId, subagentResult, token, progress, toolInvocationToken, {
+    entryType: options?.entryType,
+  });
   let iterCount = 1;
 
   // 循环直到 finalized 或达到 maxIter
@@ -2354,7 +2388,9 @@ export async function runMoaLoopAnalyze(
     iterCount += 1;
     progress?.(`[MoA Loop] proceeding to iteration ${iterCount} (Aggregator said: ${state.history[state.history.length - 1].aggregator_output?.next_action ?? '?'})...`);
     // 后续轮次不再注入 reconContext（只首轮使用，避免重复）
-    state = await runIteration(taskId, undefined, token, progress, toolInvocationToken);
+    state = await runIteration(taskId, undefined, token, progress, toolInvocationToken, {
+      entryType: options?.entryType,
+    });
   }
 
   // 兜底：如果达到 maxIter 仍未 finalized（理论上 runIteration 内部会处理 MAX_ITER，
@@ -2374,6 +2410,29 @@ export async function runMoaLoopAnalyze(
   const finalJsonRaw = await fs.readFile(finalJsonPath, 'utf8');
   const finalOutput = JSON.parse(finalJsonRaw) as MoaFinalOutput;
   progress?.(`[MoA Loop] done in ${iterCount} iteration(s) | convergence: ${state.convergence_source} | completeness: ${(state.completeness * 100).toFixed(0)}%`);
+
+  // v0.22.0 P0-8: 设 Plan Mode Report(给主会话展示)
+  try {
+    const planReport: MoaPlanReport = {
+      task_id: taskId,
+      iterationsRun: iterCount,
+      planCoverageHistory: (state.planner?.plan_coverage !== undefined)
+        ? [state.planner.plan_coverage]
+        : [],
+      needsReplan: state.planner?.needs_replan ?? false,
+      askUserTriggered: state.planner?.ask_user ?? false,
+      convergedReason: state.convergence_source === 'natural'
+        ? 'natural'
+        : state.convergence_source === 'max_iter'
+          ? 'max-iter'
+          : 'natural',
+      totalElapsedSec: 0,
+    };
+    setLastPlanReport(planReport);
+  } catch (err) {
+    progress?.(`[MoA Loop] failed to set Plan Report: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   return finalOutput;
 }
 

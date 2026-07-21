@@ -17,6 +17,8 @@ import * as vscode from "vscode";
 import { runP1Fanout } from "./moaRunner";
 import { runSingleIterationAnalyze, runMoaLoopAnalyze, type MoaFinalOutput } from "./moaOrchestrator";
 import { EXTENSION_VERSION } from "./extension";
+// v0.22.0 P0-10: final.md 分级内嵌展示
+import { renderFinalMdForInline } from "./finalMdRenderer";
 
 /**
  * v0.16.0: 三种 chat 模式
@@ -40,15 +42,24 @@ async function runMoaChatEntry(
 
   const start = Date.now();
   try {
+    // v0.22.0 P0-1+ P0-8: 把真实 entryType 透传给 Planner (用于 Planner 决定 needs_iteration)
+    //   '@moa' / '@moaloop' → forces needs_iteration=true
+    //   '@moasingle' → forces needs_iteration=false
+    //   'moa_analyze' / 'moa_orchestrate' → 由 Planner 自己判断
+    const entryType = mode === 'loop' ? '@moa' : '@moasingle';
+
     const output: MoaFinalOutput & { task_id: string } = mode === 'loop'
       ? await runMoaLoopAnalyze(userPrompt, token, {
           progress: (msg) => stream.progress(msg),
           toolInvocationToken: request.toolInvocationToken,
-        })
+          // v0.22.0 P0-1: 入口类型透传(供 Planner mini-loop 决策)
+          entryType,
+        } as Parameters<typeof runMoaLoopAnalyze>[2])
       : await runSingleIterationAnalyze(userPrompt, token, {
           progress: (msg) => stream.progress(msg),
           toolInvocationToken: request.toolInvocationToken,
-        });
+          entryType,
+        } as Parameters<typeof runSingleIterationAnalyze>[2]);
 
     // 显示最终 summary
     stream.markdown(output.summary);
@@ -58,7 +69,23 @@ async function runMoaChatEntry(
     stream.markdown(
       `\n\n---\n\n> **MoA v${EXTENSION_VERSION} ${modeLabel}** | task_id: \`${output.task_id}\` | iterations: ${output.iterations_used} | confidence: ${confPct}%`
     );
-    stream.markdown(`> 落盘文件：\`.moa_cache/${output.task_id}/final.md\` (完整报告) + \`timeline.md\` (时序表)`);
+
+    // v0.22.0 P0-10: final.md 分级内嵌展示(根据 finalMdInlineDisplay 配置 + 字符数自动分级)
+    //   - < 2000 → 完整内嵌
+    //   - 2000-8000 → 摘要 + 关键信息
+    //   - > 8000 → 结构化摘要(TL;DR + 关键发现 + action_items)
+    try {
+      const ws = vscode.workspace.workspaceFolders?.[0];
+      if (ws) {
+        const finalMdUri = vscode.Uri.joinPath(ws.uri, '.moa_cache', output.task_id, 'final.md');
+        const finalMdBytes = await vscode.workspace.fs.readFile(finalMdUri);
+        const finalMd = Buffer.from(finalMdBytes).toString('utf8');
+        const inlineMd = renderFinalMdForInline(finalMd, output.task_id);
+        stream.markdown(inlineMd);
+      }
+    } catch {
+      // final.md 读取失败静默跳过(不影响主流程)
+    }
     stream.markdown(`> 中间过程：VSCode Output 面板下拉选择 MoA Planner / MoA Recon / MoA Refs / MoA Aggregator / MoA Actor`);
 
     // v0.18.4: 主会话末尾汇总增强——读取 meta.json 展示模型清单、轮次、收敛来源
