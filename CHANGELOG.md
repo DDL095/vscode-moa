@@ -5,6 +5,187 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-07-22
+
+### 核心主题：角色注入系统大改造 + 用户主权（"VSCode 内长出来的个人 MOA 檞寄生"）
+
+完整路线图见 [docs/roadmap/v0.22.0-role-injection-overhaul.md](docs/roadmap/v0.22.0-role-injection-overhaul.md) v3 设计文档。
+
+### Added — P0-1 Planner mini-loop + role_setup
+
+`src/moaCore/runPlanner.ts` + `src/moaCore/roles.ts` 升级为可迭代智能路由 + 角色设计师：
+
+- **mini-loop**：默认最多 5 次迭代（绝对上限 20），`plan_coverage ≥ 0.9` 收敛
+- **ask_user 触发**：`plan_coverage < 0.5` 且 iter ≥ 2 时弹出 `vscode_askQuestions` 询问用户
+- **iter 2+ 工具调用**：最多 3 次/轮 read-only 工具（`read_file` / `list_dir` / `grep_search` / `get_errors`），防止过度探索
+- **PlannerOutput schema 扩展为 13 字段**（向后兼容，旧字段全部可选）：新增 `task_type` / `process_language` / `plan_coverage` / `needs_replan` / `ask_user` / `ask_user_questions` / `role_setup`
+- **role_setup 字段**：Planner 设计下游 3 角色（recon / recon_aggregator / actor）的身份（tone / perspective / tool_priority / cautions / focus）；Refs 与 Aggregator 保留多模型可比性，**不**接受 role_setup（架构红线）
+- **入口类型识别**：`@moa` / `@moasingle` / `@moaloop` 进入 Planner 时分别标注，影响 needs_iteration 决策
+
+**配置项**（4 项，见 package.json）：
+- `moa.enablePlannerIteration`（默认 `true`，关闭则回退到 v0.21.x 单次模式）
+- `moa.plannerMaxIterations`（默认 5，范围 1-20；设为 1 = 单次模式）
+- `moa.plannerCoverageThreshold`（默认 0.9，范围 0.5-1.0）
+- `moa.plannerAllowTools`（默认 `true`，iter 2+ 是否允许 read-only 工具）
+
+### Added — P0-2 + P0-3 基础设施层注入
+
+新建 `src/systemContext.ts`（265 行）+ `src/instructionScanner.ts`（423 行），统一注入 4 段动态上下文给所有调工具的角色：
+
+| 注入段 | 内容来源 | 角色 |
+|---|---|---|
+| `ENV_CONTEXT` | activeFile / openDocs / workspaceFolders / projectTree / gitRoot / instructionFiles 清单 | Planner / Recon / Actor |
+| `TOOL_EFFICIENCY` | 静态模板（工具调用纪律） | 同上 |
+| `CUSTOM_INSTRUCTIONS` | 7 路径扫描（**不截断**） | 同上 |
+| `RUNTIME_INSTRUCTIONS` | 4 文件夹 SKILL.md frontmatter | 同上 |
+
+**7 路径指令文件**：workspace `./CLAUDE.md` / `./CLAUDE.local.md` / `./AGENTS.md` / `./.claude/CLAUDE.md` / `./.github/copilot-instructions.md`；user home `~/.claude/CLAUDE.md` / `~/.copilot/copilot-instructions.md`
+
+**4 文件夹 skills**：workspace `.github/skills` + `.claude/skills`；user home `~/.copilot/skills` + `~/.claude/skills`
+
+**安全策略**：单文件 > 200KB 给 Planner 警告但**仍传入**（不截断）；疑似 API key/token 格式给警告（不删减）；按 mtime 缓存避免重复扫描。
+
+**Skill 清单工具策略**（v3 用户反馈"工具太多时禁止拆分，而是让识别后排序"）：所有 skills 全量塞给 Planner，由 Planner 在 role_setup.recon.tool_priority 中排序推荐给 Recon，**不**限定工具。
+
+### Added — P0-4 Recon Aggregator 始终运行 + 双轨制
+
+`src/moaCore/runRecon.ts` 修改：无论 `mode='single'` 还是 `'parallel'`，Recon Aggregator **始终运行**（统一证据清洁度）。单 Recon 时做"格式标准化"（去重 / 排序 / 识别与保留冲突），不强行合并。
+
+**双轨制角色来源**：
+- `moa.reconAggregatorMode = "default"`（默认）：内置静态 prompt `buildReconAggregatorPrompt`
+- `moa.reconAggregatorMode = "planner"`：Planner 的 `role_setup.recon_aggregator` 覆盖默认
+
+原始 Recon 产出始终落盘（`.moa_cache/<task_id>/iteration_N/recon/recon_<label>.json`）便于复盘。
+
+### Added — P0-5 + P0-6 Recon / Actor 注入完整基础设施层
+
+`buildReconPrompt` / `buildActorPrompt` 签名扩展接收 `systemContext` + `roleSetup`，prompt 结构调整为：
+
+```
+=== ROLE SETUP (Planner 定制) ===
+=== ENVIRONMENT CONTEXT ===
+=== TOOL EFFICIENCY ===
+=== CUSTOM INSTRUCTIONS ===
+=== RUNTIME INSTRUCTIONS (Skills) ===
+（原有任务 / iter_state 内容）
+```
+
+`src/moaRunner.ts` L320-325 的 `buildWorkspaceContext()` dead code 已删除，统一改用 `systemContext.ts` 入口。
+
+### Added — P0-7 Role Setup Preset 系统（用户主权核心）
+
+新建 `src/roleSetupPreset.ts`（600 行）+ `src/roleSetupCommands.ts`（280 行）：
+
+- **预设持久化**：`~/.moa/role-setup-presets.json`（全局，跨任务/会话）
+- **内置仅 1 个 `default` 预设**（v3 决策：不再提供 5 个领域示例，用户基于 default 自行修改）
+- **default 不可删除**（架构保证至少有一个生效预设）
+- **JSON schema 校验**：失败时显示 IDE 风格具体错误 + **保留编辑不强制保存**
+- **8 + 3 命令**：
+  - `moa.createRolePreset` / `switchRolePreset` / `editRolePreset` / `deleteRolePreset`
+  - `moa.exportRolePreset` / `importRolePreset`（**社区分享提前到 v0.22**，v3 决策）
+  - `moa.toggleAIGeneration`（AI 自生成采纳与否的开关，用户主权）
+  - `moa.togglePlanModeReport` / `moa.showPlanModeReport` / `moa.toggleFinalMdInlineDisplay`
+- **RoleSetupPreset v2 schema**：`{name, description, recon, recon_aggregator, actor, few_shot_examples?, meta?}`，每个 RoleSetup 含 5 字段（tone / perspective / tool_priority? / cautions? / focus?）
+- **TonePreset 枚举**：7 个预设值（strict-evidence / faithful-integrator / neutral-judge / strict-executor / creative-explorer / conservative / aggressive）
+- **AIGenerationConfig**：`{enabled, autoAccept, confirmationUI}`，控制 Planner 是否允许 LLM 自动生成预设及采纳流程
+
+### Added — P0-8 Plan Mode 实时报告
+
+新建 `src/planModeReport.ts`（119 行）：
+
+- **MoAPlanReport schema**（v3 修订：**不**报告 token 消耗）：`{task_id, iterationsRun, planCoverageHistory, needsReplan, askUserTriggered, convergedReason, totalElapsedSec}`
+- **借鉴 Copilot Plan Agent**（不照搬）：Planner mini-loop 已涵盖 Discovery/Alignment/Design/Refinement 4 阶段；MoA 主干是 Planner + Recon 并行 + 持久化到 `.moa_cache/<task_id>/planner/`（不写入 `/memories/session/plan.md`）
+- **触发方式**：Planner mini-loop 收敛后，根据 `moa.planModeReport.enabled`（默认 `false`）决定是否实时显示
+- 命令：`moa.togglePlanModeReport` / `moa.showPlanModeReport`
+
+### Added — P0-9 Recon Aggregator 自迭代 + 评分
+
+`src/moaCore/runRecon.ts` 的 `callReconAggregator` 重写：
+
+- **自迭代**：默认 1 次（`moa.reconAggregatorMaxIterations`），最大 10 次
+- **v3 关键决策**：默认 1 次时**不启用评分阈值**（只跑 1 次无收敛判断）；**仅当用户配置 maxIterations > 1 时启用 score-threshold 收敛（0.85）**
+- **零额外 LLM 成本**的启发式评分函数 `scoreAggregation()`：
+  - `aggregation` = signature 覆盖率（每个 recon 前 50 字符签名是否出现在 summary 中）
+  - `fidelity` = 关键词覆盖率（每个 recon 抽取 5 个 4+ 字符关键词减去停用词，统计在 summary 中的命中比例）
+  - 长度惩罚：summary 长度 > 3× 最长 recon 时扣分
+- **Return type 扩展**：`{summary, model, elapsed_sec, tool_calls, iterationsRun, aggregationScore?, fidelityScore?}`
+
+### Added — P0-10 final.md 主会话分级展示
+
+新建 `src/finalMdRenderer.ts`（172 行），`src/moaHandler.ts` 修改：
+
+- **3 级自适应展示**（根据 final.md 长度）：
+  - 长度 < 2000 字符 → `full`（完整内嵌）
+  - 2000-8000 字符 → `summary`（提取 TL;DR + 关键发现 + 行动项）
+  - \> 8000 字符 → `structured-summary`（更激进的提炼）
+- **关键设计意图**（用户原话）："关键信息也能在上下文暴露，让下一轮对话能够直接获取相应的信息而不必调取工具去多轮次查询与验证"
+- 命令：`moa.toggleFinalMdInlineDisplay`
+- 配置：`moa.finalMdInlineDisplay`（默认 `structured-summary`）/ `moa.finalMdInlineThresholds`（默认 `{full: 2000, summary: 8000}`）
+
+### Added — P0-11 端口/工具验证命令
+
+新建 `src/diagnostics.ts`（600 行）：
+
+- 命令 `moa.diagnoseEnvironment` 验证 12 项信息源可获取性：Active editor / Open docs / Workspace folders / Project tree / Git root / Instruction files / Skill folders / LM tools / LM models / Active preset / **Active role setup preset** / **MoA entry type**
+- 输出：Markdown 报告 + OutputChannel
+
+### Added — P0-12 用户自定义 few-shot 系统
+
+通过 `RoleSetupPreset.few_shot_examples` 字段实现：
+
+- Planner 系统提示词的 `${USER_FEW_SHOT_EXAMPLES}` 占位符从 `getActivePreset().few_shot_examples` 加载
+- 用户未自定义时 fallback 到内置默认 few-shot
+- 用户可在 preset JSON 中编辑、导出、导入、分享
+
+### Added — 文档（v0.22 设计文档全套）
+
+`docs/` 下新增 8 个 v0.22 设计文档（v1 保留 + v2 配套 v3 修订）：
+
+- `docs/roadmap/v0.22.0-role-injection-overhaul.md`（v3 路线图，本文档的源头）
+- `docs/moa-role-injection-design.md`（注入矩阵主总览 v3）
+- `docs/moa-role-design-philosophy.md` + `-v2.md`（6 角色设计哲学 v1 保留 + v2 修订）
+- `docs/planner-system-prompt.md` + `-v2.md`（Planner 完整提示词 v1 + v2）
+- `docs/moa-role-customization-blueprint.md` + `-v2.md`（用户自定义蓝图 v1 + v2）
+
+### Changed — 配置项与命令总数
+
+- **新增 12 个配置项**（见 package.json `contributes.configuration`）：4 项 Planner + 3 项 Recon Aggregator + 2 项 Plan Mode Report + 2 项 final.md inline + 2 项 Role Setup（activePreset + aiGeneration）
+- **新增 11 个命令**：见上文 P0-7/8/10/11 各章节
+- **package.json version**：`0.21.3` → `0.22.0`
+
+### Compatibility — v0.21.x 用户升级路径
+
+- `moa.enablePlannerIteration = false` → 回退到 v0.21.x 单次 Planner 模式
+- `moa.plannerMaxIterations = 1` → 单次模式（不进入 mini-loop）
+- `moa.reconAggregatorMaxIterations = 1`（默认）→ 不启用评分阈值
+- 老用户升级后**不强制**使用 role_setup（Planner 可选输出，缺失时 Recon/Actor 用 v0.21.x 静态 prompt fallback）
+- Role Setup Preset 首次启动时自动创建 `~/.moa/role-setup-presets.json` 含 `default` 预设
+
+### Deferred — 推后到 v0.23+
+
+按路线图 §5 P3 章节，以下功能推后：
+
+- **可视化**（MoA Webview Panel / 任务历史 / Pipeline 编辑器）— 原 v0.22 计划，因架构改造优先级更高而推后
+- **持久记忆系统**（Planner 读取历史任务 role_setup 复用）
+- **多模态**（ENV_CONTEXT 支持图像）
+- **主动 skill 推荐**（基于历史频率）
+- **跨任务知识图谱**
+
+### Known Gaps — 非硬门槛未完成项（按路线图 §8 验收）
+
+以下 P1 / P2 任务**未在 v0.22.0 完成**，将在 v0.22.x patch / v0.23 补齐：
+
+- **P1-1** `.moa_cache` 结构扩展（planner/ 子目录 + iteration_N/recon/ 子目录）
+- **P1-2** OutputChannel Planner mini-loop 迭代日志
+- **P1-3** meta.json pipeline_architecture 字段扩展
+- **P2-1** 新增单元测试（systemContext / instructionScanner / runPlanner mini-loop / roles schema）
+- **P2-2** e2e 测试 7 场景（多语言 / 单 Recon / 多 Recon / ask_user 触发等）
+- **P2-3** README / ARCHITECTURE / CONFIGURATION 文档全面更新（v0.22 章节）— 本 CHANGELOG 已涵盖关键变更
+
+**当前测试基线**：34/34 通过（与 v0.21.3 持平，未新增测试）。
+
+---
+
 ## [0.21.3] - 2026-07-21
 
 ### Changed — 默认值全面调整（用户原话 2026-07-21：让新用户装完即用）

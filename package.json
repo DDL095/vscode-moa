@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.21.3",
+  "version": "0.22.0",
 
   "publisher": "dudali095",
   "license": "MIT",
@@ -157,6 +157,72 @@
         "title": "MoA: Cleanup All Tasks (High Risk)",
         "category": "MoA",
         "description": "v0.19.1: Remove ALL MoA task caches (all workspaces). High-risk operation, requires explicit confirmation. Useful for full reset."
+      },
+      {
+        "command": "moa.diagnoseEnvironment",
+        "title": "MoA: Diagnose Environment (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0: Run 12 environment checks (active editor / open docs / workspace / project tree / git root / instruction files / skill folders / LM tools / LM models / active preset / role preset / entry type). Outputs a Markdown report to an untitled document and the 'MoA Environment Diagnostics' OutputChannel."
+      },
+      {
+        "command": "moa.createRolePreset",
+        "title": "MoA: Create Role Preset (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-7: Create a new role setup preset. Based on default, opens untitled editor for customization. Persisted to ~/.moa/role-setup-presets.json (global, survives workspace changes)."
+      },
+      {
+        "command": "moa.switchRolePreset",
+        "title": "MoA: Switch Role Preset (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-7: QuickPick to switch the active role setup preset. Active preset determines the role_setup injected into Recon / Recon Aggregator / Actor prompts."
+      },
+      {
+        "command": "moa.editRolePreset",
+        "title": "MoA: Edit Role Preset (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-7: Open existing role setup preset in untitled JSON editor. On save (ctrl+s), validates schema and applies or shows IDE-style error keeping the buffer open."
+      },
+      {
+        "command": "moa.deleteRolePreset",
+        "title": "MoA: Delete Role Preset (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-7: Delete a non-default role setup preset. Default preset cannot be deleted (users customize it instead). Active preset cannot be deleted (switch first)."
+      },
+      {
+        "command": "moa.exportRolePreset",
+        "title": "MoA: Export Role Preset (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-7: Export one or all role setup presets to a JSON file. Useful for community sharing."
+      },
+      {
+        "command": "moa.importRolePreset",
+        "title": "MoA: Import Role Preset (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-7: Import role setup presets from a JSON file. Existing presets are skipped (not overwritten)."
+      },
+      {
+        "command": "moa.toggleAIGeneration",
+        "title": "MoA: Toggle AI Generation (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-7: Cycle the 3-layer AI generation switch (enabled / autoAccept / confirmationUI)."
+      },
+      {
+        "command": "moa.togglePlanModeReport",
+        "title": "MoA: Toggle Plan Mode Report (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-8: Toggle Plan Mode report display. When enabled, Planner mini-loop convergence triggers a vscode-style report (4 fields only — no token estimation)."
+      },
+      {
+        "command": "moa.showPlanModeReport",
+        "title": "MoA: Show Last Plan Mode Report (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-8: Open the last Plan Mode report as an untitled Markdown document."
+      },
+      {
+        "command": "moa.toggleFinalMdInlineDisplay",
+        "title": "MoA: Toggle final.md Inline Display (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0 P0-10: Cycle the final.md inline display mode (full / summary / structured-summary / off)."
       }
     ],
     "languageModelTools": [
@@ -444,6 +510,13 @@
           "description": "Fan out Recon agents in parallel when preset.reconModels has 2+ models. When true (default), all recon agents run simultaneously → wall-clock time = slowest. When false, or when only 1 recon model is configured, runs sequentially (single-model mode) and Recon Aggregator is auto-disabled. Parallel recon produces N independent results that are merged by Recon Aggregator (pure LLM integration, no tool calls) into a single summary before injecting to Refs.\n\n---\n\n当 preset.reconModels 有 2+ 个模型时并行扇出 Recon 代理。**true**（默认）= 所有 recon 代理同时运行，wall-clock = 最慢者。**false** 或只配置了 1 个 recon 模型时，串行运行（单模型模式），Recon Aggregator 自动禁用。并行 recon 产生 N 个独立结果，由 Recon Aggregator（纯 LLM 整合，无工具调用）合并成单一 summary 后注入 Refs。",
           "order": 20
         },
+        "moa.reconAggregatorMode": {
+          "type": "string",
+          "enum": ["default", "planner"],
+          "default": "default",
+          "description": "v0.22.0 P0-4: Recon Aggregator role setup source. 'default' = built-in static prompt (v0.18.0 behavior); 'planner' = use Planner's role_setup.recon_aggregator (tone/perspective/focus). When 'planner' is selected but Planner hasn't produced role_setup yet (e.g. P0-1 not yet implemented), falls back to 'default' automatically.\n\n---\n\nv0.22.0 P0-4:Recon Aggregator 角色设定来源。'default'(默认)= 内置静态 prompt(v0.18.0 行为);'planner' = 使用 Planner 给的 role_setup.recon_aggregator(tone/perspective/focus)。当选择 'planner' 但 Planner 还未输出 role_setup 时(如 P0-1 未实施),自动 fallback 到 'default'。",
+          "order": 21
+        },
         "moa.presets": {
           "type": "object",
           "default": {},
@@ -697,6 +770,124 @@
             }
           },
           "order": 19
+        },
+        "moa.enablePlannerIteration": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "%moa.config.enablePlannerIteration%",
+          "description": "v0.22.0 P0-1: Planner mini-loop 开关。true（默认）= mini-loop（默认 5 次，plan_coverage 0.9 收敛）；false = v0.21.x 单次模式。",
+          "order": 20
+        },
+        "moa.plannerMaxIterations": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 20,
+          "markdownDescription": "%moa.config.plannerMaxIterations%",
+          "description": "v0.22.0 P0-1: Planner mini-loop 最大迭代数。绝对上限 20（防无限循环）。",
+          "order": 20.1
+        },
+        "moa.plannerCoverageThreshold": {
+          "type": "number",
+          "default": 0.9,
+          "minimum": 0.5,
+          "maximum": 1.0,
+          "markdownDescription": "%moa.config.plannerCoverageThreshold%",
+          "description": "v0.22.0 P0-1: Planner mini-loop 收敛阈值。plan_coverage >= 此值且 needs_replan=false 时收敛。",
+          "order": 20.2
+        },
+        "moa.plannerAllowTools": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "%moa.config.plannerAllowTools%",
+          "description": "v0.22.0 P0-1: iter 1+ 是否允许 Planner 调 read-only 工具（含 web_search 仅限概念澄清）。",
+          "order": 20.3
+        },
+        "moa.reconAggregatorMaxIterations": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 10,
+          "markdownDescription": "%moa.config.reconAggregatorMaxIterations%",
+          "description": "v0.22.0 P0-9: Recon Aggregator 自迭代最大次数。>1 时启用 0.85 评分阈值收敛。",
+          "order": 21
+        },
+        "moa.reconAggregatorScoreThreshold": {
+          "type": "number",
+          "default": 0.85,
+          "minimum": 0.5,
+          "maximum": 1.0,
+          "markdownDescription": "%moa.config.reconAggregatorScoreThreshold%",
+          "description": "v0.22.0 P0-9: Recon Aggregator 自迭代评分阈值。仅在 maxIterations > 1 时生效。",
+          "order": 21.1
+        },
+        "moa.planModeReport.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "%moa.config.planModeReport%",
+          "description": "v0.22.0 P0-8: Plan Mode 报告开关。Planner mini-loop 收敛后触发 vscode 风格展示（仅 4 字段，无 token 估算）。",
+          "order": 22
+        },
+        "moa.finalMdInlineDisplay": {
+          "type": "string",
+          "enum": [
+            "full",
+            "summary",
+            "structured-summary",
+            "off"
+          ],
+          "default": "structured-summary",
+          "markdownDescription": "%moa.config.finalMdInlineDisplay%",
+          "description": "v0.22.0 P0-10: final.md 在主会话中的内嵌展示模式。structured-summary（默认）= TL;DR + 关键发现 top 5 + action_items 表。",
+          "order": 23
+        },
+        "moa.finalMdInlineThresholds": {
+          "type": "object",
+          "markdownDescription": "%moa.config.finalMdInlineThresholds%",
+          "description": "v0.22.0 P0-10: 分级展示的字符数阈值。full = <full 字符时完整内嵌；summary = <summary 字符时摘要；>= summary 时结构化摘要。",
+          "properties": {
+            "full": {
+              "type": "number",
+              "default": 2000,
+              "minimum": 100,
+              "maximum": 100000
+            },
+            "summary": {
+              "type": "number",
+              "default": 8000,
+              "minimum": 500,
+              "maximum": 200000
+            }
+          },
+          "order": 23.1
+        },
+        "moa.roleSetup.activePreset": {
+          "type": "string",
+          "default": "default",
+          "markdownDescription": "%moa.config.roleSetupActivePreset%",
+          "description": "v0.22.0 P0-7: 当前激活的 Role Preset 名称。从 ~/.moa/role-setup-presets.json 加载。",
+          "order": 24
+        },
+        "moa.roleSetup.aiGeneration": {
+          "type": "object",
+          "markdownDescription": "%moa.config.roleSetupAIGeneration%",
+          "description": "v0.22.0 P0-7: AI 生成开关 3 层。enabled = 是否启用；autoAccept = 是否跳过 plan-mode 确认；confirmationUI = 确认 UI 类型。",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "autoAccept": {
+              "type": "boolean",
+              "default": false
+            },
+            "confirmationUI": {
+              "type": "string",
+              "enum": ["plan-mode", "inline-preview", "none"],
+              "default": "plan-mode"
+            }
+          },
+          "order": 24.1
         }
       }
     }

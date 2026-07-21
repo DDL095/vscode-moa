@@ -26,6 +26,7 @@ import {
   ReconReason,
   ReconResult,
   PlannerOutput,
+  ReconAggregatorRoleSetup,
 } from './roles';
 import { getActivePresetConfig } from '../presetConfig';
 import { runReconAgent } from '../actingAgent';
@@ -215,8 +216,49 @@ function buildReconAggregatorPrompt(params: {
   iteration: number;
   reason: ReconReason;
   reconResults: Array<{ label: string; model: string; summary: string }>;
+  /**
+   * v0.22.0 P0-4: Planner 驱动模式下的 role_setup。
+   * - undefined(默认) → 走内置静态 prompt(default 模式)
+   * - 提供            → 拼到 system prompt 开头(planner 模式)
+   *
+   * 双轨制由配置项 moa.reconAggregatorMode 控制,callRecon 调用方根据
+   * mode 决定是否传入 roleSetup。
+   */
+  roleSetup?: ReconAggregatorRoleSetup;
+  /**
+   * v0.22.0 P0-9: 自迭代时,把上一轮的整合结果注入,供模型"在上一轮基础上改进"。
+   * undefined → 单次模式(默认)
+   */
+  previousSummary?: string;
+  /** v0.22.0 P0-9: 当前自迭代号(从 1 开始),显示在 prompt 头部供模型感知。 */
+  iterationNumber?: number;
 }): { system: string; user: string } {
-  const { task, iteration, reason, reconResults } = params;
+  const { task, iteration, reason, reconResults, roleSetup, previousSummary, iterationNumber } = params;
+
+  // v0.22.0 P0-4: 双轨制 — roleSetup 非空时,把 Planner 定制的 tone/perspective/focus
+  //                拼到 system prompt 开头
+  const roleSetupBlock: string[] = [];
+  if (roleSetup) {
+    roleSetupBlock.push('=== ROLE SETUP (Planner 定制) ===');
+    if (roleSetup.tone) {
+      const toneLabel: Record<NonNullable<ReconAggregatorRoleSetup['tone']>, string> = {
+        'faithful-integrator': '忠实整合(默认):保留原证据,做去重/排序/识别与保留冲突',
+        'strict-evidence': '严谨证据:严格保留所有数字/引用/关键句,不做任何整合性推理',
+        'creative-explorer': '创造探索:鼓励识别跨 recon 的隐性主题',
+        'conservative': '保守模式:仅做最小去重,尽量保留原文',
+      };
+      roleSetupBlock.push(`Tone: ${roleSetup.tone} — ${toneLabel[roleSetup.tone] ?? ''}`);
+    }
+    if (roleSetup.perspective) {
+      roleSetupBlock.push(`Perspective: ${roleSetup.perspective}`);
+    }
+    if (roleSetup.focus && roleSetup.focus.length > 0) {
+      roleSetupBlock.push(`Focus: ${roleSetup.focus.join(' / ')}`);
+    }
+    roleSetupBlock.push('');
+    roleSetupBlock.push('(以上是 Planner 根据任务属性定制的整合风格,优先尊重;若与下方默认原则冲突,以定制为准)');
+    roleSetupBlock.push('');
+  }
 
   const system = [
     '你是 MoA 流水线的 Recon Aggregator（侦察整合者）—— 一个 agent 化的整合者。',
@@ -226,14 +268,17 @@ function buildReconAggregatorPrompt(params: {
     '把 N 个并行 Recon agent 的结果**整合成一份完整的 summary**，',
     '注入下游 Refs/Aggregator 作为 evidence。',
     '',
-    '## 整合原则（重要）',
+    '## 整合原则（v0.22.0 P0-4 v2 — 对齐用户"识别与保留冲突"哲学）',
     '',
-    '**完整无偏差**：',
+    '**完整无偏差 + 识别与保留冲突**：',
     '- 保留所有证据（不丢、不删减）',
     '- 去重：完全相同的内容只保留一份（标注多个来源）',
-    '- 整合：相关主题的内容合并到同一节，避免散落',
     '- 排序：按对任务的相关性排序（最相关的放前面）',
     '- 标注来源：每条证据标注 [from <label>]（如 [from recon_1]）',
+    '- **识别与保留冲突**：多 Recon 间说法不一致时,**保留两边** + 标注 "[冲突] A vs B"',
+    '  (不要强行"消歧"——冲突是 Refs 分析的重要素材,Refs 自己决定哪边更可信)',
+    '- **缺口识别**：所有 recon 都没覆盖的主题,显式列出 "[缺口] X 主题未查"',
+    '- **证据质量分级**：每条证据标注 [high/medium/low] confidence(基于来源权威性)',
     '',
     '## 工具使用（严格限制）',
     '',
@@ -260,6 +305,7 @@ function buildReconAggregatorPrompt(params: {
     '- ❌ 不要补 gap（gap 是下一轮 Recon 的事）',
     '- ❌ 不要做分析（分析是 Refs 的事）',
     '- ❌ 不要总结成 brief（Refs 需要完整内容做 grounded analysis）',
+    '- ❌ 不要强行消歧(冲突留给 Refs 判断)',
     '',
     '你的角色是**搬运工 + 整理者 + 查证者**，不是分析师，也不是侦察员。',
     '把 N 份原料整理成一份完整、无偏差、易读的原料库。',
@@ -269,30 +315,35 @@ function buildReconAggregatorPrompt(params: {
     '```',
     '## Recon 综合摘要 (iteration {N}, merged from {M} sources)',
     '',
-    '<整合后的完整证据，按主题/相关性分节>',
+    '<整合后的完整证据,按主题/相关性分节,每条带 confidence 标注>',
     '',
     '### 主题 1',
     '',
-    '- 证据点 A (来源: [from recon_1], [from recon_2])',
+    '- 证据点 A [high] (来源: [from recon_1], [from recon_2])',
     '  <完整内容>',
-    '- 证据点 B (来源: [from recon_2])',
+    '- 证据点 B [medium] (来源: [from recon_2])',
     '  <完整内容>',
     '',
     '### 主题 2',
     '',
     '...',
     '',
-    '## 冲突点（如适用）',
+    '## 冲突点(保留,不消歧)',
     '',
-    '- <recon_1 说 X，recon_2 说 Y>（如已查证，标注查证结果；否则让下游 Refs 判断）',
+    '- [冲突] recon_1 说 X,recon_2 说 Y(让下游 Refs 判断)',
     '',
-    '## 全局缺失（如适用）',
+    '## 全局缺口(识别但保留)',
     '',
-    '- <所有 recon 都没查到的>（让 Aggregator 标记为 critical_gap）',
+    '- [缺口] <所有 recon 都没查到的>(让 Aggregator 标记为 critical_gap)',
     '```',
     '',
     '匹配任务语言（中文任务 → 中文输出）。',
   ].join('\n');
+
+  // v0.22.0 P0-4: 拼装最终 system — roleSetup 非空时拼到开头,否则直接用默认 system
+  const finalSystem = roleSetupBlock.length > 0
+    ? roleSetupBlock.join('\n') + '\n' + system
+    : system;
 
   const userParts: string[] = [
     '### 任务',
@@ -313,10 +364,25 @@ function buildReconAggregatorPrompt(params: {
     userParts.push('');
   }
 
-  userParts.push('请按整合原则处理：完整无偏差、去重、整合、排序、标注来源。');
+  userParts.push('请按整合原则处理:完整无偏差、去重、排序、识别与保留冲突、缺口识别、证据质量分级。');
   userParts.push('如需查证已有引用的细节，可调工具；但禁止重新做侦察。');
 
-  return { system, user: userParts.join('\n') };
+  // v0.22.0 P0-9: 自迭代时,把上一轮 summary 注入,让模型在基础上改进
+  if (previousSummary && iterationNumber && iterationNumber > 1) {
+    userParts.push('');
+    userParts.push(`## 上一轮整合结果(iter ${iterationNumber - 1})`);
+    userParts.push('');
+    userParts.push('请基于上一轮结果改进:');
+    userParts.push('- 保留所有原始证据(完整无偏差)');
+    userParts.push('- 修正整合不充分的地方(去重、排序、缺口识别)');
+    userParts.push('- 显式标注与上一轮的差异');
+    userParts.push('');
+    userParts.push('```');
+    userParts.push(previousSummary.slice(0, 6000));  // 截断防爆 token
+    userParts.push('```');
+  }
+
+  return { system: finalSystem, user: userParts.join('\n') };
 }
 
 /**
@@ -324,6 +390,11 @@ function buildReconAggregatorPrompt(params: {
  *
  * v0.18.0: 改用 runActingAgent（full 工具），而非纯 LLM 调用。
  * 工具用途由 prompt 严格约束（查证 vs 侦察）。
+ *
+ * v0.22.0 P0-4: 新增可选 roleSetup 参数,实现双轨制:
+ *   - moa.reconAggregatorMode='default'(默认) → roleSetup=undefined,走内置 prompt
+ *   - moa.reconAggregatorMode='planner'        → roleSetup 来自 Planner 的 role_setup.recon_aggregator
+ *   P0-1 落地后,callRecon 调用方会根据 PlannerOutput 决定是否传入。
  */
 async function callReconAggregator(
   params: {
@@ -331,57 +402,126 @@ async function callReconAggregator(
     iteration: number;
     reason: ReconReason;
     reconResults: ParallelReconResult[];
+    /** v0.22.0 P0-4: Planner 驱动模式下的 role_setup(可选) */
+    roleSetup?: ReconAggregatorRoleSetup;
   },
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,
   toolInvocationToken?: vscode.ChatParticipantToolToken
-): Promise<{ summary: string; model: string; elapsed_sec: number; tool_calls: number }> {
+): Promise<{
+  summary: string;
+  model: string;
+  elapsed_sec: number;
+  tool_calls: number;
+  /** v0.22.0 P0-9: 自迭代次数(默认 1,max 10) */
+  iterationsRun: number;
+  /** v0.22.0 P0-9: 聚合度评分(0-1,仅 >1 次时计算) */
+  aggregationScore?: number;
+  /** v0.22.0 P0-9: 忠诚度评分(0-1,仅 >1 次时计算) */
+  fidelityScore?: number;
+}> {
   const start = Date.now();
   const model = await resolveReconAggregatorModel();
-  progress?.(`[MoA Recon Aggregator] merging ${params.reconResults.length} recon results with ${model.name} (agent mode)...`);
+  progress?.(`[MoA Recon Aggregator] merging ${params.reconResults.length} recon results with ${model.name} (agent mode${params.roleSetup ? ', planner-driven' : ''})...`);
 
-  const { system, user } = buildReconAggregatorPrompt({
-    task: params.task,
-    iteration: params.iteration,
-    reason: params.reason,
-    reconResults: params.reconResults.map((r) => ({
-      label: r.label,
-      model: r.model,
-      summary: r.result.summary,
-    })),
-  });
+  // v0.22.0 P0-9: 读取自迭代配置 + 收敛阈值(仅 maxIterations>1 时启用评分)
+  const cfg = vscode.workspace.getConfiguration('moa');
+  const maxIters = Math.min(10, Math.max(1, cfg.get<number>('reconAggregatorMaxIterations') ?? 1));
+  const scoreThreshold = cfg.get<number>('reconAggregatorScoreThreshold') ?? 0.85;
+  const useScoring = maxIters > 1;
 
-  // v0.18.0: 用 runActingAgent（full 工具，agent 化）
-  //   - readOnly: false（允许 write，如写 recon_merged.md）
-  //   - captureToolResults: true（审计工具调用）
-  //   - 工具用途由 system prompt 约束（查证 vs 侦察）
-  const { runActingAgent } = await import('../actingAgent');
-  const agentResult = await runActingAgent(
-    model,
-    system,                         // 作为 aggregator guidance（acting agent 会拼到 prompt 里）
-    user,                           // 作为 user prompt
-    toolInvocationToken,
-    createProgressOnlyStream((msg) => progress?.(`[MoA Recon Aggregator] ${msg}`)),
-    token,
-    {
-      // 不传 systemPrompt（用 guidance 参数承载 system 内容）
-      // runActingAgent 会把 guidance + userPrompt 组合成完整 prompt
-      readOnly: false,              // 允许 write（写 recon_merged.md 等）
-      maxIterations: 15,            // 整合通常不需要太多工具调用
-      progressPrefix: 'MoA Recon Aggregator',
-      captureToolResults: true,
+  let bestSummary = '';
+  let bestAggregationScore = 0;
+  let bestFidelityScore = 0;
+  let iterationsRun = 0;
+  let totalToolCalls = 0;
+
+  for (let iter = 1; iter <= maxIters; iter++) {
+    iterationsRun = iter;
+    if (token.isCancellationRequested) {
+      progress?.(`[MoA Recon Aggregator] cancelled at iteration ${iter}`);
+      break;
     }
-  );
+
+    const { system, user } = buildReconAggregatorPrompt({
+      task: params.task,
+      iteration: params.iteration,
+      reason: params.reason,
+      reconResults: params.reconResults.map((r) => ({
+        label: r.label,
+        model: r.model,
+        summary: r.result.summary,
+      })),
+      roleSetup: params.roleSetup,
+      // v0.22.0 P0-9: 自迭代时,把上一轮的 summary 也注入 prompt
+      previousSummary: iter > 1 ? bestSummary : undefined,
+      iterationNumber: iter,
+    });
+
+    const { runActingAgent } = await import('../actingAgent');
+    const agentResult = await runActingAgent(
+      model,
+      system,
+      user,
+      toolInvocationToken,
+      createProgressOnlyStream((msg) => progress?.(`[MoA Recon Aggregator] ${msg}`)),
+      token,
+      {
+        readOnly: false,
+        maxIterations: 15,
+        progressPrefix: 'MoA Recon Aggregator',
+        captureToolResults: true,
+      }
+    );
+    totalToolCalls += agentResult.capturedToolCalls?.length ?? 0;
+    const candidateSummary = agentResult.output;
+    progress?.(`[MoA Recon Aggregator] iter ${iter}/${maxIters} done (${candidateSummary.length} chars)`);
+
+    if (!useScoring) {
+      // 单次模式：直接返回,不需要评分
+      bestSummary = candidateSummary;
+      break;
+    }
+
+    // >1 次模式：评分 + 收敛判定
+    const scores = scoreAggregation(candidateSummary, params.reconResults, iter);
+    progress?.(
+      `[MoA Recon Aggregator] iter ${iter} scores: ` +
+      `aggregation=${scores.aggregation.toFixed(2)}, ` +
+      `fidelity=${scores.fidelity.toFixed(2)}, ` +
+      `min=${Math.min(scores.aggregation, scores.fidelity).toFixed(2)}`
+    );
+
+    if (scores.aggregation > bestAggregationScore) {
+      bestAggregationScore = scores.aggregation;
+      bestFidelityScore = scores.fidelity;
+      bestSummary = candidateSummary;
+    }
+
+    const minScore = Math.min(scores.aggregation, scores.fidelity);
+    if (minScore >= scoreThreshold) {
+      progress?.(`[MoA Recon Aggregator] CONVERGED at iter ${iter} (min=${minScore.toFixed(2)} >= ${scoreThreshold})`);
+      break;
+    }
+    if (iter === maxIters) {
+      progress?.(`[MoA Recon Aggregator] reached maxIterations=${maxIters}, using best (min=${minScore.toFixed(2)})`);
+    }
+  }
 
   const elapsed = (Date.now() - start) / 1000;
-  const toolCalls = agentResult.capturedToolCalls?.length ?? 0;
-  progress?.(`[MoA Recon Aggregator] done in ${elapsed.toFixed(1)}s, ${toolCalls} tool calls, ${agentResult.output.length} chars merged`);
+  progress?.(
+    `[MoA Recon Aggregator] done in ${elapsed.toFixed(1)}s, ${iterationsRun} iter(s), ` +
+    `${totalToolCalls} tool calls, ${bestSummary.length} chars merged`
+  );
 
   return {
-    summary: agentResult.output,
+    summary: bestSummary,
     model: model.name,
     elapsed_sec: elapsed,
-    tool_calls: toolCalls,
+    tool_calls: totalToolCalls,
+    iterationsRun,
+    aggregationScore: useScoring ? bestAggregationScore : undefined,
+    fidelityScore: useScoring ? bestFidelityScore : undefined,
   };
 }
 
@@ -411,6 +551,24 @@ export async function callRecon(
     actorLog?: string;
     evidenceBrief: string;
     iteration: number;
+    /**
+     * v0.22.0 P0-4: Recon Aggregator 的 role_setup(可选,Planner 驱动模式)。
+     *
+     * 启用条件:moa.reconAggregatorMode='planner'(默认 'default')。
+     * 调用方(moaOrchestrator.ts)负责根据配置项 + Planner 输出决定是否传入。
+     * P0-4 阶段 PlannerOutput 还没有 role_setup 字段,P0-1 实施后才会真正传入。
+     */
+    reconAggregatorRoleSetup?: ReconAggregatorRoleSetup;
+    /**
+     * v0.22.0 P0-5: 基础设施层注入文本(由 systemContext.renderForRole('recon') 生成)。
+     * 调用方缓存复用,空字符串时退化为 v0.21.x 行为。
+     */
+    systemContextText?: string;
+    /**
+     * v0.22.0 P0-5: Recon 角色身份层注入文本(Planner 的 role_setup.recon 渲染)。
+     * P0-1 实施后由调用方构建。
+     */
+    roleSetupText?: string;
   },
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,
@@ -419,19 +577,40 @@ export async function callRecon(
 ): Promise<CallReconResult> {
   const resolvedModels = await resolveAllReconModels();
 
-  // 读取并行开关
+  // 读取并行开关 + v0.22.0 P0-4: Recon Aggregator 模式开关
   const config = vscode.workspace.getConfiguration('moa');
   const parallelRecon = config.get<boolean>('parallelRecon') ?? true;
+  const reconAggregatorMode = config.get<'default' | 'planner'>('reconAggregatorMode') ?? 'default';
 
   // 决策：并行 or 单模型
   //   v0.18.0 方案 B：无论几个模型，都过 Aggregator（保证下游格式一致）
+  //   v0.22.0 P0-4: 即使单 Recon 也跑 Aggregator(已由 v0.18.0 方案 B 实现),
+  //                 本版本新增"始终落盘原始 Recon 产出"(由 moaOrchestrator 负责)
   //   区别仅在于：
   //     - 单模式：只跑 1 个 recon → Aggregator 整理（去噪、标准化格式）
   //     - 并行模式：跑 N 个 recon → Aggregator 去重、整合、标注来源
   const shouldParallel = parallelRecon && resolvedModels.length >= 2;
 
+  // v0.22.0 P0-4: 根据 mode 决定是否使用 Planner 提供的 role_setup
+  //   default 模式 → 不传(走内置 prompt)
+  //   planner 模式 → 透传调用方提供的 roleSetup(P0-1 实施后才有值)
+  const effectiveRoleSetup = reconAggregatorMode === 'planner'
+    ? params.reconAggregatorRoleSetup
+    : undefined;
+
   // ── 阶段 1：跑 Recon agent(s) ──
-  const { system, user } = buildReconPrompt(params);
+  // v0.22.0 P0-5: 透传 systemContextText + roleSetupText 给 buildReconPrompt
+  const { system, user } = buildReconPrompt({
+    userPrompt: params.userPrompt,
+    planner: params.planner,
+    reason: params.reason,
+    gaps: params.gaps,
+    actorLog: params.actorLog,
+    evidenceBrief: params.evidenceBrief,
+    iteration: params.iteration,
+    systemContextText: params.systemContextText,
+    roleSetupText: params.roleSetupText,
+  });
 
   let parallelResults: ParallelReconResult[];
   if (shouldParallel) {
@@ -519,6 +698,7 @@ export async function callRecon(
       iteration: params.iteration,
       reason: params.reason,
       reconResults: parallelResults,
+      roleSetup: effectiveRoleSetup,
     }, token, progress, toolInvocationToken);
     mergedSummary = aggResult.summary;
     aggregatorModelName = aggResult.model;
@@ -572,6 +752,10 @@ async function runSingleRecon(
     actorLog?: string;
     evidenceBrief: string;
     iteration: number;
+    /** v0.22.0 P0-5: 仅在 fallback 路径(customSystem/customUser 未传)生效 */
+    systemContextText?: string;
+    /** v0.22.0 P0-5: 同上 */
+    roleSetupText?: string;
   },
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,
@@ -667,3 +851,102 @@ function createProgressOnlyStream(
   };
   return shim as unknown as vscode.ChatResponseStream;
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.22.0 P0-9: Recon Aggregator 评分（aggregation + fidelity）
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 启发式评分：评估 Aggregator 输出的两个维度。
+ *
+ * 设计依据：
+ *   - aggregationScore: 评估 Aggregator 是否充分整合多个 recon 输出
+ *     （不简单拼接 = 把多份都提到；不过度归纳 = 没删关键证据）
+ *   - fidelityScore: 评估 Aggregator 是否忠实保留原始 recon 的证据
+ *     （关键词覆盖率 = 原 recon 中的事实/数字/引用在 aggregator 输出中出现比例）
+ *
+ * 注意：这是启发式（heuristic），不是 LLM-judge。优点：
+ *   - 0 额外 LLM 调用（节省 token）
+ *   - 确定性（同一输入永远得同一分数，便于回归测试）
+ * 缺点：
+ *   - 不评估"语义正确性"
+ *   - 长 summary 自然得分高（长度偏差）
+ *   - 仅用于"是否要再迭代一次"的粗筛
+ *
+ * 调用方（P0-9 mini-loop）：仅当 maxIterations > 1 时调用。
+ */
+function scoreAggregation(
+  summary: string,
+  reconResults: ParallelReconResult[],
+  iter: number
+): { aggregation: number; fidelity: number } {
+  if (!summary || summary.length < 50) {
+    return { aggregation: 0, fidelity: 0 };
+  }
+
+  const summaryLower = summary.toLowerCase();
+
+  // ── 聚合度（aggregation）──
+  //   启发：检查是否每个原始 recon 的"实质性内容"都被吸收。
+  //   用最长的 50 个字符 window 作为"签名"，看 aggregator 输出是否包含这些签名。
+  let totalSigs = 0;
+  let matchedSigs = 0;
+  for (const r of reconResults) {
+    const raw = r.result.summary || '';
+    if (!raw) continue;
+    // 取每份 recon 的前 50 个非空字符作为签名
+    const sig = raw.slice(0, 50).trim().toLowerCase();
+    if (sig.length < 10) continue;
+    totalSigs++;
+    if (summaryLower.includes(sig.slice(0, 30))) {
+      matchedSigs++;
+    }
+  }
+  const aggregation = totalSigs > 0 ? matchedSigs / totalSigs : 0;
+
+  // ── 忠诚度（fidelity）──
+  //   启发：从每个 recon 抽取 5 个关键词（>= 3 字），看 aggregator 覆盖率
+  let totalKeywords = 0;
+  let matchedKeywords = 0;
+  for (const r of reconResults) {
+    const raw = r.result.summary || '';
+    if (!raw) continue;
+    // 抽取高频"内容词"（>= 4 字的英文/中文 token，跳过停用词）
+    const tokens = (raw.match(/[\u4e00-\u9fa5]{2,8}|[a-zA-Z]{4,}/g) ?? [])
+      .filter((t) => !STOPWORDS.has(t.toLowerCase()))
+      .slice(0, 20);
+    const uniqKeywords = Array.from(new Set(tokens)).slice(0, 5);
+    for (const kw of uniqKeywords) {
+      totalKeywords++;
+      if (summaryLower.includes(kw.toLowerCase())) {
+        matchedKeywords++;
+      }
+    }
+  }
+  const fidelity = totalKeywords > 0 ? matchedKeywords / totalKeywords : 0;
+
+  // ── 长度惩罚：避免"越长越好"导致的过度迭代 ──
+  const avgRawLen =
+    reconResults.reduce((sum, r) => sum + (r.result.summary?.length ?? 0), 0) /
+    Math.max(1, reconResults.length);
+  const lengthRatio = summary.length / Math.max(1, avgRawLen);
+  // summary 比原始还长 < 1.5x 加分，> 3x 视为可能过度展开
+  const lengthBonus =
+    lengthRatio < 1.5 ? 0.05 : lengthRatio > 3 ? -0.05 : 0;
+
+  return {
+    aggregation: Math.min(1.0, Math.max(0, aggregation + lengthBonus)),
+    fidelity: Math.min(1.0, Math.max(0, fidelity + lengthBonus)),
+  };
+}
+
+/** 评分用的英文停用词（避免常见词被当关键词）。 */
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had',
+  'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his',
+  'how', 'man', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'boy',
+  'did', 'its', 'let', 'put', 'say', 'she', 'too', 'use', 'with', 'this',
+  'that', 'from', 'have', 'they', 'which', 'their', 'there', 'these',
+  'those', 'would', 'could', 'should', 'about', 'because', 'them',
+  'then', 'than', 'when', 'what', 'where', 'will', 'your', 'into',
+]);

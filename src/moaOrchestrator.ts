@@ -57,6 +57,13 @@ import { callRecon } from './moaCore/runRecon';
 import { callActor } from './moaCore/runActor';
 import { resolveExecutionConfig } from './moaCore/safeExecutor';
 import { EXTENSION_VERSION } from './extension';
+
+// v0.22.0 P0-5: SystemContext builder(基础设施层 4 段动态注入)
+import { buildSystemContext, renderForRole, disposeSystemContext, type SystemContext } from './systemContext';
+// v0.22.0 P0-7: Role Setup Preset (角色身份层注入)
+import { getActivePreset, renderRoleSetup, renderFewShots } from './roleSetupPreset';
+// v0.22.0 P0-8: Plan Mode Report
+import { setLastPlanReport, type MoaPlanReport } from './planModeReport';
 // v0.15.0 hotfix 1: evidence 提取纯函数（独立文件便于单测）
 import { buildActorEvidence } from './moaCore/actorEvidence';
 // v0.21.0 I-2 / IV-1 / IV-4: 结构化日志 + 本地时间戳 + 自描述文件名 + pipeline 自描述
@@ -205,6 +212,61 @@ export interface MoaFinalOutput {
 const MAX_ITER = 12;                  // user-specified: 10-15 range, take middle
 const COMPLETENESS_THRESHOLD = 0.8;   // aggregator says ≥0.8 → can finalize
 const CONVERGENCE_WINDOW = 3;         // last N iterations checked for stall
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.22.0 P0-5: Per-task SystemContext cache (in-memory only, not serialized)
+//
+// 设计:
+//   - key = taskId
+//   - value = SystemContext(在 iter 1 构建,后续 iter 复用)
+//   - 任务 finalize/cancel 时清理(避免内存累积)
+//   - 不存到 state.json(避免 JSON 体积膨胀;每次新任务重建可接受)
+// ─────────────────────────────────────────────────────────────────────────
+const _systemContextCache = new Map<string, SystemContext>();
+
+/**
+ * 获取(或构建并缓存)指定任务的 SystemContext。
+ *
+ * - 首次调用(iter 1):构建 + 缓存
+ * - 后续调用:命中缓存
+ * - 任务结束:调用 clearTaskSystemContext(taskId) 清理
+ *
+ * 失败处理:构建失败时返回 undefined(上层退化为 v0.21.x 行为,不注入)。
+ */
+async function getOrBuildSystemContext(
+  taskId: string,
+  progress?: (msg: string) => void
+): Promise<SystemContext | undefined> {
+  const cached = _systemContextCache.get(taskId);
+  if (cached) return cached;
+
+  try {
+    const ctx = await buildSystemContext();
+    _systemContextCache.set(taskId, ctx);
+    progress?.(
+      `[MoA v0.22 P0-5] SystemContext built: ` +
+      `env=${ctx.sizes.envContext}b, toolEff=${ctx.sizes.toolEfficiency}b, ` +
+      `custom=${ctx.sizes.customInstructions}b (${ctx.instructionCount} files), ` +
+      `runtime=${ctx.sizes.runtimeInstructions}b (${ctx.skillCount} skills), ` +
+      `${ctx.scanDurationMs}ms`
+    );
+    if (ctx.warnings.length > 0) {
+      progress?.(`[MoA v0.22 P0-5] SystemContext warnings: ${ctx.warnings.length} (see OutputChannel)`);
+    }
+    return ctx;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    progress?.(`[MoA v0.22 P0-5] SystemContext build FAILED: ${msg} — falling back to v0.21.x behavior (no infrastructure injection)`);
+    return undefined;
+  }
+}
+
+/** 清理指定任务的 SystemContext 缓存(任务结束时调用)。 */
+function clearTaskSystemContext(taskId: string): void {
+  _systemContextCache.delete(taskId);
+  // 同时清理 instructionScanner 的 mtime 缓存
+  disposeSystemContext();
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // v0.17.0: 5 个独立的 OutputChannel（每个角色一个）
@@ -1315,7 +1377,11 @@ export async function runIteration(
   subagentResult: { content: string; source: string } | undefined,
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,
-  toolInvocationToken?: vscode.ChatParticipantToolToken
+  toolInvocationToken?: vscode.ChatParticipantToolToken,
+  options?: {
+    /** v0.22.0 P0-1: 入口类型（@moa/@moasingle/moa_analyze/moa_orchestrate） */
+    entryType?: string;
+  }
 ): Promise<MoaState> {
   const state = await loadState(taskId);
   if (!state) throw new Error('Task not found: ' + taskId);
@@ -1353,13 +1419,27 @@ export async function runIteration(
 
   // ═══════════════════════════════════════════════════════════════════════
   // 阶段 1：Planner（仅 iteration 0）
+  // v0.22.0 P0-1: 升级为 mini-loop + role_setup 输出
   // ═══════════════════════════════════════════════════════════════════════
   let plannerForRecon: PlannerOutput | undefined = state.planner;
   if (iterNum === 1) {
     progress?.(`[MoA Planner] running...`);
     // v0.19.2 §5.1: per-role 耗时记录
     const plannerStart = Date.now();
-    plannerForRecon = await callPlanner(state.task, token, progress);
+    // v0.22.0 P0-1: 获取 SystemContext(若任务首次启动,会构建并缓存)
+    //   Planner 自己也看 systemContext(基础设施层),用于消化工作环境
+    const plannerSysCtx = await getOrBuildSystemContext(taskId, progress);
+    const plannerSysCtxText = plannerSysCtx ? renderForRole(plannerSysCtx, 'planner') : undefined;
+    // v0.22.0 P0-1: 入口类型注入(从 options.entryType 读取,默认 '@moa' 兼容旧调用)
+    const plannerEntryType = options?.entryType ?? '@moa';
+    // v0.22.0 P0-7: 从 Role Setup Preset 加载 few-shot 示例(默认空字符串)
+    const activePreset = getActivePreset();
+    const fewShotsText = renderFewShots(activePreset);
+    plannerForRecon = await callPlanner(state.task, token, progress, {
+      entryType: plannerEntryType,
+      systemContextText: plannerSysCtxText,
+      fewShotsText,
+    });
     record.planner_elapsed_sec = (Date.now() - plannerStart) / 1000;
     state.planner = plannerForRecon;
     record.planner_output = plannerForRecon;
@@ -1442,6 +1522,9 @@ export async function runIteration(
 
     // v0.19.2 §5.1: per-role 耗时记录
     const reconStart = Date.now();
+    // v0.22.0 P0-5: 获取(或构建并缓存)SystemContext,渲染 Recon 可见的 4 段
+    const sysCtx = await getOrBuildSystemContext(taskId, progress);
+    const reconSysCtxText = sysCtx ? renderForRole(sysCtx, 'recon') : undefined;
     const callResult = await callRecon({
       userPrompt: state.task,
       planner: plannerForRecon,
@@ -1450,6 +1533,18 @@ export async function runIteration(
       actorLog,
       evidenceBrief,
       iteration: iterNum,
+      systemContextText: reconSysCtxText,
+      // v0.22.0 P0-7: role_setup 渲染为 roleSetupText 注入到 Recon
+      roleSetupText: plannerForRecon?.role_setup?.recon?.tone
+        ? renderRoleSetup({
+            tone: plannerForRecon.role_setup.recon.tone,
+            perspective: plannerForRecon.role_setup.recon.perspective ?? '',
+            tool_priority: plannerForRecon.role_setup.recon.tool_priority,
+            cautions: plannerForRecon.role_setup.recon.cautions,
+          })
+        : undefined,
+      // v0.22.0 P0-7: Planner 驱动模式下,透传 recon_aggregator role_setup
+      reconAggregatorRoleSetup: plannerForRecon?.role_setup?.recon_aggregator,
     }, token, progress, undefined, toolInvocationToken);
     record.recon_elapsed_sec = (Date.now() - reconStart) / 1000;
 
@@ -1458,33 +1553,33 @@ export async function runIteration(
     //
     // 落盘约定：
     //   - iteration_NNN/recon_result.json  始终写，是 Aggregator 整合后的 summary
-    //   - iteration_NNN/recon/<label>.json 仅并行模式写，保留每个并行 recon 的细节
+    //   - iteration_NNN/recon/<label>.json v0.22.0 P0-4: 始终写(无论单/并行模式)
+    //     用户原话:"原始的 recon capture 也应该落盘,因此到底什么情况,也可以复盘查询"
     reconResult = callResult.merged;
 
-    // 并行模式：落盘每个 recon 的细节 + 写 OutputChannel
-    if (callResult.mode === 'parallel') {
-      for (const r of callResult.results) {
-        await saveIterationArtifact(taskId, iterNum, `recon/${r.label}.json`, r, {
-          role: `recon/${r.label}`,
-          model: r.model,
-        });
-        const header = r.result.error
-          ? `--- ${r.label} (${r.model}) FAILED ---`
-          : `--- ${r.label} (${r.model}): ${r.result.tool_calls} calls, ${r.result.elapsed_sec.toFixed(1)}s ---`;
-        logPipelineBlock('recon', header, r.result.summary || '(no summary)');
-        // v0.21.0 I-2: 结构化日志
-        logPipelineStructured('recon', {
-          iter: iterNum,
-          role: `Recon/${r.label}`,
-          model: r.model,
-          elapsed_sec: r.result.elapsed_sec,
-          event: r.result.error ? 'failed' : 'completed',
-          details: {
-            tool_calls: r.result.tool_calls,
-            summary_chars: (r.result.summary ?? '').length,
-          },
-        });
-      }
+    // v0.22.0 P0-4: 改为始终落盘(原 v0.18.0 仅并行模式落盘)
+    //   单模式也落盘便于复盘(对齐 docs/moa-role-design-philosophy-v2.md §4.1)
+    for (const r of callResult.results) {
+      await saveIterationArtifact(taskId, iterNum, `recon/${r.label}.json`, r, {
+        role: `recon/${r.label}`,
+        model: r.model,
+      });
+      const header = r.result.error
+        ? `--- ${r.label} (${r.model}) FAILED ---`
+        : `--- ${r.label} (${r.model}): ${r.result.tool_calls} calls, ${r.result.elapsed_sec.toFixed(1)}s ---`;
+      logPipelineBlock('recon', header, r.result.summary || '(no summary)');
+      // v0.21.0 I-2: 结构化日志
+      logPipelineStructured('recon', {
+        iter: iterNum,
+        role: `Recon/${r.label}`,
+        model: r.model,
+        elapsed_sec: r.result.elapsed_sec,
+        event: r.result.error ? 'failed' : 'completed',
+        details: {
+          tool_calls: r.result.tool_calls,
+          summary_chars: (r.result.summary ?? '').length,
+        },
+      });
     }
 
     // Recon Aggregator 的 merged summary 始终写到 "MoA Recon" channel
@@ -1758,11 +1853,24 @@ export async function runIteration(
       progress?.(`[MoA Actor] running with ${aggOutput.action_items.length} action(s)...`);
       // v0.19.1 §3: 传入 taskDir 以启用 SafeExecutor（保守执行模式）
       const actorTaskDir = await getTaskDir(taskId);
+      // v0.22.0 P0-5: 复用任务的 SystemContext(已由 Recon 阶段构建并缓存),渲染 Actor 可见的 4 段
+      const actorSysCtx = _systemContextCache.get(taskId);
+      const actorSysCtxText = actorSysCtx ? renderForRole(actorSysCtx, 'actor') : undefined;
       const actorResult = await callActor({
         task: state.task,
         actionItems: aggOutput.action_items,
         iteration: iterNum,
         taskDir: actorTaskDir,
+        systemContextText: actorSysCtxText,
+        // v0.22.0 P0-7: role_setup 渲染为 roleSetupText 注入到 Actor
+        roleSetupText: plannerForRecon?.role_setup?.actor?.tone
+          ? renderRoleSetup({
+              tone: plannerForRecon.role_setup.actor.tone,
+              perspective: plannerForRecon.role_setup.actor.perspective ?? '',
+              tool_priority: plannerForRecon.role_setup.actor.tool_priority,
+              cautions: plannerForRecon.role_setup.actor.cautions,
+            })
+          : undefined,
       }, token, progress, undefined, toolInvocationToken);
       record.actor_result = actorResult;
       state.actor_history.push(actorResult);
@@ -2004,6 +2112,10 @@ export async function finalizeTask(
   state.history = state.history;  // unchanged
   await saveState(state);
 
+  // v0.22.0 P0-5: 任务 finalize 后清理 SystemContext 缓存
+  //   (避免长寿命进程中累积多个任务的 systemContext)
+  clearTaskSystemContext(taskId);
+
   const dir = await getTaskDir(taskId);
   await fs.writeFile(path.join(dir, 'final.json'), JSON.stringify(output, null, 2), 'utf8');
 
@@ -2166,6 +2278,8 @@ export async function runSingleIterationAnalyze(
     progress?: (msg: string) => void;
     /** toolInvocationToken（必需，让内置工具可调） */
     toolInvocationToken?: vscode.ChatParticipantToolToken;
+    /** v0.22.0 P0-1: 入口类型（@moa/@moasingle/moa_analyze/moa_orchestrate） */
+    entryType?: string;
   }
 ): Promise<MoaFinalOutput & { task_id: string }> {
   const reconContext = options?.reconContext?.trim();
@@ -2236,6 +2350,8 @@ export async function runMoaLoopAnalyze(
     toolInvocationToken?: vscode.ChatParticipantToolToken;
     /** 最大迭代数（默认 MAX_ITER=12） */
     maxIterations?: number;
+    /** v0.22.0 P0-1: 入口类型（@moa/@moasingle/moa_analyze/moa_orchestrate） */
+    entryType?: string;
   }
 ): Promise<MoaFinalOutput & { task_id: string }> {
   const reconContext = options?.reconContext?.trim();
@@ -2258,7 +2374,9 @@ export async function runMoaLoopAnalyze(
     progress?.(`[MoA Loop] using pre-collected reconContext (${reconContext.length} chars from ${reconSources.length} source(s)) — Recon phase will be skipped in iter 1`);
   }
 
-  let state = await runIteration(taskId, subagentResult, token, progress, toolInvocationToken);
+  let state = await runIteration(taskId, subagentResult, token, progress, toolInvocationToken, {
+    entryType: options?.entryType,
+  });
   let iterCount = 1;
 
   // 循环直到 finalized 或达到 maxIter
@@ -2270,7 +2388,9 @@ export async function runMoaLoopAnalyze(
     iterCount += 1;
     progress?.(`[MoA Loop] proceeding to iteration ${iterCount} (Aggregator said: ${state.history[state.history.length - 1].aggregator_output?.next_action ?? '?'})...`);
     // 后续轮次不再注入 reconContext（只首轮使用，避免重复）
-    state = await runIteration(taskId, undefined, token, progress, toolInvocationToken);
+    state = await runIteration(taskId, undefined, token, progress, toolInvocationToken, {
+      entryType: options?.entryType,
+    });
   }
 
   // 兜底：如果达到 maxIter 仍未 finalized（理论上 runIteration 内部会处理 MAX_ITER，
@@ -2290,6 +2410,29 @@ export async function runMoaLoopAnalyze(
   const finalJsonRaw = await fs.readFile(finalJsonPath, 'utf8');
   const finalOutput = JSON.parse(finalJsonRaw) as MoaFinalOutput;
   progress?.(`[MoA Loop] done in ${iterCount} iteration(s) | convergence: ${state.convergence_source} | completeness: ${(state.completeness * 100).toFixed(0)}%`);
+
+  // v0.22.0 P0-8: 设 Plan Mode Report(给主会话展示)
+  try {
+    const planReport: MoaPlanReport = {
+      task_id: taskId,
+      iterationsRun: iterCount,
+      planCoverageHistory: (state.planner?.plan_coverage !== undefined)
+        ? [state.planner.plan_coverage]
+        : [],
+      needsReplan: state.planner?.needs_replan ?? false,
+      askUserTriggered: state.planner?.ask_user ?? false,
+      convergedReason: state.convergence_source === 'natural'
+        ? 'natural'
+        : state.convergence_source === 'max_iter'
+          ? 'max-iter'
+          : 'natural',
+      totalElapsedSec: 0,
+    };
+    setLastPlanReport(planReport);
+  } catch (err) {
+    progress?.(`[MoA Loop] failed to set Plan Report: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   return finalOutput;
 }
 

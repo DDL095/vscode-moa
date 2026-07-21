@@ -18,10 +18,15 @@ import type * as vscode from 'vscode';
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
- * Planner 输出（仅 iteration 0 调用一次）。
- * 注入首轮 Recon 的初始方向。
+ * Planner 输出。
+ *
+ * v0.22.0 P0-1: 扩展为 13 字段 schema(7 个原有 + 6 个新增 + role_setup)。
+ * 新增字段全部可选,保证 v0.21.x 解析仍能工作(若 LLM 未输出,使用默认值)。
+ *
+ * 完整设计见 docs/planner-system-prompt-v2.md §5(输出 schema)。
  */
 export interface PlannerOutput {
+  // === v0.21.x 原有字段(保留) ===
   /** 1-2 句话清晰描述任务目标（去模糊化）。 */
   clarified_task: string;
   /** Recon 该查的具体子问题（最多 5 个）。 */
@@ -34,16 +39,312 @@ export interface PlannerOutput {
   difficulty: 'simple' | 'moderate' | 'complex' | 'research';
   /** Planner 自己判断是否需要多轮（false = 简单任务，建议单次走 analyze）。 */
   needs_iteration: boolean;
+
+  // === v0.22.0 P0-1 新增字段(全部可选,LLM 未输出时用默认值) ===
+
+  /**
+   * v0.22: 任务类型(agent 化判断,不僵化套模板)。
+   * 默认:从 difficulty 推断(research→research, complex→hybrid, ...)。
+   */
+  task_type?: 'research' | 'coding' | 'documentation' | 'analysis' | 'hybrid';
+
+  /**
+   * v0.22: 流程语言(所有下游角色按此语言输出)。
+   * 默认:从 user prompt 启发式检测。
+   * 取值:'zh-CN' | 'en' | 'mixed' | 'ja' | 'ko' | 'fr' | 'de' | ...
+   */
+  process_language?: string;
+
+  /**
+   * v0.22 mini-loop: Planner 自评规划完整度(0-1)。
+   * 默认:1.0(视为已收敛,v0.21.x 兼容)。
+   * 收敛阈值:moa.plannerCoverageThreshold(默认 0.9)。
+   */
+  plan_coverage?: number;
+
+  /**
+   * v0.22 mini-loop: 是否需要再迭代一次。
+   * 默认:true(自迭代是 Planner 核心能力)。
+   * 收敛时设为 false。
+   */
+  needs_replan?: boolean;
+
+  /**
+   * v0.22 mini-loop: 是否需要询问用户(任务超出 Planner 规划能力)。
+   * 默认:false(避免打扰)。
+   * 触发条件:plan_coverage < 0.5 且 iter >= 2。
+   */
+  ask_user?: boolean;
+
+  /**
+   * v0.22 mini-loop: 要问用户的具体问题(最多 3 个,每个含推荐答案)。
+   * 仅 ask_user=true 时有意义。
+   */
+  ask_user_questions?: string[];
+
+  /**
+   * v0.22 P0-1: 下游 3 角色定制(Refs/Aggregator 完全不可定制,架构红线)。
+   * 默认:每个角色用 v0.21.x 静态 prompt fallback。
+   */
+  role_setup?: PlannerRoleSetup;
+}
+
+/**
+ * Planner 给下游 3 角色的定制(对齐 docs/planner-system-prompt-v2.md §5)。
+ *
+ * 架构红线:
+ *   - 没有 role_setup.refs 和 role_setup.aggregator(完全不可定制)
+ *   - 保证多模型可比性 + 中立裁判
+ */
+export interface PlannerRoleSetup {
+  recon?: PlannerReconRoleSetup;
+  recon_aggregator?: ReconAggregatorRoleSetup;  // 复用 P0-4 已定义的类型
+  actor?: PlannerActorRoleSetup;
+}
+
+/** Planner 给 Recon 的角色定制。 */
+export interface PlannerReconRoleSetup {
+  /** v0.22: tone 限定枚举(对齐 docs/moa-role-design-philosophy-v2.md §3) */
+  tone?: 'strict-evidence' | 'creative-explorer' | 'conservative';
+  /** 自由文本:分析视角 */
+  perspective?: string;
+  /** 推荐工具/skill 列表(排序后的完整列表,不拆分,不限定) */
+  tool_priority?: string[];
+  /** 注意事项 */
+  cautions?: string[];
+}
+
+/** Planner 给 Actor 的角色定制。 */
+export interface PlannerActorRoleSetup {
+  /** tone 限定枚举 */
+  tone?: 'strict-executor' | 'conservative' | 'aggressive';
+  /** 自由文本:执行视角 */
+  perspective?: string;
+  /** 推荐工具列表(独立排序,可与 recon 不同) */
+  tool_priority?: string[];
+  /** 注意事项(如 "破坏性操作前问用户") */
+  cautions?: string[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.22.0 P0-4: Recon Aggregator role_setup 类型(双轨制)
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Recon Aggregator 的角色设定(由 Planner 通过 role_setup.recon_aggregator
+ * 传入,实现"双轨制" — default 模式用内置 prompt,planner 模式用此字段)。
+ *
+ * tone 限定枚举(对齐 docs/moa-role-design-philosophy-v2.md §3):
+ *   - 'faithful-integrator' (默认): 保留原证据,做去重/排序/识别与保留冲突
+ *   - 'strict-evidence': 严格证据模式,不做任何整合性推理
+ *   - 'creative-explorer': 鼓励识别跨 recon 的隐性主题
+ *   - 'conservative': 仅做最小去重,尽量保留原文
+ *
+ * 整合原则(对齐 v2 设计):
+ *   "去重 / 排序 / 识别与保留冲突 / 缺口识别 / 证据质量分级"
+ *   (不再"消歧" — 冲突是 Refs 分析的重要素材)
+ */
+export interface ReconAggregatorRoleSetup {
+  tone?: 'faithful-integrator' | 'strict-evidence' | 'creative-explorer' | 'conservative';
+  /** 自由文本:整合视角(Planner 给的现场指导)。 */
+  perspective?: string;
+  /** 整合重点(Planner 强调的关键操作,如 ["去重", "识别与保留冲突", ...])。 */
+  focus?: string[];
 }
 
 /**
  * 构建 Planner 的 system + user prompt。
  *
- * @param userPrompt 用户的原始任务描述
+ * v0.21.x: 单次调用签名 `buildPlannerPrompt(userPrompt)`(向后兼容)。
+ * v0.22.0 P0-1: 扩展为接受可选 options,启用 mini-loop 时注入完整 v2 模板。
+ *
+ * 设计(对齐 docs/planner-system-prompt-v2.md):
+ *   - 不传 options 或 options.v22=false → 走 v0.21.x 简洁模板(单次调用)
+ *   - 传 options.v22=true → 走 v0.22 完整模板(mini-loop + role_setup + 入口类型 + etc)
+ *
+ * 调用方:runPlanner.ts 根据配置项 moa.enablePlannerIteration 决定传哪个。
  */
 export function buildPlannerPrompt(
-  userPrompt: string
+  userPrompt: string,
+  options?: {
+    /**
+     * v0.22: 启用完整 v2 模板(默认 false,走 v0.21.x 简洁模板)。
+     * 由 runPlanner 根据 moa.enablePlannerIteration 自动决定。
+     */
+    v22?: boolean;
+    /** v0.22: 当前 mini-loop 迭代号(从 1 开始)。 */
+    iteration?: number;
+    /** v0.22: 上一轮 plan_coverage(iter >= 2 时注入)。 */
+    prevCoverage?: number;
+    /** v0.22: MoA 入口类型(@moa/@moaloop/@moasingle/moa_analyze/moa_orchestrate)。 */
+    entryType?: string;
+    /** v0.22: 基础设施层注入文本(由 systemContext.ts renderForRole('planner') 生成)。 */
+    systemContextText?: string;
+    /** v0.22: 用户自定义 few-shot(从 Role Setup Preset 加载,v3 默认空字符串)。 */
+    fewShotsText?: string;
+  }
 ): { system: string; user: string } {
+  // ── v0.21.x 兼容路径 ──
+  if (!options?.v22) {
+    return buildPlannerPromptV21(userPrompt);
+  }
+
+  // ── v0.22 完整模板 ──
+  const {
+    iteration = 1,
+    prevCoverage,
+    entryType = '@moa',
+    systemContextText = '',
+    fewShotsText = '',
+  } = options;
+
+  // 完整模板(简化版,涵盖 planner-system-prompt-v2.md §1 的核心要点)
+  const system = [
+    '你是一位 MoA(Mixture-of-Agents)流水线的 Planner —— 一个**可迭代智能路由 + 多角色身份设计师**。',
+    '',
+    '## 第一部分:MoA 完整循环',
+    '',
+    'MoA 是 6 角色多智能体流水线:',
+    '  [你 Planner] → Recon(N 个并行) → Recon Aggregator(始终运行)',
+    '                → Refs(N 个并行,固定设定) → Aggregator(固定,中立裁判)',
+    '                → Actor(全工具权限) → 循环或 finalize',
+    '',
+    '**关键约束**:',
+    '- Refs 和 Aggregator **完全不可定制**(架构红线:保证多模型可比性 + 中立裁判)',
+    '- 你**只能**定制 3 个角色:Recon / Recon Aggregator / Actor',
+    '- 你的 role_setup 是**软建议**,下游保留判断权',
+    '',
+    '## 第二部分:你的 6 项核心职责',
+    '',
+    '1. **任务去模糊化**(在 clarified_task 中补全隐含假设 + 标注歧义点)',
+    '2. **任务拆解 + 子问题设计**(sub_questions 最多 5 个,必须是 Recon 能用工具验证的)',
+    '3. **工作环境/工具能力/用户指令的消化者**(从动态注入的 4 段内容提炼,不原样塞给下游)',
+    '4. **下游 3 角色的身份设计师**(通过 role_setup 字段定制)',
+    '5. **流程语言决策者**(检测用户 prompt 主导语言,所有下游按此语言输出)',
+    '6. **自身迭代的自评者**(通过 plan_coverage 决定何时收敛)',
+    '',
+    '## 第三部分:工作环境与工具能力(动态注入)',
+    '',
+    systemContextText,
+    '',
+    '## 第四部分:迭代状态 + MoA 入口类型',
+    '',
+    `当前 mini-loop 迭代:${iteration}`,
+    `上一轮 plan_coverage:${prevCoverage !== undefined ? prevCoverage : '(iter 1,无上一轮)'}`,
+    `MoA 入口类型:${entryType}`,
+    '',
+    '**MoA 入口类型对 needs_iteration 决策的影响**:',
+    '- @moa / @moaloop / moa_orchestrate → **强制 needs_iteration=true**(用户选 loop 入口)',
+    '- @moasingle / moa_analyze → **强制 needs_iteration=false**(单次模式不支持多轮)',
+    '- 你的 needs_iteration 字段必须同时考虑任务复杂度 + 入口类型',
+    '',
+    '## 第五部分:输出 schema(严格 JSON,不要 markdown fence)',
+    '',
+    '{',
+    '  "clarified_task": "<1-3 句话清晰描述任务目标,补全隐含假设,标注歧义点>",',
+    '  "process_language": "zh-CN | en | mixed | ja | ko | fr | de | ...",',
+    '  "sub_questions": ["<Recon 必须回答的具体子问题,每个都要能被工具验证>", ...],',
+    '  "recon_hints": ["<具体文件路径/搜索关键词/URL/DOI/skill 名/数据库名>", ...],',
+    '  "expected_output_format": "report | comparison | code | analysis | document | roadmap | other",',
+    '  "difficulty": "simple | moderate | complex | research | engineering",',
+    '  "task_type": "research | coding | documentation | analysis | hybrid",',
+    '  "needs_iteration": 「true 表示需要 MoA 多轮; false 表示单次完成」',
+    '',
+
+    '  "plan_coverage": 「0-1, 默认 0.9 收敛,本次规划完整度的自评」,',
+    '  "needs_replan": 「true 表示需要再迭代; false 表示已收敛。**默认 true**」,',
+    '  "ask_user": 「true 表示需要用户澄清; false 表示不需要。**默认 false**」,',
+    '  "ask_user_questions": ["<仅 ask_user=true 时填: 最多 3 个>"],',
+    '',
+    '  "role_setup": {',
+    '    "recon": {',
+    '      "tone": "strict-evidence | creative-explorer | conservative",',
+    '      "perspective": "<自由文本>",',
+    '      "tool_priority": ["<推荐工具/skill 名,排序后的完整列表>"],',
+    '      "cautions": ["<注意事项>"]',
+    '    },',
+    '    "recon_aggregator": {',
+    '      "tone": "faithful-integrator | strict-evidence",',
+    '      "perspective": "<自由文本>",',
+    '      "focus": ["去重", "识别与保留冲突", "缺口识别", "证据质量分级"]',
+    '    },',
+    '    "actor": {',
+    '      "tone": "strict-executor | conservative | aggressive",',
+    '      "perspective": "<自由文本>",',
+    '      "tool_priority": ["<推荐工具,排序后的完整列表>"],',
+    '      "cautions": ["<破坏性操作前的注意>"]',
+    '    }',
+    '  }',
+    '}',
+    '',
+    '**注意**:**没有** role_setup.refs 和 role_setup.aggregator 字段(架构红线)。',
+    '',
+    '## 第六部分:决策准则',
+    '',
+    '### difficulty 评分',
+    '- simple: 单一事实查询、概念解释',
+    '- moderate: 对比分析、简单代码生成、单文档撰写',
+    '- complex: 多步推理、多文件协调、需要 Actor 执行',
+    '- research: 深度文献调研、跨学科综合',
+    '- engineering: 复杂工程任务:架构设计、大规模重构',
+    '',
+    '### needs_iteration 决策(综合任务复杂度 + MoA 入口类型)',
+    '详见第四部分表格 — 入口类型强制倾向,任务复杂度作辅',
+    '',
+    '### role_setup 设计哲学',
+    '1. **定向不限定(打猎哲学)**:给 Recon 推荐工具,但**不限定**它必须用',
+    '2. **agent 化,不僵化**:不同 task_type 的 role_setup 应明显不同,但根据现场灵活调整',
+    '3. **工具太多时识别后排序(不拆分)**:识别所有相关工具 → 排序 → 完整列表给 recon 和 actor(各自独立排序)',
+    '',
+    '## 第七部分:典型场景示例(用户可外部自定义)',
+    '',
+    fewShotsText || '(用户未自定义 few-shot 示例 — 仅依赖以上规则描述工作)',
+    '',
+    '## 第八部分:迭代收敛规则',
+    '',
+    '你处于 mini-loop(默认 5 次,绝对上限 20 次)。收敛路径三选一:',
+    '- **路径 A(自然收敛)**:plan_coverage >= 0.9 → needs_replan=false',
+    '- **路径 B(强制收敛)**:iter >= 5 且 plan_coverage < 0.9 → needs_replan=false + clarified_task 末尾标注 "(planner 未完全收敛)"',
+    '- **路径 C(询问用户)**:plan_coverage < 0.5 且 iter >= 2 → ask_user=true + ask_user_questions',
+    '',
+    '**绝对上限**:iter >= 20 强制路径 B',
+    '',
+    '**默认值**:',
+    '- plan_coverage 默认目标:**0.9**',
+    '- needs_replan 默认:**true**(自迭代是核心能力)',
+    '- ask_user 默认:**false**(避免打扰)',
+    '',
+    '## 第九部分:工具权限(iter 1+ 开放,仅概念澄清)',
+    '',
+    '允许调用:read_file / list_dir / grep_search / get_errors / web_search(仅概念澄清)',
+    '禁止调用:任何写工具 / run_in_terminal / 浏览器工具 / 学术数据库 MCP / 网页抓取(那是 Recon 的活)',
+    '每轮迭代最多调 3 次工具(防止过度探索)',
+    '',
+    '## 第十部分:最后的提醒',
+    '',
+    '- 你不是回答者,你是规划者',
+    '- 你不是调研者(除了概念澄清),你是工具能力的设计师',
+    '- Refs 和 Aggregator 你完全不能定制',
+    '- 如果任务超出你的能力,触发 ask_user,不要硬撑',
+    '- 语言决策一旦做出,不要在 mini-loop 中途改变',
+    '- needs_iteration 决策受 MoA 入口类型约束',
+  ].join('\n');
+
+  const user = [
+    '### 用户的原始任务',
+    '',
+    userPrompt,
+  ].join('\n');
+
+  return { system, user };
+}
+
+/**
+ * v0.21.x Planner prompt 模板(向后兼容 fallback)。
+ *
+ * 当 moa.enablePlannerIteration=false 或 mini-loop 失败时,使用此简洁模板。
+ */
+function buildPlannerPromptV21(userPrompt: string): { system: string; user: string } {
   const system = [
     '你是 MoA 流水线的 Planner（规划者）。',
     '',
@@ -57,7 +358,7 @@ export function buildPlannerPrompt(
     '  "recon_hints": ["<搜索关键词/文件路径/URL 等>", ...],  // 最多 8 条',
     '  "expected_output_format": "report | comparison | code | analysis | document | other",',
     '  "difficulty": "simple | moderate | complex | research",',
-    '  "needs_iteration": <true 表示复杂任务需要多轮，false 表示简单任务可单次完成>',
+    '  "needs_iteration": 「true 表示复杂任务需要多轮，false 表示简单任务可单次完成」',
     '}',
     '',
     '判断准则：',
@@ -80,6 +381,62 @@ export function buildPlannerPrompt(
   ].join('\n');
 
   return { system, user };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.22.0 P0-1: Role setup 渲染辅助函数
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 把 PlannerReconRoleSetup 渲染为注入到 buildReconPrompt 的 roleSetupText 字符串。
+ *
+ * 输出格式(拼到 prompt 开头):
+ *   Tone: <tone> — <tone label>
+ *   Perspective: <perspective>
+ *   Tool priority: <tool_priority joined>
+ *   Cautions: <cautions joined>
+ */
+export function renderReconRoleSetup(setup: PlannerReconRoleSetup): string {
+  const lines: string[] = [];
+  if (setup.tone) {
+    const label: Record<NonNullable<PlannerReconRoleSetup['tone']>, string> = {
+      'strict-evidence': '严谨证据(默认):保留所有数字/引用/关键句',
+      'creative-explorer': '创造探索:鼓励非常规视角,容忍合理推测(标注 confidence)',
+      'conservative': '保守模式:优先 .bak 备份,破坏性操作前必问',
+    };
+    lines.push(`Tone: ${setup.tone} — ${label[setup.tone]}`);
+  }
+  if (setup.perspective) lines.push(`Perspective: ${setup.perspective}`);
+  if (setup.tool_priority && setup.tool_priority.length > 0) {
+    lines.push(`Tool priority (推荐顺序,不限定): ${setup.tool_priority.join(' / ')}`);
+  }
+  if (setup.cautions && setup.cautions.length > 0) {
+    lines.push(`Cautions: ${setup.cautions.join('; ')}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 把 PlannerActorRoleSetup 渲染为注入到 buildActorPrompt 的 roleSetupText 字符串。
+ */
+export function renderActorRoleSetup(setup: PlannerActorRoleSetup): string {
+  const lines: string[] = [];
+  if (setup.tone) {
+    const label: Record<NonNullable<PlannerActorRoleSetup['tone']>, string> = {
+      'strict-executor': '严格执行(默认):严格按 action_items 顺序执行',
+      'conservative': '保守模式:破坏性操作前必问,优先 .bak 备份',
+      'aggressive': '激进模式:自动执行不问(仅 CI/CD 场景,危险)',
+    };
+    lines.push(`Tone: ${setup.tone} — ${label[setup.tone]}`);
+  }
+  if (setup.perspective) lines.push(`Perspective: ${setup.perspective}`);
+  if (setup.tool_priority && setup.tool_priority.length > 0) {
+    lines.push(`Tool priority (推荐顺序,不限定): ${setup.tool_priority.join(' / ')}`);
+  }
+  if (setup.cautions && setup.cautions.length > 0) {
+    lines.push(`Cautions: ${setup.cautions.join('; ')}`);
+  }
+  return lines.join('\n');
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -144,8 +501,39 @@ export function buildReconPrompt(params: {
   actorLog?: string;
   evidenceBrief: string;
   iteration: number;
+  /**
+   * v0.22.0 P0-5: 基础设施层注入文本(ENV_CONTEXT + TOOL_EFFICIENCY +
+   * CUSTOM_INSTRUCTIONS + RUNTIME_INSTRUCTIONS)。
+   *
+   * 由调用方(moaOrchestrator.ts)在 iter 1 通过 systemContext.renderForRole('recon')
+   * 构建,缓存到 state 跨轮次复用。空字符串或不传时走 v0.21.x 行为(向后兼容)。
+   */
+  systemContextText?: string;
+  /**
+   * v0.22.0 P0-5: 角色身份层注入文本(Planner 给的 role_setup.recon 渲染)。
+   * P0-1 实施后由调用方从 PlannerOutput.role_setup.recon 构建。
+   */
+  roleSetupText?: string;
 }): { system: string; user: string } {
-  const { userPrompt, planner, reason, gaps, actorLog, evidenceBrief, iteration } = params;
+  const { userPrompt, planner, reason, gaps, actorLog, evidenceBrief, iteration,
+          systemContextText, roleSetupText } = params;
+
+  // v0.22.0 P0-5: 拼装 prefix(基础设施层 + 角色身份层)
+  //   设计矩阵(对齐 docs/moa-role-injection-design.md §4.2):
+  //     Recon 看: ENV + TOOL_EFFICIENCY + CUSTOM + RUNTIME + ROLE_SETUP
+  //   prefix 仅在内容非空时拼入,保证向后兼容(空时退化为 v0.21.x 行为)
+  const prefixParts: string[] = [];
+  if (roleSetupText && roleSetupText.trim().length > 0) {
+    prefixParts.push('=== ROLE SETUP (Planner 定制) ===');
+    prefixParts.push(roleSetupText.trim());
+    prefixParts.push('=== END ROLE SETUP ===');
+    prefixParts.push('');
+  }
+  if (systemContextText && systemContextText.trim().length > 0) {
+    prefixParts.push(systemContextText.trim());
+    prefixParts.push('');
+  }
+  const prefix = prefixParts.length > 0 ? prefixParts.join('\n') + '\n' : '';
 
   // v0.17.0: Recon prompt 重新设计 —— 强化 Planner 优先级 + 工具灵活性
   //
@@ -158,7 +546,7 @@ export function buildReconPrompt(params: {
   //      （不限制"搜 2-3 次就停"这种硬规则）
   //   4. evidenceBrief 用来防止重复查，但不是硬约束（如果同一来源有新角度可重查）
   const system = [
-    '你是 MoA 流水线的 Recon（侦察）角色 —— 一个 agent 化的证据收集器。',
+    prefix + '你是 MoA 流水线的 Recon（侦察）角色 —— 一个 agent 化的证据收集器。',
     '',
     '## 核心职责',
     '',
@@ -368,7 +756,7 @@ export function buildRefPrompt(params: {
     '{',
     '  "analysis": "<3-5 bullets 的独立视角>",',
     '  "new_findings": [{"source": "...", "snippet": "...", "confidence": "high|medium|low"}],',
-    '  "confidence": <0-1, 你对当前 synthesis 的信心度>,',
+    '  "confidence": 「0-1, 你对当前 synthesis 的信心度」,',
     '  "identified_gaps": ["<具体缺失的信息>", ...]',
     '}',
     '',
@@ -462,7 +850,7 @@ export function buildAggregatorPrompt(params: {
     '严格按 JSON 格式输出（不要 markdown fence）：',
     '{',
     '  "synthesis": "<融合 refs 输出的综合分析>",',
-    '  "evidence_coverage": <0-1>,',
+    '  "evidence_coverage": 「0-1」,',
     '  "next_action": "finalize" | "actor_needed" | "recon_needed",',
     '  "recon_reason": "<仅 recon_needed 时填>: initial | missing_data | need_deeper_analysis | actor_failed | contradiction",',
     '  "action_items": [<仅 actor_needed 时填> { "type": "...", "target": "...", "content": "...", "rationale": "..." }],',
@@ -582,11 +970,36 @@ export function buildActorPrompt(params: {
   task: string;
   actionItems: NonNullable<AggregatorOutput['action_items']>;
   iteration: number;
+  /**
+   * v0.22.0 P0-5: 基础设施层注入文本(与 buildReconPrompt 同源)。
+   * 由调用方(moaOrchestrator.ts)缓存并透传。
+   */
+  systemContextText?: string;
+  /**
+   * v0.22.0 P0-5: 角色身份层注入文本(Planner 给的 role_setup.actor 渲染)。
+   */
+  roleSetupText?: string;
 }): { system: string; user: string } {
-  const { task, actionItems, iteration } = params;
+  const { task, actionItems, iteration, systemContextText, roleSetupText } = params;
+
+  // v0.22.0 P0-5: 拼装 prefix(基础设施层 + 角色身份层)
+  //   Actor 看: ENV + TOOL_EFFICIENCY + CUSTOM + RUNTIME + ROLE_SETUP
+  //   (与 Recon 同源,但 ROLE_SETUP 内容由 Planner 分别给)
+  const prefixParts: string[] = [];
+  if (roleSetupText && roleSetupText.trim().length > 0) {
+    prefixParts.push('=== ROLE SETUP (Planner 定制) ===');
+    prefixParts.push(roleSetupText.trim());
+    prefixParts.push('=== END ROLE SETUP ===');
+    prefixParts.push('');
+  }
+  if (systemContextText && systemContextText.trim().length > 0) {
+    prefixParts.push(systemContextText.trim());
+    prefixParts.push('');
+  }
+  const prefix = prefixParts.length > 0 ? prefixParts.join('\n') + '\n' : '';
 
   const system = [
-    '你是 MoA 流水线的 Actor（执行者）。',
+    prefix + '你是 MoA 流水线的 Actor（执行者）。',
     '',
     '你的职责：执行 Aggregator 给出的 action_items。',
     '',
@@ -609,15 +1022,15 @@ export function buildActorPrompt(params: {
     '    {',
     '      "action": {<原 action_item 的 type/target/content/rationale>},',
     '      "status": "success | failed | skipped | partial",',
-    '      "output_chars": <数字>,',
+    '      "output_chars": 「数字」,',
     '      "error_message": "<失败原因，仅 failed 时填>",',
     '      "artifacts": ["<产出的文件路径或命令输出位置>"]',
     '    }',
     '  ],',
     '  "self_assessment": {',
-    '    "all_succeeded": <bool>,',
+    '    "all_succeeded": 「bool」,',
     '    "missing_dependencies": ["<自己识别的缺失项>"],',
-    '    "should_recon": <bool,  // 例如 execute 失败提示缺 dependency 时填 true>,',
+    '    "should_recon": 「bool,  // 例如 execute 失败提示缺 dependency 时填 true」,',
     '    "reason": "<理由>"',
     '  }',
     '}',
@@ -694,7 +1107,7 @@ export function buildFinalPrompt(params: {
     '      "rationale": "<why this action>"',
     '    }',
     '  ],',
-    '  "confidence": <0-1>,',
+    '  "confidence": 「0-1」,',
     '  "unresolved": ["<open questions for the user>", ...]',
     '}',
     '',

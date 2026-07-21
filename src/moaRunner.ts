@@ -19,7 +19,10 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { MoaPath, MoaRunResult, RefModelConfig } from './types';
-import { buildWorkspaceContext } from './workspaceContext';
+// v0.22.0 P0-6: removed dead `import { buildWorkspaceContext } from './workspaceContext'`.
+// The previous dead-code call at L320 (which assigned wsContext but never used it)
+// was the only consumer in this file. SystemContext (src/systemContext.ts) is the
+// new unified entry point; P0-5 will wire it into recon/actor via roles.ts.
 import { runActingAgent, runReconAgent } from './actingAgent';
 import type { CapturedToolCall } from './actingAgent';
 import { getActivePresetConfig } from './presetConfig';
@@ -315,11 +318,10 @@ export async function runP1Fanout(
   // empty/minimal summary → refs analyze the abstract question directly.
   // For code tasks, recon reads the relevant files and refs see ONLY those.
   //
-  // wsContextText is still built (for recon agent's own use if it wants to
-  // call copilot_readProjectStructure etc.) but no longer force-fed to refs.
-  const wsContext = await buildWorkspaceContext();
-  // NOTE: wsContext is now only used for the recon agent's tool environment,
-  // not injected into ref prompts. Kept for backward-compat logging only.
+  // v0.22.0 P0-6: removed dead code that called buildWorkspaceContext() but
+  // never passed the result to any role. The SystemContext builder
+  // (src/systemContext.ts) is the single source of truth going forward;
+  // P0-5 will wire it into recon/actor via roles.ts.
   if (refChannel) {
     refChannel.appendLine('--- Workspace context (available to recon agent only, NOT injected to refs) ---');
     refChannel.appendLine('(refs are pure reasoning layer — see only reconSummary + user question)');
