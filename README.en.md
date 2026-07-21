@@ -2,9 +2,9 @@
 
 > 🌐 **Languages / 语言**: **English (current)** | [中文](./README.md)
 
-**Mixture-of-Agents (MoA) for VSCode Copilot Chat** — a streamlined 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor) that orchestrates multiple LLMs entirely through the native `vscode.lm` API.
+**Mixture-of-Agents (MoA) for VSCode Copilot Chat** — orchestrates a streamlined 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor) through the native `vscode.lm` API, letting multiple LLMs collaborate as heterogeneous advisors.
 >
-> *中文用户请查看 [README.md](./README.md)（中文版，含英文对照）。Chinese-speaking users please see [README.md](./README.md) for the bilingual Chinese-English version.*
+> *中文用户请查看 [README.md](./README.md)。Chinese-speaking users please see [README.md](./README.md).*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![VSCode](https://img.shields.io/badge/VSCode-1.95+-blue.svg)](https://code.visualstudio.com)
@@ -13,281 +13,227 @@
 
 ## What it does
 
-`@moa <your question>` runs a multi-model fan-out directly in Copilot Chat. Three entry points, two loop shapes:
+`@moa <your question>` runs a multi-model fan-out directly in Copilot Chat. Three entry points:
 
-| Entry point | When to use | Loop shape |
+| Entry | Use case | Loop shape |
 |---|---|---|
-| `@moa` (default) | Most cases — iterative refinement until Aggregator converges | Hermes loop, up to `MAX_ITER=12` |
-| `@moaloop` | Same as `@moa` — explicit loop mode | Hermes loop |
-| `@moasingle` | Fast single-shot — 1 iteration, forced finalize | No loop |
-| `#moa_orchestrate` / `#moa_continue` / `#moa_finalize` | LM tools — drive the loop from another agent or chat | Hermes loop, disk-persisted state |
-| `#moa_analyze` | LM tool — one-shot N refs + 1 aggregator, no loop | No loop |
-| `#moa_recon` | LM tool — standalone read-only file collection | N/A |
+| `@moa` / `@moaloop` | Iterative refinement until Aggregator converges | Hermes loop, up to `MAX_ITER=12` |
+| `@moasingle` | Fast single-shot | 1 iteration, forced finalize |
+| `#moa_orchestrate` / `#moa_continue` / `#moa_finalize` | Drive loop from another agent | Hermes loop, disk-persisted state |
+| `#moa_analyze` / `#moa_recon` / `#moa_execute` | One-shot analysis / read-only collection / execute action_items | No loop |
 
-The pipeline diagram and full architecture description are in [README.md (Chinese, bilingual)](./README.md#the-5-role-pipeline-v0150-redesigned-in-v017v018) — the diagram itself uses bilingual labels.
+## Pipeline overview
+
+Each iteration runs all 5 roles in sequence. The loop terminates when Aggregator emits `finalize` (completeness ≥ 0.8) or hits `MAX_ITER=12`.
+
+```mermaid
+flowchart TD
+    U([👤 User prompt]) --> P
+    P["📋 Planner (iter 1 only)<br/>Decompose task + emit hints"]
+    P -- "📦 sub_questions + recon_hints" --> RT{recon_required?}
+
+    RT -- yes --> R0["🔀 Recon fan-out (parallel)"]
+    R0 --> RA1["🔍 Recon #1<br/>DeepSeek-V4-Flash"]
+    R0 --> RA2["🔍 Recon #2<br/>MiniMax-M3"]
+    RA1 -- "📦 evidence_chunks_1" --> RAGG
+    RA2 -- "📦 evidence_chunks_2" --> RAGG
+    RAGG["🔀 Recon Aggregator<br/>GLM-5.2 · Merge + dedupe"]
+
+    RAGG == "📦 universal_aggregated_evidence" ==> REF1
+    RAGG == "📦 universal_aggregated_evidence" ==> REF2
+    RAGG == "📦 universal_aggregated_evidence" ==> REF3
+    REF1["💡 Ref advisor_1<br/>DeepSeek-V4-Flash<br/>→ ref_1.json (unique)"]
+    REF2["💡 Ref advisor_2<br/>MiniMax-M3<br/>→ ref_2.json (unique)"]
+    REF3["💡 Ref advisor_N<br/>GLM-5.2<br/>→ ref_N.json (unique)"]
+
+    REF1 -- "📄 ref_1.json" --> A
+    REF2 -- "📄 ref_2.json" --> A
+    REF3 -- "📄 ref_N.json" --> A
+    A["🔀 Aggregator<br/>GLM-5.2 · Fuse refs + judge<br/>completeness + next_action"]
+
+    A -- "next_action: actor_needed" --> AC
+    AC["⚙️ Actor<br/>MiniMax-M3 · write_file / execute"]
+    AC -. "📦 high-confidence artifacts" .-> RT
+
+    A -. "next_action: recon_needed" .-> RT
+
+    A -- "finalize OR completeness ≥ 0.8 OR iter ≥ 12" --> F([🏁 Finalize])
+```
+
+> 📦 = file / packaged payload · 📄 = JSON file
+> 📖 **For detailed data flow + per-role input/output JSON shapes**, see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
+
+> **ℹ️ Rendering**: GitHub, VSCode Marketplace, and VSCode 1.58+ built-in markdown preview all render mermaid natively.
+
+## Model selection guide
+
+MoA is vendor-agnostic — there are **no hardcoded model IDs** in the codebase. Each layer reads its model from `moa.*` config. Recommendations for each role:
+
+| Role | Recommended model traits | Why | Examples (with GCMP) |
+|---|---|---|---|
+| **Planner** | Strong logic, long context | Runs once; does task decomposition + sub_questions | GLM-5.2 / Claude Sonnet |
+| **Recon** | **Cheap + fast** + stable tool-calling | N parallel per iter, tool-heavy — expensive models burn budget | DeepSeek-V4-Flash + MiniMax-M3 |
+| **Recon Aggregator** | Strong fusion reasoning | Dedupes + integrates N raw evidence streams — needs quality | GLM-5.2 (CodingPlan) |
+| **Refs** | **Diversity first** (different labs/training data) | MoA's core value is heterogeneous perspective — same family = no real fan-out | DeepSeek-V4-Flash + MiniMax-M3 + GLM-5.2 + Qwen3 |
+| **Aggregator** | **Strong logic + synthesis** | Decides next_action and completeness score — source of truth for convergence | GLM-5.2 (CodingPlan) / Claude Sonnet |
+| **Actor** | **High compliance** + disciplined tool-calling | Actually executes `write_file` / `execute` — more obedient = safer | MiniMax-M3 (TokenPlan) / GLM-5.2 |
+| **L3 Summarizer** | Cheap + good at compression | Preprocessing for huge files (>200k chars); volume-heavy but simple task | MiniMax-M3 (TokenPlan) |
+
+**Pairing with GCMP**: With only official Copilot, MoA sees 3-5 models. With [GCMP](https://marketplace.visualstudio.com/items?itemName=vicanent.gcmp) installed, it expands to 10-30+ (DeepSeek-V4-Pro/Flash, GLM-5.2, MiniMax-M3, Qwen3, etc.) — true heterogeneous MoA.
 
 ## Install
 
-### Option A — from VSCode Marketplace (recommended)
+**Option A — Marketplace (recommended)**: Extensions panel → search **"MoA Bridge"**, or `code --install-extension dudali095.moa-bridge`.
 
-1. Open the Extensions panel (`Ctrl+Shift+X`)
-2. Search **"MoA Bridge"**
-3. Click Install
+**Option B — GitHub Release**: Download `.vsix` from [releases](https://github.com/DDL095/vscode-moa/releases), then `code --install-extension moa-bridge-X.Y.Z.vsix`.
 
-### Option B — from GitHub Release
-
-1. Go to [Releases](https://github.com/DDL095/vscode-moa/releases/latest)
-2. Download `moa-bridge-X.Y.Z.vsix`
-3. Run: `code --install-extension moa-bridge-X.Y.Z.vsix`
-
-### Option C — from source
+**Option C — From source**:
 
 ```bash
 git clone https://github.com/DDL095/vscode-moa.git
-cd vscode-moa
-npm install
-npm run package      # produces dist/extension.js
-npx vsce package     # produces .vsix
-code --install-extension moa-bridge-X.Y.Z.vsix
+cd vscode-moa && npm install
+npm run package && code --extensionDevelopmentPath .
 ```
 
-## First-run configuration
+## First-run config
 
-Out of the box, MoA has no models configured — you must tell it which LLMs to use. Two ways:
+**Easiest — run `Moa: Configure Models` from Command Palette**: 8-step guided flow. All steps except refs (Step 1) and recon (Step 3) provide "Use aggregator" / "Disable" sentinels as recommended defaults.
 
-### Quick start — use the 8-step guided flow
+**Manual `settings.json`** — the maintainer's working config (balanced for daily coding + deep research):
 
-1. Open Command Palette (`Ctrl+Shift+P`)
-2. Run **`Moa: Configure Models`**
-3. The wizard walks you through 8 steps: Ref models (3+ recommended) → Aggregator → Recon model → L3 summarizer → done
-
-### Manual — edit `settings.json`
-
-```json
+```jsonc
 {
-  "moa.refModels": [
-    { "role": "advisor_1", "model": "DeepSeek-V4-Flash" },
-    { "role": "advisor_2", "model": "MiniMax-M3" },
-    { "role": "advisor_3", "model": "GLM-5.2" }
-  ],
-  "moa.aggregator": { "model": "GLM-5.2" }
-}
-```
-
-`model` is matched as a **substring** against `LanguageModelChat.id` (e.g. `"GLM-5.2"` matches `gcmp.zhipu:::GLM-5.2-CodingPlan`). All models must be registered via `vscode.lm` (GCMP, Copilot, Ollama, etc.).
-
-### Preset groups (v0.14.14+)
-
-Save multiple configurations as named presets and switch between them:
-
-```json
-{
+  "moa.activePreset": "default",
   "moa.presets": {
     "default": {
-      "name": "Daily coding",
-      "refModels": [...],
-      "aggregator": {...},
-      "reconModel": {...}
-    },
-    "research": {
-      "name": "Deep research",
-      "refModels": [...],
-      "aggregator": {...}
+      "name": "Daily coding + research",
+      // 4 ref advisors — from different labs, heterogeneous perspectives
+      "refModels": [
+        { "role": "advisor_1", "model": "DeepSeek-V4-Flash" },
+        { "role": "advisor_2", "model": "MiniMax-M3" },
+        { "role": "advisor_3", "model": "GLM-5.2" },
+        { "role": "advisor_4", "model": "Qwen3" }
+      ],
+      "aggregator":     { "model": "GLM-5.2" },        // strong logic, decides convergence
+      "reconModels": [                                 // cheap + fast, different tool prefs
+        { "model": "DeepSeek-V4-Flash" },
+        { "model": "MiniMax-M3" }
+      ],
+      "reconAggregator": { "model": "GLM-5.2" },       // default = aggregator
+      "planner":         { "model": "GLM-5.2" },       // default = aggregator
+      "actor":           { "model": "MiniMax-M3" },    // high compliance
+      "l3Summarizer":    { "model": "MiniMax-M3" }     // large-file compression
     }
-  },
-  "moa.activePreset": "default"
+  }
 }
 ```
 
-Switch via **`Moa: Switch Preset`** command.
+`model` is matched as a **substring** against `LanguageModelChat.id` (e.g. `"GLM-5.2"` matches `gcmp.zhipu:::GLM-5.2-CodingPlan`). Config persists to both User and Workspace scopes — no manual sync across windows.
+
+> 💡 **Preset switching**: Save multiple presets (e.g. `code` / `research` / `quick`), switch via `Moa: Switch Preset`.
 
 ## Usage
 
-### As a chat participant (simplest)
-
-Just type `@moa` followed by your question in Copilot Chat:
+**As a chat participant (simplest)**:
 
 ```
-@moa Why is my React component re-rendering on every keystroke?
+@moa refactor src/moaRunner.ts to extract the sufficiency loop into its own module
+@moa analyze the design trade-offs of this PR from multiple angles
+@moa review the auth flow in src/services/auth/
 ```
 
-Three participants available:
+**As VSCode LM tools (composable, from other agents)**:
 
-- `@moa` — default loop mode (Planner → Recon → Refs → Aggregator → Actor, up to 12 iterations)
-- `@moaloop` — explicit loop mode (same as `@moa`)
-- `@moasingle` — single-shot mode (1 iteration, forced finalize — fastest)
-
-### As VSCode LM tools (composable)
-
-For driving MoA from another agent or chat context, use the LM tools:
-
-- **`#moa_orchestrate`** — start a new MoA task; returns `task_id`
-- **`#moa_continue`** — advance the loop by one iteration (use when state is `awaiting_recon` or `running`)
-- **`#moa_finalize`** — force-finalize a task; returns `action_items[]`
-- **`#moa_analyze`** — one-shot analysis (1 Recon + N Refs + 1 Aggregator, no loop)
-- **`#moa_recon`** — standalone read-only file collection
-- **`#moa_execute`** (v0.20.0+) — execute finalized `action_items` via SafeExecutor (subject to approval gates)
-
-Example flow:
-```
-#moa_orchestrate("analyze this codebase for security issues")  → task_id
-#moa_continue(task_id)  → state.status = "running"
-#moa_continue(task_id)  → state.status = "running"
-#moa_finalize(task_id)  → action_items[]
-```
-
-## Pipeline visibility — 5 OutputChannels (v0.17.0+)
-
-Each role streams detailed output to its own VSCode OutputChannel:
-
-| Channel | Content |
+| Tool | Purpose |
 |---|---|
-| `MoA Bridge — Planner` | Planner prompts and outputs (iter 1 only) |
-| `MoA Bridge — Recon` | Recon agent tool calls and summaries |
-| `MoA Bridge — Ref Output` | Raw ref advisor outputs (thinking mode) |
-| `MoA Bridge — Aggregator` | Aggregator synthesis + completeness + next_action |
-| `MoA Bridge — Actor` | Actor tool calls + executed actions |
+| `#moa_recon` | Standalone read-only file collection — returns structured Markdown summary |
+| `#moa_analyze` | One-shot MoA — N refs + 1 aggregator, no loop |
+| `#moa_orchestrate` | Start iterative loop, returns `task_id` (supports `deferredResultId` across compaction) |
+| `#moa_continue` | Advance loop (optionally inject subagent's `reconResult` to fill gaps) |
+| `#moa_finalize` | Terminate loop, produces `action_items` + summary + gaps |
+| `#moa_execute` *(v0.20.0+)* | Execute finalized `action_items`, subject to approval gates |
 
-View via `Output` panel (`Ctrl+Shift+U`) → select channel from dropdown.
+## Pipeline visibility
 
-## Architecture
+5 independent OutputChannels (`View → Output` dropdown): `MoA Planner` / `MoA Recon` / `MoA Refs` / `MoA Aggregator` / `MoA Actor`. Each channel has iteration boundary headers (`═══════ iter N ═══════`) for easy scrolling in multi-iter runs.
 
-### 5 roles (v0.15.0+, redesigned v0.17–v0.18)
+## Actor execution control (v0.20.0+)
 
-| Role | Order | Purpose | Tools | Default model |
+The Actor role actually *executes* the Aggregator's `action_items` (writes files / runs commands / produces side effects). 4+1 `executionPreset` modes:
+
+| Preset | Auto-execute after finalize? | Approval popups | Backup | Use case |
 |---|---|---|---|---|
-| **Planner** | 1 (iter 1 only) | Clarify task, emit `sub_questions[]` + `recon_hints[]` | read-only | (aggregator model) |
-| **Recon** | 2 | Gather file contents relevant to the task (1 agent per recon model) | read/grep/fetch (terminal opt-in) | DeepSeek-V4-Pro + MiniMax-M3 |
-| **Refs** | 3 | N parallel advisors analyze evidence + emit structured JSON | pure LLM (no tools) | 3+ different models |
-| **Aggregator** | 4 | Fuse N ref outputs, score completeness, decide next_action | pure LLM | GLM-5.2 (CodingPlan) |
-| **Actor** | 5 | Execute `action_items` (write_file / execute / inform_user) | full tool access | GLM-5.2 (CodingPlan) |
-| **Recon Aggregator** | (after Recon) | Merge N parallel Recon outputs into single evidence stream | verify-only | GLM-5.2 (CodingPlan) |
-| **L3 Summarizer** | (grandchild) | Digest huge files (>200k chars) before they hit Recon | none | MiniMax-M3 (TokenPlan) |
+| `manual` (default) | ❌ requires `#moa_execute` | `batch` (Gate-A QuickPick) | ✅ | First-time / exploratory |
+| `supervised` | ✅ | `batch` (multi-select per round) | ✅ | Human-monitored |
+| `autopilot` | ✅ | `none` | ✅ | CI / trusted batch |
+| `yolo` | ✅ | `none` | ❌ (irreversible) | Sandbox |
+| `custom` | controlled by `autoExecuteAfterFinalize` | controlled by `approvalMode` | controlled by `safeExecutionMode` | Fine-grained |
 
-MoA is fully vendor-agnostic — there are **no hardcoded model IDs** in the codebase. Every layer reads its model from the `moa.*` configuration namespace; empty values disable the layer (or fall back to aggregator, in the case of `moa.reconModel`).
+Every side-effecting action is logged to `.moa_cache/<task_id>/manifest.json`; when `safeExecutionMode: true`, backed up to `<target>.bak.<timestamp>`. Rollback = delete new file + rename `.bak.<ts>` back.
 
-### Recon safeguards (v0.13.0+)
-
-- `moa.maxReconIterations` (default 50, max 500) — hard cap on tool calls per recon task
-- `moa.reconEarlyStopStagnant` (default 2) — stop after N consecutive identical tool signatures
-- `moa.reconEarlyStopSaturated` (default 200) — stop after N iterations adding <200 chars each (post-iter-5)
-- `moa.reconL3Threshold` (default 200000) — single-file size triggering L3 summarization
-- `moa.reconAllowTerminal` (default false) — gate terminal tools in recon
-
-### Local cache & workspace artifacts (v0.14.10+, updated v0.18.0)
+## Local cache
 
 All task state persists to `<workspace>/.moa_cache/<task_id>/`:
 
 ```
 .moa_cache/<task_id>/
-├── state.json              # live MoA state (updated every iteration)
-├── meta.json               # aggregated metadata (models, timings, role breakdown)
+├── state.json              # live state (updated every iteration)
+├── meta.json               # aggregated metadata (models / timings / role breakdown)
 ├── timeline.md             # human-readable per-iteration table
-├── task.txt                # original user prompt
-├── final.md                # Aggregator's final synthesis (markdown)
-├── final.json              # structured action_items[]
+├── final.md / final.json   # Aggregator synthesis / structured action_items
 ├── manifest.json           # SafeExecutor audit log (v0.19.1+)
 ├── autopilot.log           # v0.20.0+ autopilot execution summary
 └── iteration_001/
     ├── planner.json
-    ├── recon/
-    │   ├── advisor_1__DeepSeek-V4-Pro.json
-    │   └── advisor_2__MiniMax-M3.json
+    ├── recon/advisor_1__<model>.json
     ├── recon_aggregator.json
-    ├── refs/
-    │   ├── advisor_1__DeepSeek-V4-Flash.json
-    │   ├── advisor_2__MiniMax-M3.json
-    │   └── advisor_3__GLM-5.2.json
+    ├── refs/advisor_N__<model>.json
     ├── aggregator.json
     └── actor.json (if Actor ran)
 ```
 
-### Tokenizer
-
-**None.** MoA has no tokenizer dependency — no `tiktoken`, no `js-tiktoken`, no `@vscode/*-tokenizer`. All budgets (`reconContextChars`, `reconL3Threshold`, `reconEarlyStopSaturated`, …) are **character-level approximations**. This keeps the bundle small (~370 KB vsix), avoids native bindings, and behaves consistently across Chinese / English / code. The trade-off is that "30k chars" is not "30k tokens" — for code-heavy prompts assume ~1.5-3× ratio.
-
-## Relationship with GCMP
-
-This extension works alongside [GCMP](https://marketplace.visualstudio.com/items?itemName=vicanent.gcmp) but is **independent**. GCMP registers model providers; MoA consumes them via `vscode.lm`. You can use MoA with any provider source (GCMP, Copilot, Ollama, LM Studio, etc.).
-
-## Actor execution control (v0.20.0+)
-
-The Actor role actually *executes* the Aggregator's `action_items` — it can write files, run terminal commands, and produce side effects. v0.20.0 introduces a layered control system to gate this power.
-
-**At a glance — the 4+1 `executionPreset` modes**:
-
-| Preset | Auto-execute after finalize? | Approval popups | Backup `.bak.<ts>` | Use case |
-|---|---|---|---|---|
-| `manual` (default) | ❌ returns markdown; user calls `#moa_execute` | `batch` (Gate-A QuickPick) | ✅ | First-time use, exploratory tasks |
-| `supervised` | ✅ | `batch` (Gate-A QuickPick multi-select per round) | ✅ | Trusted but human-monitored workflows |
-| `autopilot` | ✅ | `none` (zero human-in-the-loop) | ✅ (only safety net) | Trusted CI / repeated retry pipelines |
-| `yolo` | ✅ | `none` | ❌ (irreversible) | Sandboxed / throwaway runs |
-| `custom` | controlled by `autoExecuteAfterFinalize` | controlled by `approvalMode` | controlled by `safeExecutionMode` | Manual fine-grained control |
-
-**Execution flow under each preset**:
-
-```
-finalize completes
-   │
-   ├─ manual:        return markdown → user/main session calls #moa_execute → Gate-A QuickPick → execute
-   ├─ supervised:    auto-call Actor → Gate-A QuickPick multi-select → execute (safeMode on)
-   ├─ autopilot:     auto-call Actor → execute immediately (safeMode on, no popups)
-   ├─ yolo:          auto-call Actor → execute immediately (safeMode off, no popups, no backup)
-   └─ custom:        behavior driven by 3 fine-grained configs below
-```
-
-**The 3 fine-grained configs** (only effective when `executionPreset='custom'`; otherwise preset overrides):
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `moa.autoExecuteAfterFinalize` | boolean | `false` | When `true`, `finalizeTask()` auto-invokes Actor. When `false`, returns markdown for manual `#moa_execute`. |
-| `moa.approvalMode` | `none` \| `batch` \| `per_call` \| `batch_plus_per_call` | `batch` | Approval gate before destructive tool calls. `batch` = Gate-A QuickPick at Actor entry; `per_call` = Gate-B Yes/No dialog before each destructive call; `batch_plus_per_call` = both gates. |
-| `moa.safeExecutionMode` | boolean | `true` | When `true`, SafeExecutor backs up every `write_file` to `<target>.bak.<timestamp>` and records all actions to `manifest.json`. When `false`, no backup (irreversible). |
-
-**Approval gates — two flavors**:
-
-- **Gate-A (batch)**: QuickPick multi-select dialog at the entry of each Actor call. Lists all `action_items` with type + target + rationale. User can deselect unwanted items. Rejected items are recorded as `status: rejected_by_user` in `manifest.json` for auditability.
-- **Gate-B (per-call)**: Yes/No/Yes to All/Reject All dialog before each destructive tool call (`write_file` / `delete` / `execute`). `Yes to All` skips subsequent Gate-B prompts in the same task. `Reject All` throws `ApprovalRejectedError` and aborts the Actor.
-
-**Auditing & recovery**:
-
-- Every side-effecting action (in any preset) is logged to `.moa_cache/<task_id>/manifest.json` with `iter` / `seq` / `type` / `target` / `tool_name` / `input_summary` / `status` / `backup_path` / `output_chars` / `timestamp`.
-- Backups go to `<target>.bak.<timestamp>` next to the original file. To roll back, delete the new file and rename `.bak.<ts>` back.
-- `autopilot.log` (v0.20.0) in the task dir is a human-readable summary: `started_at` / `elapsed_sec` / `tool_calls` / per-action status. Useful for CI logs.
-
-> 📖 For the full bilingual (Chinese + English) configuration reference including all `moa.*` settings, see [README.md → Configuration reference](./README.md#configuration-reference).
+Lifecycle: `moa.cacheTtlDays` (default 30 days, `0` = never auto-cleanup); `moa.cacheRootDir` accepts absolute path for cross-workspace sharing.
 
 ## Configuration reference
 
-All settings live under the `moa.*` namespace. Edit via `settings.json` or use **`Moa: Configure Models`** for the 8-step guided flow. The in-VSCode settings UI shows bilingual descriptions (Chinese + English) for every config item as of v0.20.2+.
+> 📖 The VSCode settings UI descriptions have been fully bilingual (CN + EN) since v0.20.2. For the complete config reference, see [docs/CONFIGURATION.md](./docs/CONFIGURATION.md). This section lists only the most common.
 
-For the full reference tables (Models / Pipeline behavior / Recon tuning / Actor execution control / Cache & lifecycle), see the [bilingual README.md → Configuration reference](./README.md#configuration-reference) section — the tables are language-neutral.
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `moa.presets` | `Object` | `{}` | Named preset groups, each packaging the whole pipeline. Switch via `Moa: Switch Preset`. |
+| `moa.activePreset` | string | `"default"` | Currently active preset key. |
+| `moa.parallelRefs` | boolean | `true` | Parallel fan-out for refs (wall-clock = slowest ref). |
+| `moa.parallelRecon` | boolean | `true` | Parallel fan-out for Recon agents (when `reconModels` has 2+). |
+| `moa.refDisplayMode` | `"thinking"` \| `"verbose"` | `"thinking"` | **Keep `thinking`** (default). `verbose` pollutes Copilot context (N refs × M iters accumulate thousands of tokens). |
+| `moa.enableRecon` | boolean | `true` | Toggle Recon phase. |
+| `moa.enableActingAgent` | boolean | `true` | Toggle Actor phase. |
+| `moa.forceDirect` | boolean | `false` | ⚠️ **Bypasses multi-model safety net** — only use after repeated failures. |
+| `moa.maxReconRounds` | number (1-20) | `3` | Sufficiency loop cap. |
+| `moa.executionPreset` | enum | `"manual"` | Actor execution mode (see above). |
+| `moa.cacheTtlDays` | number (0-36500) | `30` | Task TTL (days), `0` = never cleanup. |
 
 ## Debugging
 
-- Set `"moa.refDisplayMode": "verbose"` to see raw ref outputs inline (useful when debugging aggregator fusion issues). ⚠️ Warning: pollutes Copilot context — see setting description.
-- Run **`Moa: Probe Tools`** to list all registered `vscode.lm.tools` (verifies tool availability).
-- Check `.moa_cache/<task_id>/meta.json` for per-role timings, model invocations, and convergence timeline.
-- Check `.moa_cache/<task_id>/manifest.json` for SafeExecutor audit trail.
+- **`Moa: Probe Available Tools`** — lists all registered `vscode.lm.tools`.
+- **5 OutputChannels** (`View → Output`) — per-role per-iter output.
+- **End-to-end audit**: full trace in `.moa_cache/<task_id>/iteration_NNN/`; `autopilot.log` is human-readable summary.
+- Set `"moa.refDisplayMode": "verbose"` to debug aggregator fusion (⚠️ context pollution risk).
+
+## Relationship with GCMP
+
+**MoA is vendor-agnostic** — it does not import, configure, or depend on [GCMP](https://marketplace.visualstudio.com/items?itemName=vicanent.gcmp). But MoA is more useful with GCMP installed — the whole point of multi-model fan-out is heterogeneous perspective, which is limited with only official Copilot.
 
 ## Build & release
 
 ```bash
-npm run compile       # webpack dev build
-npm run package       # webpack production build
-npx tsc --noEmit      # type-check only
-npm test              # run all tests (node --test)
-npx vsce package      # produce .vsix
+npm install
+npm run compile      # dev bundle
+npm run package      # production bundle
+npx vsce package     # build .vsix
 ```
 
-Release flow:
-
-1. Bump version in `package.json`
-2. `npx vsce package` → produces `moa-bridge-X.Y.Z.vsix`
-3. `git tag vX.Y.Z && git push origin main && git push origin vX.Y.Z`
-4. Create GitHub Release with release notes from `CHANGELOG.md`
-5. `npx vsce publish` (requires Marketplace PAT — currently manual)
+Published to [GitHub Releases](https://github.com/DDL095/vscode-moa/releases) — each release includes the corresponding `.vsix`.
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](./LICENSE) © DDL095

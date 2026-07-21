@@ -5,6 +5,66 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-07-21
+
+### Added — I-2 OutputChannel 日志格式增强（用户原话 #8 #9）
+
+**问题**：v0.17.0 引入的 5 个 OutputChannel 粒度不够详细 —— 无时间戳、无 iter 号（只在 chat progress 显示）、无 token 数/模型名/耗时、无任务起止标记。
+
+**修复**：
+
+- 新增 `src/moaLogUtils.ts`：
+  - `formatLocalTimestamp()` —— 本地时区时间戳（`YYYY-MM-DD HH:mm:ss.SSS <TZ> (UTC+HH:MM)`），不再用 ISO 8601 UTC
+  - `formatLogLine()` —— 结构化前缀 `[ts] [iter N] [role/label] [model: X] event (Ys) details`
+  - `formatTaskBoundary()` —— 任务级多行块（started / finalized / crashed）
+- 5 个角色 hook 点（Planner / Recon / ReconAggregator / Refs / Aggregator / Actor）每个都输出结构化日志
+- 任务 started 边界（createOrchestration 末尾，console 兜底）+ finalized 边界（finalizeTask 末尾，广播到所有已激活 channel）
+- 新增 `test/moaLogUtils.test.ts`（14 个测试用例，覆盖各字段组合 + 边界 + 截断）
+
+### Added — IV-1 JSON 文件名 + 内部字段加轮次与项目信息（用户原话 #13 #14）
+
+**问题**：iteration 目录下的 JSON 文件名（`planner.json` / `refs/advisor_1.json` 等）不含轮次/角色/模型信息，复制出来后丢失上下文。
+
+**修复**：
+
+- `saveIterationArtifact()` 新增 `options: { role?, model?, keepLegacy? }` 参数
+- 新文件名格式：`iteration_NNN__role__model.json`（如 `iteration_001__refs__advisor_1__DeepSeek-V4-Flash.json`）
+- JSON 内部注入 `_meta` 字段：`{ task_id, iter, role, model, saved_at }`
+- 7 个调用点全部更新：planner / recon/{label} / recon_aggregator / refs/{label} / aggregator / actor / recon_request
+- 默认 `keepLegacy: false`（破坏性变更，旧命名不再生成）
+
+### Added — IV-4 meta.json 自描述 + timeline 阶段耗时
+
+**问题**：`.moa_cache/` 目录缺乏 pipeline 架构自描述 —— 几个月后翻看也看不出这是什么 pipeline、loop 怎么收敛、文件布局如何。timeline.md 也不显示每个阶段的运行时间。
+
+**修复**：
+
+- 新增 `src/moaCore/pipelineArchitecture.ts`：
+  - `PIPELINE_ROLES`（6 个角色定义）+ `LOOP_TERMINATION`（max_iter/completeness_threshold/convergence_window/gate_order）+ `FILE_LAYOUT`
+  - `buildPipelineArchitecture(settingsSnapshot)` —— 构造完整 pipeline_architecture 对象
+- `OrchestrationMeta` 接口新增 `pipeline_architecture` 和 `iteration_timings` 字段
+- `renderMetaJson` 注入 pipeline_architecture（含 9 项 settings 快照）+ iteration_timings（每轮每阶段 wall-clock 耗时）
+- 新增 `readSettingsSnapshot()` + `buildIterationTimings()` 辅助函数
+
+### Changed — README 瘦身 + 新流程图 + 模型选用指南
+
+**问题**：README.md 膨胀到 460+ 行，新用户难以快速理解；流程图节点标签内的 `[]` 字符被 mermaid 渲染器误解析为节点形状语法，导致图被压缩成一行纯文本。
+
+**修复**：
+
+- README.md 从 460+ 行瘦身到 180 行，README.en.md 同步瘦身到 180 行
+- 新增简练中文/英文 mermaid 流程图（角色用英文名，数据流用 📦 显著标注）
+- 三根 Recon Aggregator → Refs 连线统一标注 `📦 universal_aggregated_evidence`（用 `==>` 粗线强调同一份统一证据流）
+- 新增"模型选用指南"章节：7 种角色（Planner/Recon/Recon Aggregator/Refs/Aggregator/Actor/L3）的推荐模型特性 + 示例
+- 详细数据流 + Recon Aggregator → Refs → Aggregator 完整 JSON 结构迁入 `docs/ARCHITECTURE.md`
+- 完整配置项参考迁入 `docs/CONFIGURATION.md`
+- README 引用两份独立文档，避免主 README 过载
+
+### Fixed — Mermaid 渲染兼容性
+
+- 移除节点标签内的所有 `[]` 字符（`sub_questions[]` → `sub_questions (list)` 等），避免被 mermaid 误解析为节点形状
+- 更新过时的渲染说明（VSCode 1.58+ 已内置 mermaid 支持）
+
 ## [0.20.4] - 2026-07-21
 
 ### Changed — README.md 全面中文化（中文为主，英文为辅）

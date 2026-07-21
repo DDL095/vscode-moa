@@ -102,14 +102,34 @@ function logPipelineBlock(key, header, content) {
 
 #### 目标
 
-每个 OutputChannel 的每条日志都带结构化前缀：
+每个 OutputChannel 的每条日志都带结构化前缀（**本地时间戳**，不再用 ISO 8601 UTC）：
 
 ```
-[2026-07-21T10:30:45.123Z] [iter 3] [Refs/advisor_1] [model: DeepSeek-V4-Flash]
+[2026-07-21 18:30:45.123 CST] [iter 3] [Refs/advisor_1] [model: DeepSeek-V4-Flash]
   → callLLM (system 450 chars, user 12,340 chars)
   ← response (8,901 chars, elapsed 3.2s, tool_calls: 0)
   → JSON parse OK, confidence=0.85, new_findings=3
 ```
+
+**时间戳本地化**（v0.21.0 新增需求，用户原话 2026-07-21）：
+
+```typescript
+// src/moaLogUtils.ts
+function formatLocalTimestamp(date: Date = new Date()): string {
+  // 读取用户本地时区，格式：YYYY-MM-DD HH:mm:ss.SSS TZ
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone; // 如 'Asia/Shanghai'
+  const offsetMin = -date.getTimezoneOffset();                  // +480 for UTC+8
+  const sign = offsetMin >= 0 ? '+' : '-';
+  const off = `${sign}${String(Math.floor(Math.abs(offsetMin) / 60)).padStart(2,'0')}:${String(Math.abs(offsetMin) % 60).padStart(2,'0')}`;
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} `
+       + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(),3)} `
+       + `${tz} (UTC${off})`;
+}
+// 输出示例：'2026-07-21 18:30:45.123 Asia/Shanghai (UTC+08:00)'
+```
+
+向后兼容：`task_id` 内嵌的 ISO 时间戳保持 UTC（task_id 是机器标识符，UTC 跨时区一致）；仅 OutputChannel / timeline.md / meta.json 中展示给人类的时间字段改为本地。
 
 #### 实现方案
 
@@ -125,7 +145,7 @@ export function formatLogLine(opts: {
   event: string;       // 'callLLM' / 'response' / 'JSON parse OK' / 'tool_call' / ...
   details?: Record<string, unknown>;
 }): string {
-  const ts = new Date().toISOString();
+  const ts = formatLocalTimestamp();   // 本地时间戳（不再用 new Date().toISOString()）
   const iterPart = opts.iter !== undefined ? ` [iter ${opts.iter}]` : '';
   const rolePart = opts.role ? ` [${opts.role}]` : '';
   const modelPart = opts.model ? ` [model: ${opts.model}]` : '';
@@ -329,13 +349,13 @@ grep -rn "iteration_" src/ --include="*.ts"
 
 ---
 
-### IV-4 meta.json pipeline_architecture 字段
+### IV-4 meta.json pipeline_architecture 字段 + timeline.md 阶段耗时
 
 **状态**：🚧 NEXT（v0.21.0 第三项）
-**优先级**：🟡 中（让 `.moa_cache/` 真正自描述，用户原话 #13 #14 引申）
-**工作量**：小（2-3 小时）
+**优先级**：🟡 中（让 `.moa_cache/` 真正自描述，用户原话 #13 #14 引申 + 2026-07-21 timeline 耗时需求）
+**工作量**：小（3-4 小时，原 2-3 小时 + 新增 timeline 阶段耗时 1 小时）
 
-#### 现状
+#### 现状（meta.json）
 
 `OrchestrationMeta` 接口（[src/moaOrchestrator.ts L380-L410](../../src/moaOrchestrator.ts#L380)）当前字段：
 
@@ -354,7 +374,11 @@ interface OrchestrationMeta {
 
 问题：没有 `pipeline_architecture` 字段。把 `.moa_cache/` 整个目录喂给无上下文 AI，它能看出用了哪些模型、跑了多少轮，但**看不出**这个 pipeline 是什么架构（5 角色？loop 怎么收敛？completeness 阈值多少？）。
 
-#### 目标
+#### 现状（timeline.md）
+
+当前 `timeline.md`（[src/moaOrchestrator.ts](../../src/moaOrchestrator.ts) `renderTimelineMarkdown` 函数）每轮一行，仅显示 iter 号 / 模型 / completeness Δ，**不显示每个阶段的运行时间**。用户原话 2026-07-21："timeline 中能否加入每个阶段的运行时间？"
+
+#### 目标 1：meta.json 加 pipeline_architecture 字段
 
 `meta.json` 增加 `pipeline_architecture` 字段，作为"自描述清单"：
 
@@ -493,9 +517,106 @@ meta.pipeline_architecture = buildPipelineArchitecture(settingsSnapshot);
 - `settings_snapshot` 含 6 个核心配置
 - 序列化后 JSON 可读、字段类型正确
 
+#### 目标 2：timeline.md 每轮加入阶段运行时间
+
+当前 timeline.md（伪表格示例）：
+
+```
+| iter | planner | recon | refs | aggregator | completeness | Δ  |
+|------|---------|-------|------|------------|--------------|----|
+|  1   |    ✓    | 8     | 8/8  |     ✓      |   0.32       | —  |
+```
+
+目标（v0.21.0）：
+
+```
+| iter | planner | recon        | refs           | aggregator | actor | total  | compl | Δ    |
+|------|---------|--------------|----------------|------------|-------|--------|-------|------|
+|  1   | 1.2s    | 18.5s (2 ag) | 12.4s (3 adv)  | 3.8s       | —     | 35.9s  | 0.32  |  —   |
+|  2   | —       | 12.1s (2 ag) | 9.8s (3 adv)   | 3.2s       | —     | 25.1s  | 0.57  | +.25 |
+|  3   | —       | 8.4s (1 ag)  | 7.5s (3 adv)   | 2.9s       | 5.1s  | 23.9s  | 0.85  | +.28 |
+```
+
+新增列：每个角色的 wall-clock 耗时（秒）+ 该轮 total + 各阶段的并发数（`(2 ag)` 表示 2 个 Recon Agent 并行）。
+
+#### timeline.md 阶段耗时实现方案
+
+**Step A — 收集 per-role 耗时**（在 [src/moaOrchestrator.ts](../../src/moaOrchestrator.ts) `runIteration` 内部）：
+
+```typescript
+// 在每个角色调用前后记录时间戳
+const t_planner_start = Date.now();
+const plannerResult = await callPlanner(...);
+const planner_elapsed_sec = (Date.now() - t_planner_start) / 1000;
+
+const t_recon_start = Date.now();
+const reconResults = await Promise.all(reconAgents.map(callRecon));
+const recon_elapsed_sec = (Date.now() - t_recon_start) / 1000;  // wall-clock（并行取最大）
+
+const t_refs_start = Date.now();
+const refsResults = await Promise.all(refAdvisors.map(callRef));
+const refs_elapsed_sec = (Date.now() - t_refs_start) / 1000;
+
+const t_agg_start = Date.now();
+const aggResult = await callAggregator(...);
+const agg_elapsed_sec = (Date.now() - t_agg_start) / 1000;
+
+let actor_elapsed_sec: number | null = null;
+if (aggResult.next_action === 'actor_needed') {
+  const t_actor_start = Date.now();
+  await callActor(...);
+  actor_elapsed_sec = (Date.now() - t_actor_start) / 1000;
+}
+
+// 累积到 state.iteration_timings
+state.iteration_timings[iter] = {
+  planner: planner_elapsed_sec,
+  recon: recon_elapsed_sec,
+  recon_parallel_count: reconAgents.length,
+  refs: refs_elapsed_sec,
+  refs_parallel_count: refAdvisors.length,
+  aggregator: agg_elapsed_sec,
+  actor: actor_elapsed_sec,
+  total: planner_elapsed_sec + recon_elapsed_sec + refs_elapsed_sec + agg_elapsed_sec + (actor_elapsed_sec ?? 0),
+};
+```
+
+**Step B — 渲染 timeline.md 时新增列**：
+
+在 `renderTimelineMarkdown()`（[src/moaOrchestrator.ts](../../src/moaOrchestrator.ts)）渲染表格时，从 `state.iteration_timings` 读取并渲染新列。需注意：
+
+- iter 1 才有 planner，其他轮显示 `—`
+- actor 只在 `actor_needed` 时有，否则显示 `—`
+- 时间格式：`< 60s` 显示 `12.4s`，`≥ 60s` 显示 `1m 23s`
+
+**Step C — meta.json 同步加字段**（与 IV-4 主字段一起）：
+
+```typescript
+interface OrchestrationMeta {
+  // ... 原有字段 ...
+  iteration_timings?: Array<{
+    iter: number;
+    planner?: number;       // 秒
+    recon?: number;
+    recon_parallel_count?: number;
+    refs?: number;
+    refs_parallel_count?: number;
+    aggregator?: number;
+    actor?: number | null;
+    total: number;
+  }>;
+}
+```
+
+**Step D — 本地时间戳**：
+
+timeline.md 内所有时间戳（表头、started_at、finished_at）使用 I-2 的 `formatLocalTimestamp()`，不再用 UTC。
+
 #### 依赖
 
 **软依赖 IV-1**（`output_file_pattern` 引用了 IV-1 的新文件名格式）。若 IV-1 先做，pattern 直接对齐；若 IV-1 未做，pattern 用旧格式即可，后续再更新。
+
+**硬依赖 I-2**（timeline.md 本地时间戳使用 I-2 的 `formatLocalTimestamp()`）。
 
 ---
 

@@ -59,6 +59,14 @@ import { resolveExecutionConfig } from './moaCore/safeExecutor';
 import { EXTENSION_VERSION } from './extension';
 // v0.15.0 hotfix 1: evidence 提取纯函数（独立文件便于单测）
 import { buildActorEvidence } from './moaCore/actorEvidence';
+// v0.21.0 I-2 / IV-1 / IV-4: 结构化日志 + 本地时间戳 + 自描述文件名 + pipeline 自描述
+import {
+  formatLocalTimestamp,
+  formatLogLine,
+  formatTaskBoundary,
+  type LogLineOptions,
+} from './moaLogUtils';
+import { buildPipelineArchitecture } from './moaCore/pipelineArchitecture';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types
@@ -279,6 +287,11 @@ function logPipelineBlock(
   logPipeline(key, content);
 }
 
+/** v0.21.0 I-2: 结构化日志（带本地时间戳 + iter/role/model 前缀） */
+function logPipelineStructured(key: PipelineChannelKey, opts: LogLineOptions): void {
+  logPipeline(key, formatLogLine(opts));
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // State persistence
 // ─────────────────────────────────────────────────────────────────────────
@@ -329,14 +342,56 @@ async function saveIterationArtifact(
   taskId: string,
   iteration: number,
   filename: string,
-  data: unknown
+  data: unknown,
+  options?: {
+    /** 角色标签（如 'planner' / 'recon/advisor_1'），提供时自动生成自描述文件名 */
+    role?: string;
+    /** 模型名（如 'GLM-5.2'），提供时拼入文件名 */
+    model?: string;
+    /** 若 true，同时写入新命名（自描述）+ 旧命名（兼容）；默认 false */
+    keepLegacy?: boolean;
+  }
 ): Promise<void> {
   const dir = path.join(await getTaskDir(taskId), `iteration_${String(iteration).padStart(3, '0')}`);
-  const filePath = path.join(dir, filename);
-  // filename may contain subpaths (e.g. "refs/advisor_1.json"), so create
-  // the final file's parent directory, not just dir/ itself.
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+
+  // v0.21.0 IV-1: 自描述文件名 iteration_NNN__role__model.json
+  let finalFilename = filename;
+  if (options?.role) {
+    const iterPart = `iteration_${String(iteration).padStart(3, '0')}`;
+    const rolePart = options.role.replace(/\//g, '__');
+    const modelPart = options.model
+      ? '__' + options.model.replace(/[^A-Za-z0-9._-]/g, '_')
+      : '';
+    finalFilename = `${iterPart}__${rolePart}${modelPart}.json`;
+  }
+
+  const finalPath = path.join(dir, finalFilename);
+  await fs.mkdir(path.dirname(finalPath), { recursive: true });
+
+  // v0.21.0 IV-1: JSON 内部注入 _meta 字段（task_id / iter / role / model / saved_at）
+  const shouldWrap =
+    data && typeof data === 'object' && !Array.isArray(data);
+  const dataWithMeta = shouldWrap
+    ? {
+        ...(data as Record<string, unknown>),
+        _meta: {
+          task_id: taskId,
+          iter: iteration,
+          role: options?.role ?? filename.replace(/\.json$/, ''),
+          model: options?.model,
+          saved_at: formatLocalTimestamp(),
+        },
+      }
+    : data;
+
+  await fs.writeFile(finalPath, JSON.stringify(dataWithMeta, null, 2), 'utf8');
+
+  // 向后兼容：同时写旧命名（仅当 keepLegacy=true 且新旧文件名不同）
+  if (options?.keepLegacy && finalFilename !== filename) {
+    const legacyPath = path.join(dir, filename);
+    await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+    await fs.writeFile(legacyPath, JSON.stringify(dataWithMeta, null, 2), 'utf8');
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -418,6 +473,34 @@ interface OrchestrationMeta {
     output_chars?: number;
     artifacts?: string[];
     error_message?: string;
+  }>;
+
+  // ── v0.21.0 IV-4: pipeline 自描述 + 每轮阶段耗时 ──────────────────
+
+  /** v0.21.0 IV-4: pipeline 架构清单 —— 让 .moa_cache/ 自描述 */
+  pipeline_architecture?: {
+    version: string;
+    description: string;
+    roles: unknown[];
+    loop_termination: {
+      max_iter: number;
+      completeness_threshold: number;
+      convergence_window: number;
+      gate_order: string[];
+    };
+    file_layout: Record<string, string>;
+    settings_snapshot: Record<string, unknown>;
+  };
+
+  /** v0.21.0 IV-4: 每轮每阶段耗时（秒），timeline.md 渲染表格用 */
+  iteration_timings?: Array<{
+    iter: number;
+    planner?: number;
+    recon?: number;
+    refs?: number;
+    aggregator?: number;
+    actor?: number | null;
+    total: number;
   }>;
 }
 
@@ -530,9 +613,49 @@ async function renderMetaJson(
     per_role_breakdown: computePerRoleBreakdown(state),
     model_invocations: buildModelInvocations(state, resolvedRefModels ?? [], resolvedAggregator ?? ''),
     actor_actions_log: buildActorActionsLog(state),
+
+    // v0.21.0 IV-4: pipeline 自描述 + 每轮阶段耗时
+    pipeline_architecture: buildPipelineArchitecture(readSettingsSnapshot()),
+    iteration_timings: buildIterationTimings(state),
   };
 
   await writeMdArtifact(taskId, '', 'meta.json', JSON.stringify(meta, null, 2));
+}
+
+/**
+ * v0.21.0 IV-4: 读取 moa.* 关键配置作为 settings_snapshot。
+ */
+function readSettingsSnapshot(): Record<string, unknown> {
+  const config = vscode.workspace.getConfiguration('moa');
+  return {
+    executionPreset: config.get('executionPreset', 'manual'),
+    approvalMode: config.get('approvalMode', 'batch'),
+    safeExecutionMode: config.get('safeExecutionMode', true),
+    enableRecon: config.get('enableRecon', true),
+    enableActorInLoop: config.get('enableActorInLoop', false),
+    refDisplayMode: config.get('refDisplayMode', 'thinking'),
+    parallelRefs: config.get('parallelRefs', true),
+    parallelRecon: config.get('parallelRecon', true),
+    maxReconRounds: config.get('maxReconRounds', 3),
+  };
+}
+
+/**
+ * v0.21.0 IV-4: 每轮每阶段耗时（秒），从 IterationRecord 的 *_elapsed_sec 字段提取。
+ */
+function buildIterationTimings(state: MoaState): OrchestrationMeta['iteration_timings'] {
+  const out: NonNullable<OrchestrationMeta['iteration_timings']> = [];
+  for (const h of state.history) {
+    const planner = h.planner_elapsed_sec;
+    const recon = h.recon_elapsed_sec;
+    const refs = h.refs_elapsed_sec;
+    const aggregator = h.aggregator_elapsed_sec;
+    const actor = h.actor_result ? h.actor_result.elapsed_sec : null;
+    const sum = (v: number | undefined | null) => (v === undefined || v === null ? 0 : v);
+    const total = sum(planner) + sum(recon) + sum(refs) + sum(aggregator) + sum(actor);
+    out.push({ iter: h.iteration, planner, recon, refs, aggregator, actor, total });
+  }
+  return out;
 }
 
 /**
@@ -1120,6 +1243,9 @@ export async function createOrchestration(task: string): Promise<MoaState> {
   await renderMetaJson(taskId, state);
   await renderTimelineMd(taskId, state);
 
+  // v0.21.0 I-2: 任务开始边界（OutputChannel 尚未懒创建，console 兜底）
+  console.log(formatTaskBoundary('started', { task_id: taskId, task }).join('\n'));
+
   return state;
 }
 
@@ -1192,11 +1318,30 @@ export async function runIteration(
     state.planner = plannerForRecon;
     record.planner_output = plannerForRecon;
     if (plannerForRecon) {
-      await saveIterationArtifact(taskId, iterNum, 'planner.json', plannerForRecon);
+      await saveIterationArtifact(taskId, iterNum, 'planner.json', plannerForRecon, {
+        role: 'planner',
+      });
       // v0.17.0: 把 Planner 输出写到 "MoA Planner" OutputChannel
       logPipelineBlock('planner', `--- Planner @iter${iterNum} (${record.planner_elapsed_sec.toFixed(1)}s) ---`, JSON.stringify(plannerForRecon, null, 2));
+      // v0.21.0 I-2: 结构化日志
+      logPipelineStructured('planner', {
+        iter: iterNum,
+        role: 'Planner',
+        elapsed_sec: record.planner_elapsed_sec,
+        event: 'response',
+        details: {
+          sub_questions: (plannerForRecon.sub_questions ?? []).length,
+          recon_hints: (plannerForRecon.recon_hints ?? []).length,
+        },
+      });
     } else {
       logPipelineBlock('planner', `--- Planner @iter${iterNum} (${record.planner_elapsed_sec.toFixed(1)}s, failed/skipped) ---`, '(no output)');
+      logPipelineStructured('planner', {
+        iter: iterNum,
+        role: 'Planner',
+        elapsed_sec: record.planner_elapsed_sec,
+        event: 'skipped',
+      });
     }
   }
 
@@ -1273,11 +1418,26 @@ export async function runIteration(
     // 并行模式：落盘每个 recon 的细节 + 写 OutputChannel
     if (callResult.mode === 'parallel') {
       for (const r of callResult.results) {
-        await saveIterationArtifact(taskId, iterNum, `recon/${r.label}.json`, r);
+        await saveIterationArtifact(taskId, iterNum, `recon/${r.label}.json`, r, {
+          role: `recon/${r.label}`,
+          model: r.model,
+        });
         const header = r.result.error
           ? `--- ${r.label} (${r.model}) FAILED ---`
           : `--- ${r.label} (${r.model}): ${r.result.tool_calls} calls, ${r.result.elapsed_sec.toFixed(1)}s ---`;
         logPipelineBlock('recon', header, r.result.summary || '(no summary)');
+        // v0.21.0 I-2: 结构化日志
+        logPipelineStructured('recon', {
+          iter: iterNum,
+          role: `Recon/${r.label}`,
+          model: r.model,
+          elapsed_sec: r.result.elapsed_sec,
+          event: r.result.error ? 'failed' : 'completed',
+          details: {
+            tool_calls: r.result.tool_calls,
+            summary_chars: (r.result.summary ?? '').length,
+          },
+        });
       }
     }
 
@@ -1288,6 +1448,18 @@ export async function runIteration(
       `--- Recon Aggregator (${callResult.aggregatorModel}) ${callResult.mode === 'parallel' ? 'merged' : 'normalized'} ---`,
       callResult.merged.summary || '(no merged summary)'
     );
+    // v0.21.0 I-2: Recon Aggregator 结构化日志
+    logPipelineStructured('recon', {
+      iter: iterNum,
+      role: 'ReconAggregator',
+      model: callResult.aggregatorModel,
+      elapsed_sec: record.recon_elapsed_sec,
+      event: callResult.mode === 'parallel' ? 'merge' : 'normalize',
+      details: {
+        mode: callResult.mode,
+        parallel_count: callResult.mode === 'parallel' ? callResult.results.length : 1,
+      },
+    });
 
     // 统一落盘 recon_result.json（含 Aggregator 元信息）
     await saveIterationArtifact(taskId, iterNum, 'recon_result.json', {
@@ -1303,6 +1475,9 @@ export async function runIteration(
             error: r.result.error,
           }))
         : undefined,
+    }, {
+      role: 'recon_aggregator',
+      model: callResult.aggregatorModel,
     });
 
     record.recon_result = reconResult;
@@ -1361,13 +1536,26 @@ export async function runIteration(
   // 但实际无任何代码读 workers/<label>.json 文件——所有读取都走 state.history[].ref_outputs
   // 字段。双写导致落盘文件重复，占用磁盘 + 让用户困惑"两份一样的是不是 bug"）。
   for (const r of refOutputs) {
-    await saveIterationArtifact(taskId, iterNum, `refs/${r.label}.json`, r);
+    await saveIterationArtifact(taskId, iterNum, `refs/${r.label}.json`, r, {
+      role: `refs/${r.label}`,
+      model: r.model,
+    });
     // v0.17.0: 把每个 Ref 的原始输出写到 "MoA Refs" OutputChannel
     // （失败的 ref 也写，便于排查）
     const refHeader = r.error
       ? `--- Ref ${r.label} (${r.model}) @iter${iterNum} FAILED ---`
       : `--- Ref ${r.label} (${r.model}) @iter${iterNum} ---`;
     logPipelineBlock('refs', refHeader, r.error ? `Error: ${r.error}` : r.output);
+    // v0.21.0 I-2: 结构化日志
+    logPipelineStructured('refs', {
+      iter: iterNum,
+      role: `Refs/${r.label}`,
+      model: r.model,
+      event: r.error ? 'failed' : 'response',
+      details: r.error
+        ? { error_chars: r.error.length }
+        : { output_chars: r.output.length },
+    });
   }
   progress?.(`[MoA Refs] ${refOutputs.filter((r) => !r.error).length}/${refOutputs.length} refs succeeded`);
 
@@ -1399,11 +1587,28 @@ export async function runIteration(
     record.aggregator_elapsed_sec = (Date.now() - aggregatorStart) / 1000;
     aggOutput = extractJson(aggRaw) as CoreAggregatorOutput;
     record.aggregator_output = aggOutput;
-    await saveIterationArtifact(taskId, iterNum, 'aggregator.json', aggOutput);
+    await saveIterationArtifact(taskId, iterNum, 'aggregator.json', aggOutput, {
+      role: 'aggregator',
+      model: aggregator.model.name,
+    });
     // v0.17.0: 把 Aggregator 原始输出 + 解析后 JSON 都写到 "MoA Aggregator" OutputChannel
     // raw 输出可能含 LLM 的 fence / 解释，parsed 是干净 JSON，都保留便于排查
     logPipelineBlock('aggregator', `--- Aggregator @iter${iterNum} (raw, ${aggregator.model.name}, ${record.aggregator_elapsed_sec.toFixed(1)}s) ---`, aggRaw);
     logPipelineBlock('aggregator', `--- Aggregator @iter${iterNum} (parsed) ---`, JSON.stringify(aggOutput, null, 2));
+    // v0.21.0 I-2: 结构化日志（含 completeness / next_action）
+    logPipelineStructured('aggregator', {
+      iter: iterNum,
+      role: 'Aggregator',
+      model: aggregator.model.name,
+      elapsed_sec: record.aggregator_elapsed_sec,
+      event: 'fuse',
+      details: {
+        completeness: aggOutput.evidence_coverage.toFixed(2),
+        next_action: aggOutput.next_action,
+        action_items: (aggOutput.action_items ?? []).length,
+        gaps: (aggOutput.critical_gaps ?? []).length,
+      },
+    });
   } catch (err) {
     state.status = 'error';
     state.error = `Aggregator failed in iteration ${iterNum}: ${err instanceof Error ? err.message : String(err)}`;
@@ -1515,7 +1720,9 @@ export async function runIteration(
       }, token, progress, undefined, toolInvocationToken);
       record.actor_result = actorResult;
       state.actor_history.push(actorResult);
-      await saveIterationArtifact(taskId, iterNum, 'actor_result.json', actorResult);
+      await saveIterationArtifact(taskId, iterNum, 'actor_result.json', actorResult, {
+        role: 'actor',
+      });
 
       // v0.17.0: 把 Actor 执行结果写到 OutputChannel
       //   - 每个 action_item 的 status / artifacts / error_message
@@ -1546,6 +1753,23 @@ export async function runIteration(
       if (actorResult.error) {
         logPipelineBlock('actor', `--- Actor FAILED @iter${iterNum} ---`, actorResult.error);
       }
+      // v0.21.0 I-2: 结构化日志
+      const executedN = actorResult.executed_actions.length;
+      const succeededN = actorResult.executed_actions.filter((a) => a.status === 'success').length;
+      const failedN = executedN - succeededN;
+      logPipelineStructured('actor', {
+        iter: iterNum,
+        role: 'Actor',
+        elapsed_sec: actorResult.elapsed_sec,
+        event: actorResult.error ? 'failed' : 'completed',
+        details: {
+          executed: executedN,
+          succeeded: succeededN,
+          failed: failedN,
+          tool_calls: actorResult.tool_calls,
+          all_succeeded: actorResult.self_assessment.all_succeeded,
+        },
+      });
 
       // Actor 产出进 evidence（high confidence，下轮 Refs 自然评估质量）
       // v0.15.0 hotfix 1: Actor LLM 经常不回填 action.content，必须防御性访问
@@ -1573,7 +1797,9 @@ export async function runIteration(
         gaps: state.gaps,
         prompt: '(v0.15.0 auto-recon — main session does not need to feed back)',
       };
-      await saveIterationArtifact(taskId, iterNum, 'recon_request.json', record.recon_request);
+      await saveIterationArtifact(taskId, iterNum, 'recon_request.json', record.recon_request, {
+        role: 'recon_request',
+      });
     }
     progress?.(`[MoA] iteration ${iterNum} complete (recon_needed), continuing with reason=${aggOutput.recon_reason ?? 'missing_data'}`);
   }
@@ -1760,6 +1986,22 @@ export async function finalizeTask(
       const msg = err instanceof Error ? err.message : String(err);
       logPipelineBlock('actor', `--- Autopilot failed ---`, msg);
       // autopilot 失败不阻塞 finalize 返回（已收敛的任务结果完整保留）
+    }
+  }
+
+  // v0.21.0 I-2: 任务结束边界（只广播到懒创建过的 channel）
+  const finalizeLines = formatTaskBoundary('finalized', {
+    task_id: taskId,
+    task: state.task,
+    iter: state.iteration,
+    extra: {
+      completeness: state.completeness.toFixed(2),
+      convergence: state.convergence_source ?? 'unknown',
+    },
+  });
+  for (const key of Object.keys(_pipelineChannels) as PipelineChannelKey[]) {
+    for (const line of finalizeLines) {
+      logPipeline(key, line);
     }
   }
 
