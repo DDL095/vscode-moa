@@ -98,6 +98,16 @@ export async function callActor(
      * 写 manifest.json 和 _trash/。可选（不传则不启用保守执行模式）。
      */
     taskDir?: string;
+    /**
+     * v0.22.0 P0-5: 基础设施层注入文本(由 systemContext.renderForRole('actor') 生成)。
+     * 调用方缓存复用,空字符串时退化为 v0.21.x 行为。
+     */
+    systemContextText?: string;
+    /**
+     * v0.22.0 P0-5: Actor 角色身份层注入文本(Planner 的 role_setup.actor 渲染)。
+     * P0-1 实施后由调用方构建。
+     */
+    roleSetupText?: string;
   },
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,

@@ -26,6 +26,7 @@ import {
   ReconReason,
   ReconResult,
   PlannerOutput,
+  ReconAggregatorRoleSetup,
 } from './roles';
 import { getActivePresetConfig } from '../presetConfig';
 import { runReconAgent } from '../actingAgent';
@@ -215,8 +216,42 @@ function buildReconAggregatorPrompt(params: {
   iteration: number;
   reason: ReconReason;
   reconResults: Array<{ label: string; model: string; summary: string }>;
+  /**
+   * v0.22.0 P0-4: Planner 驱动模式下的 role_setup。
+   * - undefined(默认) → 走内置静态 prompt(default 模式)
+   * - 提供            → 拼到 system prompt 开头(planner 模式)
+   *
+   * 双轨制由配置项 moa.reconAggregatorMode 控制,callRecon 调用方根据
+   * mode 决定是否传入 roleSetup。
+   */
+  roleSetup?: ReconAggregatorRoleSetup;
 }): { system: string; user: string } {
-  const { task, iteration, reason, reconResults } = params;
+  const { task, iteration, reason, reconResults, roleSetup } = params;
+
+  // v0.22.0 P0-4: 双轨制 — roleSetup 非空时,把 Planner 定制的 tone/perspective/focus
+  //                拼到 system prompt 开头
+  const roleSetupBlock: string[] = [];
+  if (roleSetup) {
+    roleSetupBlock.push('=== ROLE SETUP (Planner 定制) ===');
+    if (roleSetup.tone) {
+      const toneLabel: Record<NonNullable<ReconAggregatorRoleSetup['tone']>, string> = {
+        'faithful-integrator': '忠实整合(默认):保留原证据,做去重/排序/识别与保留冲突',
+        'strict-evidence': '严谨证据:严格保留所有数字/引用/关键句,不做任何整合性推理',
+        'creative-explorer': '创造探索:鼓励识别跨 recon 的隐性主题',
+        'conservative': '保守模式:仅做最小去重,尽量保留原文',
+      };
+      roleSetupBlock.push(`Tone: ${roleSetup.tone} — ${toneLabel[roleSetup.tone] ?? ''}`);
+    }
+    if (roleSetup.perspective) {
+      roleSetupBlock.push(`Perspective: ${roleSetup.perspective}`);
+    }
+    if (roleSetup.focus && roleSetup.focus.length > 0) {
+      roleSetupBlock.push(`Focus: ${roleSetup.focus.join(' / ')}`);
+    }
+    roleSetupBlock.push('');
+    roleSetupBlock.push('(以上是 Planner 根据任务属性定制的整合风格,优先尊重;若与下方默认原则冲突,以定制为准)');
+    roleSetupBlock.push('');
+  }
 
   const system = [
     '你是 MoA 流水线的 Recon Aggregator（侦察整合者）—— 一个 agent 化的整合者。',
@@ -226,14 +261,17 @@ function buildReconAggregatorPrompt(params: {
     '把 N 个并行 Recon agent 的结果**整合成一份完整的 summary**，',
     '注入下游 Refs/Aggregator 作为 evidence。',
     '',
-    '## 整合原则（重要）',
+    '## 整合原则（v0.22.0 P0-4 v2 — 对齐用户"识别与保留冲突"哲学）',
     '',
-    '**完整无偏差**：',
+    '**完整无偏差 + 识别与保留冲突**：',
     '- 保留所有证据（不丢、不删减）',
     '- 去重：完全相同的内容只保留一份（标注多个来源）',
-    '- 整合：相关主题的内容合并到同一节，避免散落',
     '- 排序：按对任务的相关性排序（最相关的放前面）',
     '- 标注来源：每条证据标注 [from <label>]（如 [from recon_1]）',
+    '- **识别与保留冲突**：多 Recon 间说法不一致时,**保留两边** + 标注 "[冲突] A vs B"',
+    '  (不要强行"消歧"——冲突是 Refs 分析的重要素材,Refs 自己决定哪边更可信)',
+    '- **缺口识别**：所有 recon 都没覆盖的主题,显式列出 "[缺口] X 主题未查"',
+    '- **证据质量分级**：每条证据标注 [high/medium/low] confidence(基于来源权威性)',
     '',
     '## 工具使用（严格限制）',
     '',
@@ -260,6 +298,7 @@ function buildReconAggregatorPrompt(params: {
     '- ❌ 不要补 gap（gap 是下一轮 Recon 的事）',
     '- ❌ 不要做分析（分析是 Refs 的事）',
     '- ❌ 不要总结成 brief（Refs 需要完整内容做 grounded analysis）',
+    '- ❌ 不要强行消歧(冲突留给 Refs 判断)',
     '',
     '你的角色是**搬运工 + 整理者 + 查证者**，不是分析师，也不是侦察员。',
     '把 N 份原料整理成一份完整、无偏差、易读的原料库。',
@@ -269,30 +308,35 @@ function buildReconAggregatorPrompt(params: {
     '```',
     '## Recon 综合摘要 (iteration {N}, merged from {M} sources)',
     '',
-    '<整合后的完整证据，按主题/相关性分节>',
+    '<整合后的完整证据,按主题/相关性分节,每条带 confidence 标注>',
     '',
     '### 主题 1',
     '',
-    '- 证据点 A (来源: [from recon_1], [from recon_2])',
+    '- 证据点 A [high] (来源: [from recon_1], [from recon_2])',
     '  <完整内容>',
-    '- 证据点 B (来源: [from recon_2])',
+    '- 证据点 B [medium] (来源: [from recon_2])',
     '  <完整内容>',
     '',
     '### 主题 2',
     '',
     '...',
     '',
-    '## 冲突点（如适用）',
+    '## 冲突点(保留,不消歧)',
     '',
-    '- <recon_1 说 X，recon_2 说 Y>（如已查证，标注查证结果；否则让下游 Refs 判断）',
+    '- [冲突] recon_1 说 X,recon_2 说 Y(让下游 Refs 判断)',
     '',
-    '## 全局缺失（如适用）',
+    '## 全局缺口(识别但保留)',
     '',
-    '- <所有 recon 都没查到的>（让 Aggregator 标记为 critical_gap）',
+    '- [缺口] <所有 recon 都没查到的>(让 Aggregator 标记为 critical_gap)',
     '```',
     '',
     '匹配任务语言（中文任务 → 中文输出）。',
   ].join('\n');
+
+  // v0.22.0 P0-4: 拼装最终 system — roleSetup 非空时拼到开头,否则直接用默认 system
+  const finalSystem = roleSetupBlock.length > 0
+    ? roleSetupBlock.join('\n') + '\n' + system
+    : system;
 
   const userParts: string[] = [
     '### 任务',
@@ -313,10 +357,10 @@ function buildReconAggregatorPrompt(params: {
     userParts.push('');
   }
 
-  userParts.push('请按整合原则处理：完整无偏差、去重、整合、排序、标注来源。');
+  userParts.push('请按整合原则处理:完整无偏差、去重、排序、识别与保留冲突、缺口识别、证据质量分级。');
   userParts.push('如需查证已有引用的细节，可调工具；但禁止重新做侦察。');
 
-  return { system, user: userParts.join('\n') };
+  return { system: finalSystem, user: userParts.join('\n') };
 }
 
 /**
@@ -324,6 +368,11 @@ function buildReconAggregatorPrompt(params: {
  *
  * v0.18.0: 改用 runActingAgent（full 工具），而非纯 LLM 调用。
  * 工具用途由 prompt 严格约束（查证 vs 侦察）。
+ *
+ * v0.22.0 P0-4: 新增可选 roleSetup 参数,实现双轨制:
+ *   - moa.reconAggregatorMode='default'(默认) → roleSetup=undefined,走内置 prompt
+ *   - moa.reconAggregatorMode='planner'        → roleSetup 来自 Planner 的 role_setup.recon_aggregator
+ *   P0-1 落地后,callRecon 调用方会根据 PlannerOutput 决定是否传入。
  */
 async function callReconAggregator(
   params: {
@@ -331,6 +380,8 @@ async function callReconAggregator(
     iteration: number;
     reason: ReconReason;
     reconResults: ParallelReconResult[];
+    /** v0.22.0 P0-4: Planner 驱动模式下的 role_setup(可选) */
+    roleSetup?: ReconAggregatorRoleSetup;
   },
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,
@@ -338,7 +389,7 @@ async function callReconAggregator(
 ): Promise<{ summary: string; model: string; elapsed_sec: number; tool_calls: number }> {
   const start = Date.now();
   const model = await resolveReconAggregatorModel();
-  progress?.(`[MoA Recon Aggregator] merging ${params.reconResults.length} recon results with ${model.name} (agent mode)...`);
+  progress?.(`[MoA Recon Aggregator] merging ${params.reconResults.length} recon results with ${model.name} (agent mode${params.roleSetup ? ', planner-driven' : ''})...`);
 
   const { system, user } = buildReconAggregatorPrompt({
     task: params.task,
@@ -349,6 +400,7 @@ async function callReconAggregator(
       model: r.model,
       summary: r.result.summary,
     })),
+    roleSetup: params.roleSetup,
   });
 
   // v0.18.0: 用 runActingAgent（full 工具，agent 化）
@@ -411,6 +463,24 @@ export async function callRecon(
     actorLog?: string;
     evidenceBrief: string;
     iteration: number;
+    /**
+     * v0.22.0 P0-4: Recon Aggregator 的 role_setup(可选,Planner 驱动模式)。
+     *
+     * 启用条件:moa.reconAggregatorMode='planner'(默认 'default')。
+     * 调用方(moaOrchestrator.ts)负责根据配置项 + Planner 输出决定是否传入。
+     * P0-4 阶段 PlannerOutput 还没有 role_setup 字段,P0-1 实施后才会真正传入。
+     */
+    reconAggregatorRoleSetup?: ReconAggregatorRoleSetup;
+    /**
+     * v0.22.0 P0-5: 基础设施层注入文本(由 systemContext.renderForRole('recon') 生成)。
+     * 调用方缓存复用,空字符串时退化为 v0.21.x 行为。
+     */
+    systemContextText?: string;
+    /**
+     * v0.22.0 P0-5: Recon 角色身份层注入文本(Planner 的 role_setup.recon 渲染)。
+     * P0-1 实施后由调用方构建。
+     */
+    roleSetupText?: string;
   },
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,
@@ -419,19 +489,40 @@ export async function callRecon(
 ): Promise<CallReconResult> {
   const resolvedModels = await resolveAllReconModels();
 
-  // 读取并行开关
+  // 读取并行开关 + v0.22.0 P0-4: Recon Aggregator 模式开关
   const config = vscode.workspace.getConfiguration('moa');
   const parallelRecon = config.get<boolean>('parallelRecon') ?? true;
+  const reconAggregatorMode = config.get<'default' | 'planner'>('reconAggregatorMode') ?? 'default';
 
   // 决策：并行 or 单模型
   //   v0.18.0 方案 B：无论几个模型，都过 Aggregator（保证下游格式一致）
+  //   v0.22.0 P0-4: 即使单 Recon 也跑 Aggregator(已由 v0.18.0 方案 B 实现),
+  //                 本版本新增"始终落盘原始 Recon 产出"(由 moaOrchestrator 负责)
   //   区别仅在于：
   //     - 单模式：只跑 1 个 recon → Aggregator 整理（去噪、标准化格式）
   //     - 并行模式：跑 N 个 recon → Aggregator 去重、整合、标注来源
   const shouldParallel = parallelRecon && resolvedModels.length >= 2;
 
+  // v0.22.0 P0-4: 根据 mode 决定是否使用 Planner 提供的 role_setup
+  //   default 模式 → 不传(走内置 prompt)
+  //   planner 模式 → 透传调用方提供的 roleSetup(P0-1 实施后才有值)
+  const effectiveRoleSetup = reconAggregatorMode === 'planner'
+    ? params.reconAggregatorRoleSetup
+    : undefined;
+
   // ── 阶段 1：跑 Recon agent(s) ──
-  const { system, user } = buildReconPrompt(params);
+  // v0.22.0 P0-5: 透传 systemContextText + roleSetupText 给 buildReconPrompt
+  const { system, user } = buildReconPrompt({
+    userPrompt: params.userPrompt,
+    planner: params.planner,
+    reason: params.reason,
+    gaps: params.gaps,
+    actorLog: params.actorLog,
+    evidenceBrief: params.evidenceBrief,
+    iteration: params.iteration,
+    systemContextText: params.systemContextText,
+    roleSetupText: params.roleSetupText,
+  });
 
   let parallelResults: ParallelReconResult[];
   if (shouldParallel) {
@@ -519,6 +610,7 @@ export async function callRecon(
       iteration: params.iteration,
       reason: params.reason,
       reconResults: parallelResults,
+      roleSetup: effectiveRoleSetup,
     }, token, progress, toolInvocationToken);
     mergedSummary = aggResult.summary;
     aggregatorModelName = aggResult.model;
@@ -572,6 +664,10 @@ async function runSingleRecon(
     actorLog?: string;
     evidenceBrief: string;
     iteration: number;
+    /** v0.22.0 P0-5: 仅在 fallback 路径(customSystem/customUser 未传)生效 */
+    systemContextText?: string;
+    /** v0.22.0 P0-5: 同上 */
+    roleSetupText?: string;
   },
   token: vscode.CancellationToken,
   progress?: (msg: string) => void,

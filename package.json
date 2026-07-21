@@ -157,6 +157,12 @@
         "title": "MoA: Cleanup All Tasks (High Risk)",
         "category": "MoA",
         "description": "v0.19.1: Remove ALL MoA task caches (all workspaces). High-risk operation, requires explicit confirmation. Useful for full reset."
+      },
+      {
+        "command": "moa.diagnoseEnvironment",
+        "title": "MoA: Diagnose Environment (v0.22)",
+        "category": "MoA",
+        "description": "v0.22.0: Run 12 environment checks (active editor / open docs / workspace / project tree / git root / instruction files / skill folders / LM tools / LM models / active preset / role preset / entry type). Outputs a Markdown report to an untitled document and the 'MoA Environment Diagnostics' OutputChannel."
       }
     ],
     "languageModelTools": [
@@ -443,6 +449,13 @@
           "default": true,
           "description": "Fan out Recon agents in parallel when preset.reconModels has 2+ models. When true (default), all recon agents run simultaneously → wall-clock time = slowest. When false, or when only 1 recon model is configured, runs sequentially (single-model mode) and Recon Aggregator is auto-disabled. Parallel recon produces N independent results that are merged by Recon Aggregator (pure LLM integration, no tool calls) into a single summary before injecting to Refs.\n\n---\n\n当 preset.reconModels 有 2+ 个模型时并行扇出 Recon 代理。**true**（默认）= 所有 recon 代理同时运行，wall-clock = 最慢者。**false** 或只配置了 1 个 recon 模型时，串行运行（单模型模式），Recon Aggregator 自动禁用。并行 recon 产生 N 个独立结果，由 Recon Aggregator（纯 LLM 整合，无工具调用）合并成单一 summary 后注入 Refs。",
           "order": 20
+        },
+        "moa.reconAggregatorMode": {
+          "type": "string",
+          "enum": ["default", "planner"],
+          "default": "default",
+          "description": "v0.22.0 P0-4: Recon Aggregator role setup source. 'default' = built-in static prompt (v0.18.0 behavior); 'planner' = use Planner's role_setup.recon_aggregator (tone/perspective/focus). When 'planner' is selected but Planner hasn't produced role_setup yet (e.g. P0-1 not yet implemented), falls back to 'default' automatically.\n\n---\n\nv0.22.0 P0-4:Recon Aggregator 角色设定来源。'default'(默认)= 内置静态 prompt(v0.18.0 行为);'planner' = 使用 Planner 给的 role_setup.recon_aggregator(tone/perspective/focus)。当选择 'planner' 但 Planner 还未输出 role_setup 时(如 P0-1 未实施),自动 fallback 到 'default'。",
+          "order": 21
         },
         "moa.presets": {
           "type": "object",

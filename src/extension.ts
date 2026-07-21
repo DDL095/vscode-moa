@@ -22,6 +22,8 @@ import { registerMoaReconTool } from './moaReconTool';
 import { registerMoaOrchestrateTools } from './moaOrchestrateTools';
 // v0.19.1 §4: CacheManager
 import { registerCacheManagerCommands } from './cacheManager';
+// v0.22.0 P0-11: Environment diagnostics
+import { runDiagnoseEnvironmentCommand } from './diagnostics';
 
 const PARTICIPANT_ID = 'moa-bridge.moa';
 const PARTICIPANT_LOOP_ID = 'moa-bridge.moaloop';
@@ -119,6 +121,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // v0.19.1 §4: CacheManager 命令注册
     registerCacheManagerCommands(context);
+
+    // v0.22.0 P0-11: Environment diagnostics
+    context.subscriptions.push(
+      vscode.commands.registerCommand('moa.diagnoseEnvironment', runDiagnoseEnvironmentCommand)
+    );
+    diag().appendLine('[MoA activate] moa.diagnoseEnvironment registered OK');
 
     // v0.14.14: Auto-migrate legacy flat config → presets.default (idempotent).
     // Fire-and-forget — runs in background, logs to diag channel on completion.
