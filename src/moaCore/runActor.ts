@@ -21,7 +21,12 @@ import {
 import { getActivePresetConfig } from '../presetConfig';
 import { runActingAgent } from '../actingAgent';
 // v0.19.1 §3: SafeExecutor（保守执行模式）
-import { createSafeExecutor, SafeActionRecord } from './safeExecutor';
+import {
+  createSafeExecutor,
+  SafeActionRecord,
+  ApprovalRejectedError,
+  resolveExecutionConfig,
+} from './safeExecutor';
 // v0.19.2 §1.4: 文件读取兜底（从 manifest 反构 executed_actions）
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -101,34 +106,100 @@ export async function callActor(
 ): Promise<ActorResult> {
   const start = Date.now();
 
+  // v0.20.0: 提升 rejectedResults 到 try 之外，让 catch 块也能见到 Gate-A 拒绝项
+  let rejectedResults: ActorActionResult[] = [];
+
   try {
     const model = await resolveActorModel();
-    progress?.(`[MoA Actor] iteration ${params.iteration}, model=${model.name}, ${params.actionItems.length} action(s)`);
 
-    const { system, user } = buildActorPrompt(params);
-    // Acting agent 的接口是 (model, aggregatorGuidance, userPrompt, ...)
-    // 我们把 Actor 的 system prompt 作为 aggregatorGuidance 注入
-    const combinedPrompt = system + '\n\n=== ORIGINAL USER QUESTION ===\n' + params.task;
+    // v0.20.0: 解析执行配置（executionPreset → 三个细粒度配置生效值）
+    const execConfig = resolveExecutionConfig();
+    progress?.(
+      `[MoA Actor] executionPreset=${execConfig.preset} | ` +
+      `autoExecute=${execConfig.autoExecute} | approvalMode=${execConfig.approvalMode} | safeMode=${execConfig.safeMode}`
+    );
 
-    const actingStream = stream ?? createProgressOnlyStream(progress);
-
-    // v0.19.1 §3: SafeExecutor（保守执行模式）
+    // v0.19.1 §3 + v0.20.0: SafeExecutor 优先于 Gate-A 构造，因为 Gate-A 需要它
     //
     // 仅当以下条件全部满足时启用：
     //   1. params.taskDir 存在（moaOrchestrator 传入）
-    //   2. moa.safeExecutionMode 配置为 true（默认 true）
+    //   2. execConfig.safeMode = true（yolo 模式会关闭）
     //
     // 启用后，所有 tool calls 会经过 SafeExecutor 拦截：
     //   - write_file / delete 类：预备份 + manifest 记录
     //   - execute 类：仅 manifest 记录
     //   - read / grep / other：仅 manifest 记录
-    const safeModeEnabled = vscode.workspace.getConfiguration('moa').get<boolean>('safeExecutionMode', true);
-    const safeExecutor = (params.taskDir && safeModeEnabled)
+    const safeExecutor = (params.taskDir && execConfig.safeMode)
       ? createSafeExecutor(params.taskDir, params.iteration, progress)
       : undefined;
     if (safeExecutor) {
       progress?.(`[MoA Actor] SafeExecutor enabled (manifest will be written to ${params.taskDir}/manifest.json)`);
     }
+
+    // ── v0.20.0: Gate-A 批量审批（Actor 入口）────────────────────────────
+    // approvalMode ∈ {batch, batch_plus_per_call} 时弹 QuickPick 多选。
+    // 未勾选的 action_items 直接构造为 status='rejected_by_user' 返回，
+    // 不进入 Actor prompt；勾选的进入正常执行流程。
+    //   - approvalMode='none' → 全勾选，直通
+    //   - approvalMode='per_call' → 全勾选，但 Gate-B 每次破坏性调用会拦截
+    let approvedItems = params.actionItems;
+    const rejectedItems: typeof params.actionItems = [];
+    if (safeExecutor && params.actionItems.length > 0
+        && (execConfig.approvalMode === 'batch' || execConfig.approvalMode === 'batch_plus_per_call')) {
+      const picked = await safeExecutor.requestBatchApproval(params.actionItems);
+      const pickedSet = new Set(picked);
+      approvedItems = params.actionItems.filter((a) => pickedSet.has(a));
+      rejectedItems.push(...params.actionItems.filter((a) => !pickedSet.has(a)));
+      progress?.(
+        `[MoA Actor] Gate-A: approved=${approvedItems.length}/${params.actionItems.length}, ` +
+        `rejected=${rejectedItems.length}`
+      );
+    }
+
+    // 把被拒绝的 action_items 预先加到 executedActions（后面会再 merge）
+    const rejected: ActorActionResult[] = rejectedItems.map((a) => ({
+      action: {
+        type: a.type,
+        target: a.target,
+        content: a.content,
+        rationale: a.rationale,
+      },
+      status: 'rejected_by_user' as const,
+      output_chars: 0,
+      error_message: 'User declined in Gate-A (batch approval)',
+      artifacts: [],
+    }));
+    rejectedResults = rejected;
+
+    // v0.20.0: 若 Gate-A 全部拒绝，短路返回（避免 LLM 跑空）
+    if (approvedItems.length === 0 && params.actionItems.length > 0) {
+      const elapsed = (Date.now() - start) / 1000;
+      progress?.(`[MoA Actor] All action_items rejected in Gate-A; short-circuiting.`);
+      return {
+        executed_actions: rejectedResults,
+        self_assessment: {
+          all_succeeded: false,
+          missing_dependencies: [],
+          should_recon: false,
+          reason: 'All action_items rejected by user in Gate-A batch approval',
+        },
+        elapsed_sec: elapsed,
+        tool_calls: 0,
+        error: undefined,
+      };
+    }
+
+    progress?.(`[MoA Actor] iteration ${params.iteration}, model=${model.name}, ${approvedItems.length} approved action(s)`);
+
+    // 用 approvedItems 重建 params（后续 Actor 只看到批准子集）
+    const approvedParams = { ...params, actionItems: approvedItems };
+
+    const { system, user } = buildActorPrompt(approvedParams);
+    // Acting agent 的接口是 (model, aggregatorGuidance, userPrompt, ...)
+    // 我们把 Actor 的 system prompt 作为 aggregatorGuidance 注入
+    const combinedPrompt = system + '\n\n=== ORIGINAL USER QUESTION ===\n' + params.task;
+
+    const actingStream = stream ?? createProgressOnlyStream(progress);
 
     // 使用默认 acting agent prompt（不传 systemPrompt override）
     // 把 Actor 的指令通过 aggregatorGuidance 注入
@@ -285,8 +356,14 @@ export async function callActor(
       }
     }
 
+    // v0.20.0: 把 Gate-A 拒绝项 prepend 到返回（保持用户能看见他们拒绝过的项）
+    const finalActions = [...rejectedResults, ...executedActions];
+    if (rejectedResults.length > 0) {
+      progress?.(`[MoA Actor] Final: ${rejectedResults.length} rejected (Gate-A) + ${executedActions.length} executed`);
+    }
+
     return {
-      executed_actions: executedActions,
+      executed_actions: finalActions,
       self_assessment: selfAssessment,
       elapsed_sec: elapsed,
       tool_calls: result.toolCallsSucceeded + result.toolCallsFailed,
@@ -296,8 +373,13 @@ export async function callActor(
     const elapsed = (Date.now() - start) / 1000;
     const msg = err instanceof Error ? err.message : String(err);
     progress?.(`[MoA Actor] CRITICAL failure in ${elapsed.toFixed(1)}s: ${msg.substring(0, 100)}`);
+    // v0.20.0: 即使 critical failure 也要保留 Gate-A 拒绝项
+    // （rejectedResults 在 try-block 内定义，但 catch 块 lexical 可见）
+    const finalActions = err instanceof ApprovalRejectedError
+      ? [...rejectedResults]   // ApprovalRejectedError 路径下 executedActions 没被构造
+      : [...rejectedResults];
     return {
-      executed_actions: [],
+      executed_actions: finalActions,
       self_assessment: {
         all_succeeded: false,
         missing_dependencies: [],

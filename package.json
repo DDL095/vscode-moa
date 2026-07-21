@@ -2,7 +2,8 @@
   "name": "moa-bridge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.19.2",
+  "version": "0.20.0",
+
   "publisher": "dudali095",
   "license": "MIT",
   "repository": {
@@ -352,6 +353,34 @@
         "icon": "$(check-all)",
         "modelDescription": "Force-finalize an MoA orchestration loop and produce concrete action items. Use this when the loop has converged (previous status was 'finalized') OR when you want to stop early and get the current best answer. Returns action_items to execute: write_file (with target=path and full content), execute (target=shell command), create_roadmap (target=plan title), research_more (target=follow-up topic), inform_user (target=subject + message). After receiving action_items, execute them using your own tools (copilot_createFile for files, run_in_terminal for commands, etc.).",
         "userDescription": "Force-finalize an MoA orchestration loop and produce action items (v0.12.0). Call this when the loop has converged (status='finalized') OR when you want to stop early. Returns a JSON-shaped Markdown with: summary, action_items[{type, target, content, rationale}], confidence, unresolved.\n\nAction item types: write_file (target=path, content=full text), execute (target=command), create_roadmap (target=title), research_more (target=topic), inform_user (target=subject).\n\nAfter receiving action_items, execute them using your own tools (writeFile, run_in_terminal, etc.)."
+      },
+      {
+        "name": "moa_execute",
+        "displayName": "MoA Execute (Run Action Items)",
+        "tags": [
+          "moa",
+          "execution",
+          "actor",
+          "safe-executor"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "task_id"
+          ],
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "The task_id of a finalized MoA task (must have a final.json with action_items)."
+            }
+          },
+          "additionalProperties": false
+        },
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "moaExecute",
+        "icon": "$(play)",
+        "modelDescription": "v0.20.0: Run Actor on the finalized action_items of a task. Equivalent to what the user does manually by writing files / running commands — but safer (SafeExecutor backs up every change). Subject to the approvalMode gate: if 'batch' or 'batch_plus_per_call', a QuickPick is shown listing action_items; if 'per_call', each destructive tool call is gated. Skip this tool when executionPreset='autopilot' (already runs automatically after finalize).",
+        "userDescription": "Execute the action_items stored in final.json of a finalized MoA task (v0.20.0). Requires #moa_finalize to have been called first. Subject to approval gates defined by executionPreset (default: batch QuickPick multi-select). Use after #moa_finalize when executionPreset='manual'. Skipped automatically when executionPreset='supervised'/'autopilot'/'yolo'.\n\nReturns a summary with executed_actions [{status, action.type, target, error_message, artifacts}] and a pointer to <taskDir>/autopilot.log for full details."
       }
     ],
     "configuration": {
@@ -506,6 +535,53 @@
           "markdownDescription": "%moa.config.cacheRootDir%",
           "description": "v0.19.1: Override the cache root directory. Default empty (uses <workspaceFolder>/.moa_cache/). Set to an absolute path to centralize all MoA task caches.",
           "order": 6.4
+        },
+        "moa.executionPreset": {
+          "type": "string",
+          "enum": [
+            "manual",
+            "supervised",
+            "autopilot",
+            "yolo",
+            "custom"
+          ],
+          "default": "manual",
+          "enumDescriptions": [
+            "v0.20.0 (default): v0.19.x-compatible behavior. Finalize returns action_items as markdown; main session drives #moa_execute manually. approval=batch (Gate-A QuickPick multi-select). Backup enabled.",
+            "v0.20.0: Full-link autopilot, but with batch approval gate before each round of action_items. Auto-executes after finalize, but user can deselect unwanted items in QuickPick. Backup enabled.",
+            "v0.20.0: Fully automatic, zero human-in-the-loop. Auto-executes after finalize, no approval gate. ONLY SafeExecutor backup provides a safety net — restore .bak.<timestamp> files if needed. Recommended for trusted CI / repeated retry pipelines.",
+            "v0.20.0 (extreme): fully automatic AND no SafeExecutor backup. For sandboxed/CI use only. UI shows a warning.",
+            "Use the 3 fine-grained configs below (autoExecuteAfterFinalize / approvalMode / safeExecutionMode). executionPreset is ignored when this is selected."
+          ],
+          "markdownDescription": "%moa.config.executionPreset%",
+          "description": "v0.20.0: Top-level execution mode shortcut. Pick a preset to cover the most common combinations of autoExecute + approvalMode + safeMode. Set to 'custom' to control the three fine-grained configs independently.",
+          "order": 6.5
+        },
+        "moa.autoExecuteAfterFinalize": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "%moa.config.autoExecuteAfterFinalize%",
+          "description": "v0.20.0: When true, finalizeTask automatically invokes Actor to execute final.json's action_items (subject to approvalMode). When false, finalize returns action_items as markdown and main session must call #moa_execute explicitly. Only effective when executionPreset='custom'.",
+          "order": 6.6
+        },
+        "moa.approvalMode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "batch",
+            "per_call",
+            "batch_plus_per_call"
+          ],
+          "default": "batch",
+          "enumDescriptions": [
+            "No approval popups. Rely solely on SafeExecutor backup (recommended only with safeMode=true).",
+            "Gate-A batch approval: at the entry of each Actor call, show a QuickPick multi-select listing all action_items. User deselects unwanted ones.",
+            "Gate-B per-call approval: before each destructive tool call (write_file / delete / execute), show a Yes/No/Yes to All/Reject All dialog.",
+            "Both gates — most conservative. Batch at entry + per-call before each destructive tool call."
+          ],
+          "markdownDescription": "%moa.config.approvalMode%",
+          "description": "v0.20.0: Approval gate mode. Controls how destructive Actor tool calls are gated before execution. Only effective when executionPreset='custom'.",
+          "order": 6.7
         },
         "moa.enableRecon": {
           "type": "boolean",

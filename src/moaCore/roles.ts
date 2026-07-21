@@ -533,7 +533,8 @@ export interface ActorActionResult {
   // v0.19.0 §1.2: 新增 'partial' 状态，用于兜底分支（LLM 撞 cap 但保留了
   // capturedToolCalls 时构造的 minimal executed_action）。
   // 语义：执行未完成但有可审计的部分产出（区别于 failed=完全失败、skipped=未尝试）
-  status: 'success' | 'failed' | 'skipped' | 'partial';
+  // v0.20.0: 新增 'rejected_by_user'——用户通过 Approval Gate（Gate-A 批量未选 / Gate-B 单次拒）明确拒绝。
+  status: 'success' | 'failed' | 'skipped' | 'partial' | 'rejected_by_user';
   /** 实际产出字符数（文件大小 / 命令输出长度）。 */
   output_chars: number;
   /** 失败原因（status=failed 时填）。 */

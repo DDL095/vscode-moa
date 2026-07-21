@@ -22,10 +22,13 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'path';
+import { promises as fsPromises } from 'fs';
 import {
   createOrchestration,
   runIteration,
   finalizeTask,
+  executeFinalActions,
   loadState,
   formatStatusMarkdown,
   type MoaFinalOutput,
@@ -279,6 +282,107 @@ function errorResult(message: string): vscode.LanguageModelToolResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// #moa_execute — execute finalized action_items via Actor (v0.20.0)
+// ─────────────────────────────────────────────────────────────────────────
+
+interface ExecuteInput {
+  task_id: string;
+}
+
+export class MoaExecuteTool implements vscode.LanguageModelTool<ExecuteInput> {
+  async prepareInvocation(
+    options: vscode.LanguageModelToolInvocationPrepareOptions<ExecuteInput>,
+    _token: vscode.CancellationToken
+  ): Promise<vscode.PreparedToolInvocation> {
+    return {
+      invocationMessage: `MoA execute ${options.input.task_id}`,
+      confirmationMessages: {
+        title: 'Execute MoA action items',
+        message:
+          `Run Actor on the finalized action_items of task ${options.input.task_id}?\n\n` +
+          `Effect: write_file / execute / create_roadmap items will be executed. ` +
+          `Backups will be created for any modified files.`,
+      },
+    };
+  }
+
+  async invoke(
+    options: vscode.LanguageModelToolInvocationOptions<ExecuteInput>,
+    token: vscode.CancellationToken
+  ): Promise<vscode.LanguageModelToolResult> {
+    const { task_id } = options.input;
+    if (!task_id) return errorResult('Input "task_id" is required.');
+
+    // 读 state 拿 task 文本（executeFinalActions 需要）
+    const state = await loadState(task_id);
+    if (!state) return errorResult(`Task not found: ${task_id}`);
+
+    // 读 final.json 拿 action_items
+    const moaDir = path.join(
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
+      '.moa_cache',
+      task_id
+    );
+    let actionItems: MoaFinalOutput['action_items'] = [];
+    try {
+      const raw = await fsPromises.readFile(path.join(moaDir, 'final.json'), 'utf8');
+      const parsed = JSON.parse(raw) as MoaFinalOutput;
+      actionItems = parsed.action_items ?? [];
+    } catch {
+      return errorResult(`Cannot read final.json for task ${task_id}. Run #moa_finalize first.`);
+    }
+
+    if (actionItems.length === 0) {
+      return okResult('No action_items in final.json (nothing to execute).');
+    }
+
+    try {
+      const result = await executeFinalActions(
+        task_id,
+        actionItems,
+        state.task,
+        token,
+        {
+          toolInvocationToken: options.toolInvocationToken,
+          progress: (msg) => console.log(`[MoA Execute] ${msg}`),
+        }
+      );
+
+      // 渲染执行摘要 markdown
+      const lines: string[] = [
+        `### MoA Execute Result — \`${task_id}\``,
+        '',
+        `**Elapsed:** ${result.elapsed_sec.toFixed(1)}s  `,
+        `**Tool calls:** ${result.tool_calls}  `,
+        `**Self-assessment:** ${result.self_assessment.reason}`,
+        '',
+        '#### Executed actions',
+        '',
+      ];
+      if (result.executed_actions.length === 0) {
+        lines.push('_(none)_');
+      } else {
+        for (let i = 0; i < result.executed_actions.length; i++) {
+          const a = result.executed_actions[i];
+          const icon = a.status === 'success' ? '✅'
+                    : a.status === 'rejected_by_user' ? '🚫'
+                    : a.status === 'partial' ? '⚠️'
+                    : '❌';
+          lines.push(`${icon} **${i + 1}. [${a.action.type}]** ${a.action.target} — \`${a.status}\``);
+          if (a.error_message) lines.push(`   - ${a.error_message.substring(0, 200)}`);
+          if (a.artifacts.length > 0) lines.push(`   - Artifacts: \`${a.artifacts.join('\`, \`')}\``);
+        }
+      }
+      lines.push('');
+      lines.push(`Full log: <taskDir>/autopilot.log`);
+      return okResult(lines.join('\n'));
+    } catch (err) {
+      return errorResult(`Execute failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Registration
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -287,6 +391,7 @@ export function registerMoaOrchestrateTools(context: vscode.ExtensionContext): v
     { name: 'moa_orchestrate', instance: new MoaOrchestrateTool() },
     { name: 'moa_continue', instance: new MoaContinueTool() },
     { name: 'moa_finalize', instance: new MoaFinalizeTool() },
+    { name: 'moa_execute', instance: new MoaExecuteTool() },   // v0.20.0
   ];
 
   for (const t of tools) {

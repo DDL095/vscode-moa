@@ -55,6 +55,7 @@ import {
 import { runPlanner as callPlanner } from './moaCore/runPlanner';
 import { callRecon } from './moaCore/runRecon';
 import { callActor } from './moaCore/runActor';
+import { resolveExecutionConfig } from './moaCore/safeExecutor';
 import { EXTENSION_VERSION } from './extension';
 // v0.15.0 hotfix 1: evidence 提取纯函数（独立文件便于单测）
 import { buildActorEvidence } from './moaCore/actorEvidence';
@@ -1742,7 +1743,111 @@ export async function finalizeTask(
   await renderMetaJson(taskId, state);
   await renderTimelineMd(taskId, state);
 
+  // v0.20.0: autopilot 触发（executionPreset 控制）。
+  // 仅当 execConfig.autoExecute=true 时执行 finalize 后的 action_items。
+  // 默认 `manual` preset 不触发（与 v0.19.x 行为兼容）。
+  // `yolo` preset 关闭 SafeExecutor backup，但 Actor 仍跑（用户对效率极致追求）。
+  const execConfigFinal = resolveExecutionConfig();
+  if (execConfigFinal.autoExecute && output.action_items.length > 0) {
+    try {
+      logPipelineBlock('actor', `--- Autopilot triggered (executionPreset=${execConfigFinal.preset}) ---`,
+        `Executing ${output.action_items.length} action_items for task ${taskId}`);
+      const execResult = await executeFinalActions(taskId, output.action_items, state.task, token);
+      // 把执行结果合并进 output（不重新写 final.json，避免破坏 finalize 时间戳）
+      (output as MoaFinalOutput & { executed_actions?: unknown[] }).executed_actions = execResult.executed_actions;
+      logPipelineBlock('actor', `--- Autopilot completed ---`, JSON.stringify(execResult.executed_actions.length) + ' action(s) executed');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logPipelineBlock('actor', `--- Autopilot failed ---`, msg);
+      // autopilot 失败不阻塞 finalize 返回（已收敛的任务结果完整保留）
+    }
+  }
+
   return output;
+}
+
+/**
+ * v0.20.0: 执行 finalize 后 action_items（actor autopilot）。
+ *
+ * 复用 src/moaCore/runActor.ts 的 callActor，通过 resolveExecutionConfig()
+ * 拿到生效的 approvalMode + safeMode。SafeExecutor 的 manifest.json 自动
+ * 追加本轮（iter=-1 表示 finalize 后路径）记录。
+ *
+ * @returns ActorResult（executeFinalActions 直接返回它，让调用方按需展示）
+ */
+export async function executeFinalActions(
+  taskId: string,
+  actionItems: MoaFinalOutput['action_items'],
+  taskText: string,
+  token: vscode.CancellationToken,
+  options?: {
+    progress?: (msg: string) => void;
+    stream?: vscode.ChatResponseStream;
+    toolInvocationToken?: vscode.ChatParticipantToolToken;
+  }
+): Promise<ActorResult> {
+  const dir = await getTaskDir(taskId);
+  const progress = options?.progress ?? ((msg: string) => logPipelineBlock('actor', msg, ''));
+
+  // 过滤可执行类型（research_more 留给 recon，inform_user 仅展示不需执行）
+  const executableTypes = new Set(['write_file', 'execute', 'create_roadmap']);
+  const executable = actionItems.filter((a) => executableTypes.has(a.type));
+  if (executable.length === 0) {
+    progress?.(`[executeFinalActions] No executable action_items (all are research_more/inform_user); skipping`);
+    return {
+      executed_actions: [],
+      self_assessment: {
+        all_succeeded: true,
+        missing_dependencies: [],
+        should_recon: false,
+        reason: 'No executable action_items to execute',
+      },
+      elapsed_sec: 0,
+      tool_calls: 0,
+    };
+  }
+
+  progress?.(`[executeFinalActions] Executing ${executable.length}/${actionItems.length} executable action(s)`);
+
+  // 写 autopilot.log（人类可读执行日志）
+  const logPath = path.join(dir, 'autopilot.log');
+  const logLines: string[] = [
+    `# MoA Autopilot Log`,
+    `# task_id: ${taskId}`,
+    `# started_at: ${new Date().toISOString()}`,
+    `# action_items: ${executable.length}`,
+    ``,
+  ];
+
+  const execConfig = resolveExecutionConfig();
+  progress?.(`[executeFinalActions] executionPreset=${execConfig.preset} | approvalMode=${execConfig.approvalMode}`);
+
+  const result = await callActor({
+    task: taskText,
+    actionItems: executable,
+    iteration: -1,  // 哨兵值：标记"finalize 后"路径（区别于 Loop 内 Actor 的正数 iter）
+    taskDir: dir,
+  }, token, progress, options?.stream, options?.toolInvocationToken);
+
+  logLines.push(
+    `# completed_at: ${new Date().toISOString()}`,
+    `# elapsed_sec: ${result.elapsed_sec.toFixed(2)}`,
+    `# tool_calls: ${result.tool_calls}`,
+    `# self_assessment: ${JSON.stringify(result.self_assessment)}`,
+    ``,
+    `## Executed actions (${result.executed_actions.length})`,
+    ...result.executed_actions.map((a, i) => {
+      const lines: string[] = [];
+      lines.push(`${i + 1}. [${a.status}] ${a.action.type} ${a.action.target}`);
+      if (a.action.rationale) lines.push(`   Rationale: ${a.action.rationale.substring(0, 200)}`);
+      if (a.error_message) lines.push(`   Error: ${a.error_message.substring(0, 200)}`);
+      if (a.artifacts.length > 0) lines.push(`   Artifacts: ${a.artifacts.join(', ')}`);
+      return lines.join('\n');
+    })
+  );
+  await fs.writeFile(logPath, logLines.join('\n'), 'utf8');
+
+  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
