@@ -11,6 +11,10 @@
 - [Recon tuning / Recon 调优 (v0.13.0+)](#recon-tuning--recon-调优-v0130)
 - [Actor execution control / Actor 执行控制 (v0.20.0+)](#actor-execution-control--actor-执行控制-v0200)
 - [Cache & lifecycle / 缓存与生命周期 (v0.19.1+, v0.20.2)](#cache--lifecycle--缓存与生命周期-v0191-v0202)
+- [**Planner mini-loop / Planner mini-loop (v0.22.0+)**](#planner-mini-loop--planner-mini-loop-v0220)
+- [**Recon Aggregator self-iteration / Recon Aggregator 自迭代 (v0.22.0+)**](#recon-aggregator-self-iteration--recon-aggregator-自迭代-v0220)
+- [**Role Setup Preset / 角色设定预设 (v0.22.0+)**](#role-setup-preset--角色设定预设-v0220)
+- [**Plan Mode Report & final.md inline / Plan 报告与 final.md 内嵌 (v0.22.0+)**](#plan-mode-report--finalmd-inline--plan-报告与-finalmd-内嵌-v0220)
 
 ---
 
@@ -119,3 +123,142 @@ finalize 完成
 - **`0`（永不删除）**：长期研究项目，几个月后还想审计每个任务。
 - **`365`（1 年）**：保留期与磁盘占用的平衡。
 - **自定义 `cacheRootDir`**：设为如 `D:/moa_cache` 可跨多个工作区共享缓存（适合 CI）。
+
+---
+
+## Planner mini-loop / Planner mini-loop (v0.22.0+)
+
+> **核心改动**：Planner 从"单次调用"升级为"可迭代 mini-loop"，并新增 `role_setup` 字段（Planner 设计下游 3 角色 recon/recon_aggregator/actor 的身份）。完整设计见 [roadmap/v0.22.0-role-injection-overhaul.md](roadmap/v0.22.0-role-injection-overhaul.md) P0-1。
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `moa.enablePlannerIteration` | boolean | `true` | 开启 Planner mini-loop（带 plan_coverage 收敛判断）。**关闭则回退到 v0.21.x 单次调用模式**——向后兼容开关。 |
+| `moa.plannerMaxIterations` | number (1-20) | `5` | Planner mini-loop 最大迭代次数。`1` = 单次模式（与 `enablePlannerIteration=false` 等价）；绝对硬上限 20。简单任务通常 1-2 次即收敛。 |
+| `moa.plannerCoverageThreshold` | number (0.5-1.0) | `0.9` | plan_coverage 收敛阈值。Planner 自评 ≥ 此值则停止迭代。低于 0.5 且 iter ≥ 2 触发 `ask_user` 询问用户。 |
+| `moa.plannerAllowTools` | boolean | `true` | iter 2+ 是否允许 Planner 调用 read-only 工具（`read_file` / `list_dir` / `grep_search` / `get_errors`）。每轮最多 3 次工具调用（防过度探索）。 |
+
+**典型场景**：
+
+| 任务难度 | 通常迭代次数 | 说明 |
+|---|---|---|
+| 简单（single 模式）| 1 | plan_coverage 首次即 ≥ 0.9 |
+| 中等 | 2-3 | 第 2 次补查 1-2 个文件后收敛 |
+| 复杂 / 模糊 | 3-5 | 多次探索 + 可能触发 `ask_user` |
+| 极端不可解 | 触发 ask_user | plan_coverage < 0.5 时停止并询问用户 |
+
+**输出 schema 扩展**：PlannerOutput 新增 7 字段（全部可选，向后兼容）：`task_type` / `process_language` / `plan_coverage` / `needs_replan` / `ask_user` / `ask_user_questions` / `role_setup`。
+
+---
+
+## Recon Aggregator self-iteration / Recon Aggregator 自迭代 (v0.22.0+)
+
+> **核心改动**：(1) Recon Aggregator 始终运行（无论 single 还是 parallel 模式，统一证据清洁度）；(2) 支持自迭代 + 启发式评分（零额外 LLM 成本）。完整设计见 [roadmap/v0.22.0-role-injection-overhaul.md](roadmap/v0.22.0-role-injection-overhaul.md) P0-4 + P0-9。
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `moa.reconAggregatorMode` | `"default"` \| `"planner"` | `"default"` | Recon Aggregator 角色提示词来源。`default` = 内置静态 prompt；`planner` = 使用 Planner 输出的 `role_setup.recon_aggregator` 覆盖默认。 |
+| `moa.reconAggregatorMaxIterations` | number (1-10) | `1` | Recon Aggregator 自迭代上限。**`1` = 单次（默认，不启用评分阈值）**；`>1` 启用启发式评分收敛判断。 |
+| `moa.reconAggregatorScoreThreshold` | number (0.0-1.0) | `0.85` | **仅在 `maxIterations > 1` 时生效**。聚合度（aggregation）+ 忠诚度（fidelity）综合分 ≥ 此值则收敛。 |
+
+**评分公式**（启发式，零额外 LLM 调用）：
+
+- `aggregation` = 每个 recon 前 50 字符签名是否出现在 summary 中（signature 覆盖率）
+- `fidelity` = 每个 recon 抽取 5 个 4+ 字符关键词（减停用词）后在 summary 中的命中比例
+- 长度惩罚：summary > 3× 最长 recon 时扣分
+
+**v3 决策依据**：默认 1 次时**不**启用评分阈值（只跑 1 次无收敛判断可做）；仅当用户主动配置 `maxIterations > 1` 时启用阈值收敛。
+
+---
+
+## Role Setup Preset / 角色设定预设 (v0.22.0+)
+
+> **核心定位**（用户原话）："VSCode 内长出来的个人 MOA 檞寄生" —— 让用户对 LLM 角色身份有完全主权。完整设计见 [docs/moa-role-customization-blueprint-v2.md](moa-role-customization-blueprint-v2.md)。
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `moa.roleSetup.activePreset` | string | `"default"` | 当前激活的 Role Setup Preset 名称。预设列表从 `~/.moa/role-setup-presets.json` 加载（全局持久，跨任务/会话）。 |
+| `moa.roleSetup.aiGeneration` | `Object` | `{ enabled: true, autoAccept: false, confirmationUI: true }` | AI 自生成 Role Setup 的采纳控制。`enabled` = Planner 是否允许 LLM 生成预设建议；`autoAccept` = 是否跳过用户确认自动写入；`confirmationUI` = 是否显示确认对话框。 |
+
+**预设存储**：`~/.moa/role-setup-presets.json`（全局，**不**随 workspace 走；首次启动自动创建含 `default` 预设）
+
+**default 预设不可删除**（架构保证至少有一个生效预设）。
+
+**RoleSetupPreset v2 schema**：
+
+```jsonc
+{
+  "name": "default",
+  "description": "内置默认预设",
+  "recon": {
+    "tone": "faithful-integrator",         // 7 个枚举值之一
+    "perspective": "忠实整合多源证据",      // 自由文本，任意语言
+    "tool_priority": ["read_file", "grep_search", "list_dir"],
+    "cautions": ["避免重复读取同一文件"],
+    "focus": ["证据来源标注"]
+  },
+  "recon_aggregator": { /* 同上结构 */ },
+  "actor": { /* 同上结构 */ },
+  "few_shot_examples": [                    // 可选，用户自定义 few-shot
+    { "input": "...", "role_setup": { /* ... */ } }
+  ],
+  "meta": { "created_at": "...", "version": "v2" }
+}
+```
+
+**TonePreset 枚举**（7 个预设值）：
+
+| Tone | 适用场景 |
+|---|---|
+| `strict-evidence` | 学术研究 / 严格证据驱动 |
+| `faithful-integrator` | 默认 recon / recon_aggregator 风格 |
+| `neutral-judge` | 默认 aggregator 风格（中立裁判）|
+| `strict-executor` | 默认 actor 风格（严格按指令执行）|
+| `creative-explorer` | 发散性探索任务 |
+| `conservative` | 风险敏感场景（生产代码修改）|
+| `aggressive` | 速度优先场景（沙盒实验）|
+
+**8 + 3 命令**（详见 README.md "v0.22 命令" 章节）：
+
+- CRUD：`moa.createRolePreset` / `switchRolePreset` / `editRolePreset` / `deleteRolePreset`
+- 分享：`moa.exportRolePreset` / `importRolePreset`（社区分享提前到 v0.22）
+- 主权：`moa.toggleAIGeneration`（开/关 AI 自生成）
+- 报告：`moa.togglePlanModeReport` / `moa.showPlanModeReport` / `moa.toggleFinalMdInlineDisplay`
+
+**JSON schema 校验失败时**：显示 IDE 风格具体错误 + **保留编辑不强制保存**（类似红线报错），让用户修正后再保存。
+
+---
+
+## Plan Mode Report & final.md inline / Plan 报告与 final.md 内嵌 (v0.22.0+)
+
+> **核心定位**：(1) 借鉴 Copilot Plan Agent 实时报告 plan + role_setup + Planner 状态（**不**报告 token 消耗）；(2) task complete 后把 final.md 关键内容直接内嵌到主会话，让下一轮对话无需工具调用即可获取上下文。
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `moa.planModeReport.enabled` | boolean | `false` | Planner mini-loop 收敛后是否实时弹出 `vscode_askQuestions` 报告 plan + role_setup + 当前状态。 |
+| `moa.finalMdInlineDisplay` | `"full"` \| `"summary"` \| `"structured-summary"` \| `"off"` | `"structured-summary"` | task complete 时 final.md 在主会话的展示方式。`off` = 仅显示一句"任务完成，见 .moa_cache/..."。 |
+| `moa.finalMdInlineThresholds` | `Object` | `{ "full": 2000, "summary": 8000 }` | 长度阈值（字符数）。final.md < 2000 → `full`；2000-8000 → `summary`（TL;DR + 关键发现 + 行动项）；> 8000 → `structured-summary`（更激进提炼）。 |
+
+**MoaPlanReport schema**（v3 修订：删除 token 估算字段）：
+
+```jsonc
+{
+  "task_id": "...",
+  "iterationsRun": 2,                       // Planner mini-loop 实际迭代次数
+  "planCoverageHistory": [0.65, 0.92],      // 每轮 plan_coverage
+  "needsReplan": false,                     // 最后一轮是否建议再迭代
+  "askUserTriggered": false,                // 是否触发了 ask_user
+  "convergedReason": "threshold_met",       // threshold_met | max_iter | ask_user | manual
+  "totalElapsedSec": 12.5
+}
+```
+
+**借鉴 Copilot Plan Agent 但不照搬**：
+
+| Copilot Plan Agent | MoA v0.22 |
+|---|---|
+| Discovery / Alignment / Design / Refinement 4 阶段 | Planner mini-loop 已涵盖 |
+| `searchSubagent` 并行搜索 | 不需要（Recon 才是并行搜索者）|
+| `askQuestions` 澄清 | ✅ 借鉴 |
+| 必须显示 plan | ✅ 借鉴 |
+| handoffs 按钮 | ✅ 借鉴（用户可选"编辑 Role Setup"/"切换 Preset"/"再迭代"）|
+| 持久化到 `/memories/session/plan.md` | ❌ MoA 持久化到 `.moa_cache/<task_id>/planner/` |

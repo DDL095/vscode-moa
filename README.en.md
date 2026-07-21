@@ -173,6 +173,70 @@ The Actor role actually *executes* the Aggregator's `action_items` (writes files
 
 Every side-effecting action is logged to `.moa_cache/<task_id>/manifest.json`; when `safeExecutionMode: true`, backed up to `<target>.bak.<timestamp>`. Rollback = delete new file + rename `.bak.<ts>` back.
 
+## v0.22: Role injection overhaul + user sovereignty
+
+> **Theme** (user's words): "A personal MOA mistletoe growing inside VSCode" — gives users complete sovereignty over LLM role identities, while upgrading Planner into an iterable intelligent router. Full design: [docs/roadmap/v0.22.0-role-injection-overhaul.md](./docs/roadmap/v0.22.0-role-injection-overhaul.md) v3.
+
+### 4 major changes
+
+#### 1. Planner mini-loop + role_setup designer
+
+Planner upgraded from "single-call" to "iterable mini-loop" (default up to 5 iterations, hard cap 20). Self-evaluates `plan_coverage ≥ 0.9` to converge. iter 2+ may call read-only tools (`read_file`/`list_dir`/`grep_search`/`get_errors`, max 3 calls per iter). When `plan_coverage < 0.5`, triggers `vscode_askQuestions` to ask the user.
+
+**Planner's new role**: designs the identity (tone / perspective / tool_priority / cautions / focus) of the 3 downstream roles (recon / recon_aggregator / actor) via the `role_setup` field. Refs and Aggregator keep multi-model comparability and **do not** accept role_setup (architectural red line).
+
+#### 2. Infrastructure layer injection (all tool-calling roles)
+
+New `systemContext.ts` + `instructionScanner.ts` inject 4 dynamic context segments to Planner / Recon / Actor:
+
+| Segment | Content |
+|---|---|
+| `ENV_CONTEXT` | activeFile / openDocs / workspaceFolders / projectTree / gitRoot / instructionFiles list |
+| `TOOL_EFFICIENCY` | static tool-call discipline template |
+| `CUSTOM_INSTRUCTIONS` | **7-path instruction file scan** (CLAUDE.md / AGENTS.md / copilot-instructions.md etc.), **no truncation** |
+| `RUNTIME_INSTRUCTIONS` | SKILL.md frontmatter from **4 skill folders** (.github/skills + .claude/skills + ~/.copilot/skills + ~/.claude/skills) |
+
+#### 3. Recon Aggregator always runs + self-iteration
+
+Since v0.18 Recon Aggregator runs in parallel mode; **since v0.22 it always runs (single or parallel)** for unified evidence cleanliness. Supports self-iteration (default 1, max 10). When `maxIterations > 1`, enables heuristic scoring (aggregation + fidelity, zero extra LLM cost).
+
+#### 4. Role Setup Preset — user sovereignty system
+
+Like moa model presets, adds a Role Setup Preset system. Presets persist to `~/.moa/role-setup-presets.json` (global, across tasks/sessions). Only 1 built-in `default` preset (cannot be deleted); users modify from default.
+
+### v0.22 commands (11 new)
+
+**Role Setup Preset CRUD + sharing**:
+- `Moa: Create Role Preset` / `Switch Role Preset` / `Edit Role Preset` / `Delete Role Preset`
+- `Moa: Export Role Preset` / `Import Role Preset` (community sharing)
+
+**Sovereignty + reporting**:
+- `Moa: Toggle AI Generation` (toggle acceptance of AI-generated preset suggestions)
+- `Moa: Toggle Plan Mode Report` / `Moa: Show Last Plan Mode Report` (inspired by Copilot Plan Agent, MoA as backbone)
+- `Moa: Toggle final.md Inline Display` (inline final.md key content into main session on task complete)
+
+**Diagnostics**:
+- `Moa: Diagnose Environment (v0.22)` (12 source availability checks)
+
+### v0.22 config items (12 new)
+
+Full details: [docs/CONFIGURATION.md](./docs/CONFIGURATION.md). Top 4:
+
+| Key | Default | Description |
+|---|---|---|
+| `moa.enablePlannerIteration` | `true` | Planner mini-loop toggle. **Disable to fall back to v0.21.x single-call mode** — backward-compat switch. |
+| `moa.plannerMaxIterations` | `5` | mini-loop max iterations (1-20). `1` = single-call mode. |
+| `moa.plannerCoverageThreshold` | `0.9` | plan_coverage convergence threshold. |
+| `moa.reconAggregatorMode` | `"default"` | Recon Aggregator role prompt source (`default` built-in / `planner` uses role_setup override). |
+
+Other 8: `moa.plannerAllowTools` / `moa.reconAggregatorMaxIterations` / `moa.reconAggregatorScoreThreshold` / `moa.planModeReport.enabled` / `moa.finalMdInlineDisplay` / `moa.finalMdInlineThresholds` / `moa.roleSetup.activePreset` / `moa.roleSetup.aiGeneration`.
+
+### Upgrade path (from v0.21.x)
+
+- role_setup is optional (Planner may omit it; downstream falls back to v0.21.x static prompts)
+- `enablePlannerIteration=false` or `plannerMaxIterations=1` → revert to v0.21.x single-call Planner
+- First launch auto-creates `~/.moa/role-setup-presets.json` with `default` preset
+
 ## Local cache
 
 All task state persists to `<workspace>/.moa_cache/<task_id>/`:

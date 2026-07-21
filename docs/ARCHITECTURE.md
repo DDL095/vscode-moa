@@ -282,6 +282,126 @@ Planner → Recon → Refs → Aggregator → finalizeTask → (autopilot?) exec
 
 回滚方法：原文件旁的 `.bak.<时间戳>` 文件 + `manifest.json` 记录所有变更。
 
+### 角色注入系统大改造（v0.22.0+）
+
+> 完整设计文档：[roadmap/v0.22.0-role-injection-overhaul.md](roadmap/v0.22.0-role-injection-overhaul.md)（v3 路线图）+ [moa-role-injection-design.md](moa-role-injection-design.md)（注入矩阵主总览）。
+
+#### 三层分离（v0.22 架构核心）
+
+v0.22 把所有调工具的角色（Planner / Recon / Actor）的 prompt 重构为 3 层叠加：
+
+```
+┌─────────────────────────────────────────┐
+│ Layer 1: 基础设施层（Infrastructure）    │  systemContext.ts + instructionScanner.ts
+│  ┌─ ENV_CONTEXT （activeFile/openDocs/  │  所有角色共享，按 mtime 缓存
+│  │   workspaceFolders/projectTree/      │
+│  │   gitRoot/instructionFiles 清单）    │
+│  ├─ TOOL_EFFICIENCY （静态纪律模板）    │
+│  ├─ CUSTOM_INSTRUCTIONS （7 路径扫描）   │  不截断，单文件 >200KB 给警告
+│  └─ RUNTIME_INSTRUCTIONS （4 文件夹      │  SKILL.md frontmatter，全量给 Planner
+│      skills 的清单）                     │
+├─────────────────────────────────────────┤
+│ Layer 2: 角色身份层（Role Identity）     │  roleSetupPreset.ts + Planner role_setup
+│  Planner 通过 role_setup 字段设计下游    │  3 角色（recon/recon_aggregator/actor）
+│  3 角色的 tone/perspective/tool_priority │  Refs/Aggregator 保留多模型可比性，
+│  /cautions/focus                         │  不接受 role_setup（架构红线）
+├─────────────────────────────────────────┤
+│ Layer 3: 迭代状态层（Iteration State）   │  orchestrator state
+│  iter_state / gaps / evidence /          │  每轮迭代动态变化
+│  completeness_history                    │
+└─────────────────────────────────────────┘
+```
+
+**基础设施层注入路径**（P0-2 + P0-3 + P0-5）：
+
+| 角色 | ENV | TOOL_EFFICIENCY | CUSTOM_INSTRUCTIONS | RUNTIME_INSTRUCTIONS |
+|---|---|---|---|---|
+| Planner | ✅ 全量 | ✅ | ✅ 不截断 | ✅ 全量 skills 清单（推荐 + 排序给 Recon）|
+| Recon | ✅ 全量 | ✅ | ✅ 不截断 | ✅ Planner 排序后的 tool_priority |
+| Actor | ✅ 全量 | ✅ | ✅ 不截断 | ✅ Planner 排序后的 tool_priority |
+| Refs | ❌ 精简版（可选 `renderEnvBrief`）| ❌ | ❌ | ❌ |
+| Aggregator | ❌ | ❌ | ❌ | ❌ |
+
+**7 路径指令文件扫描**（不截断，CLAUDE.md / AGENTS.md / copilot-instructions.md 等）：详见 [CONFIGURATION.md](CONFIGURATION.md) "Planner mini-loop" 章节。
+
+#### Planner mini-loop + role_setup 输出（P0-1）
+
+Planner 从"单次调用"升级为"可迭代 mini-loop"：
+
+```
+iter 1: Planner(task, systemContext, prev_coverage=undefined)
+        → 输出 13 字段 JSON（含 plan_coverage / role_setup）
+iter 2+: if plan_coverage < threshold AND iter < maxIter:
+           Planner 允许调 read-only 工具（每轮 ≤3 次）
+           → 输出更新后的 13 字段
+         if plan_coverage < 0.5 AND iter ≥ 2:
+           → ask_user（vscode_askQuestions 询问用户）
+收敛：plan_coverage ≥ threshold OR iter ≥ maxIter OR ask_user
+```
+
+**PlannerOutput schema（v0.22，13 字段，向后兼容）**：
+
+```jsonc
+{
+  // v0.21 及之前字段（保留）
+  "sub_questions": [...],
+  "recon_hints": {...},
+  "difficulty": "simple|medium|hard|engineering",
+  "recon_required": true,
+  "actor_needed": false,
+  "needs_iteration": true,
+  // v0.22 新增 7 字段（全部可选）
+  "task_type": "research|coding|documentation|analysis|hybrid",
+  "process_language": "zh-CN|en|mixed|ja|...",  // Planner 决定全流程语言
+  "plan_coverage": 0.92,                          // 0.0-1.0，自评完整度
+  "needs_replan": false,                          // 最后一轮是否建议再迭代
+  "ask_user": false,                              // 是否需询问用户
+  "ask_user_questions": ["..."],                  // 仅 ask_user=true 时
+  "role_setup": {                                 // 下游 3 角色身份设计
+    "recon": { "tone": "...", "perspective": "...", "tool_priority": [...], "cautions": [...], "focus": [...] },
+    "recon_aggregator": { /* 同上 */ },
+    "actor": { /* 同上 */ }
+    // 注意：无 refs / aggregator（架构红线，保留多模型可比性）
+  }
+}
+```
+
+#### Recon Aggregator 始终运行 + 自迭代（P0-4 + P0-9）
+
+v0.18 起 Recon Aggregator 在 parallel 模式下运行；**v0.22 起无论 single 还是 parallel 都运行**（统一证据清洁度）。
+
+```
+N 个 Recon Agent 并行 → 原始 evidence_chunks 落盘（便于复盘）
+                     → Recon Aggregator（始终运行）
+                         ├─ mode='default':  内置静态 prompt
+                         └─ mode='planner':  Planner 的 role_setup.recon_aggregator 覆盖
+                     └─ 自迭代（maxIters 默认 1，最大 10）
+                         ├─ maxIters=1:  单次，不评分
+                         └─ maxIters>1:  每轮启发式评分（aggregation + fidelity）
+                                         综合分 ≥ 0.85 收敛
+```
+
+**启发式评分（零额外 LLM 成本）**：详见 [CONFIGURATION.md](CONFIGURATION.md) "Recon Aggregator self-iteration" 章节。
+
+#### Role Setup Preset 用户主权系统（P0-7）
+
+用户可通过 `~/.moa/role-setup-presets.json` 全局持久化自己的 Role Setup Preset：
+
+```
+~/.moa/role-setup-presets.json
+  ├─ default（内置，不可删除）
+  └─ <user_preset_1>（用户基于 default 修改）
+  └─ <user_preset_2>
+  └─ <imported_from_community>（社区分享）
+```
+
+**8 + 3 命令**：CRUD（create/switch/edit/delete）+ 分享（export/import）+ AI 主权开关（toggleAIGeneration）+ Plan Mode 报告（togglePlanModeReport/showPlanModeReport）+ final.md 内嵌（toggleFinalMdInlineDisplay）+ 12 项环境检查（diagnoseEnvironment）。详见 [README.md](../README.md) "v0.22 命令" 章节。
+
+#### Plan Mode 报告（P0-8）+ final.md 分级内嵌（P0-10）
+
+- **Plan Mode 报告**：`moa.planModeReport.enabled=true` 时，Planner mini-loop 收敛后弹 `vscode_askQuestions` 报告 plan + role_setup + 状态（**不**含 token 估算）
+- **final.md 内嵌**：task complete 时按 final.md 长度自适应展示到主会话（`full` < 2000 字符 / `summary` 2000-8000 / `structured-summary` > 8000），让下一轮对话无需工具调用即可获取上下文
+
 ---
 
 ## English Version
