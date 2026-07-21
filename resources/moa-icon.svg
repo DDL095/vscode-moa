@@ -1,19 +1,64 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <!-- MoA Bridge icon: three overlapping nodes (representing multi-model MoA) connected by bridges -->
+  <!--
+    MoA Bridge icon — 5-role pipeline + iteration feedback loop
+    Layout (top to bottom):
+      Layer 1: Task input           (1 node, 顶部)
+      Layer 2: Planner              (1 node)
+      Layer 3: Refs fan-out         (3 nodes 多模型并行)
+      Layer 4: Aggregator           (1 node 融合)
+      Layer 5: Actor/Finalize       (1 node 底部)
+    右侧反馈线: 从 Actor 回到 Planner（带箭头，代表 MoA Loop 的迭代）
+  -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#6366f1"/>
       <stop offset="100%" stop-color="#8b5cf6"/>
     </linearGradient>
+    <linearGradient id="lineGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.95"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24"/>
+    </marker>
   </defs>
-  <!-- Rounded square background -->
+
+  <!-- 圆角方形背景 -->
   <rect x="4" y="4" width="120" height="120" rx="24" fill="url(#bg)"/>
-  <!-- Three nodes (models) -->
-  <circle cx="40" cy="44" r="14" fill="#ffffff" opacity="0.95"/>
-  <circle cx="88" cy="44" r="14" fill="#ffffff" opacity="0.95"/>
-  <circle cx="64" cy="84" r="14" fill="#ffffff" opacity="0.95"/>
-  <!-- Connecting bridges (the "Bridge" in MoA Bridge) -->
-  <line x1="40" y1="44" x2="88" y2="44" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.8"/>
-  <line x1="40" y1="44" x2="64" y2="84" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.8"/>
-  <line x1="88" y1="44" x2="64" y2="84" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.8"/>
+
+  <!-- 主流：5 个角色纵向链 -->
+  <!-- Layer1 (input, y=14) → Layer2 (Planner, y=32) -->
+  <line x1="56" y1="18" x2="56" y2="28" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Layer2 (Planner, y=32) → Layer3 (Refs fan-out, y=56) -->
+  <line x1="56" y1="36" x2="36" y2="54" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="56" y1="36" x2="56" y2="54" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="56" y1="36" x2="76" y2="54" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Layer3 (Refs, y=56) → Layer4 (Aggregator, y=80) fan-in -->
+  <line x1="36" y1="62" x2="56" y2="78" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="56" y1="62" x2="56" y2="78" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="76" y1="62" x2="56" y2="78" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Layer4 (Aggregator, y=80) → Layer5 (Actor, y=104) -->
+  <line x1="56" y1="84" x2="56" y2="98" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- 反馈线（金色）：从 Actor 右侧 (y=104) → 向右 (x=104) → 向上 (y=32) → 向左指向 Planner -->
+  <polyline points="62,104 100,104 100,32 64,32"
+            fill="none" stroke="#fbbf24" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round"
+            marker-end="url(#arrow)"/>
+
+  <!-- Layer 1: Input (顶部白圆点) -->
+  <circle cx="56" cy="14" r="6" fill="#ffffff"/>
+  <!-- Layer 2: Planner -->
+  <circle cx="56" cy="32" r="7" fill="#ffffff"/>
+  <!-- Layer 3: 3 Refs 节点（稍小，平行并列） -->
+  <circle cx="36" cy="58" r="6" fill="#ffffff"/>
+  <circle cx="56" cy="58" r="6" fill="#ffffff"/>
+  <circle cx="76" cy="58" r="6" fill="#ffffff"/>
+  <!-- Layer 4: Aggregator -->
+  <circle cx="56" cy="80" r="7" fill="#ffffff"/>
+  <!-- Layer 5: Actor/Finalize（底部，略大） -->
+  <circle cx="56" cy="104" r="7" fill="#ffffff"/>
 </svg>
+
+
