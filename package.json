@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.20.1",
+  "version": "0.20.2",
 
   "publisher": "dudali095",
   "license": "MIT",
@@ -390,22 +390,22 @@
         "moa.refModels": {
           "type": "array",
           "default": [],
-          "description": "Reference advisor models (equal-mode MoA). Each item: {role, model}. All refs share the same prompt (moa.sharedRefPrompt); `role` is a display label only, NOT a role specialization. Use 'Moa: Configure Models' command to set this interactively.",
+          "description": "Reference advisor models (equal-mode MoA). Each item: {role, model}. All refs share the same prompt (moa.sharedRefPrompt); `role` is a display label only, NOT a role specialization. Use 'Moa: Configure Models' command to set this interactively.\n\n---\n\n参考顾问模型列表（等权 MoA 模式）。每项格式：{role, model}。所有 ref 共用同一个 prompt（moa.sharedRefPrompt）；`role` 仅作显示标签，不参与角色特化。建议通过 'Moa: Configure Models' 命令交互式配置。",
           "items": {
             "type": "object",
             "properties": {
               "role": {
                 "type": "string",
-                "description": "Display label (e.g. 'advisor_1'). Not injected into prompt."
+                "description": "Display label (e.g. 'advisor_1'). Not injected into prompt.\n\n显示标签（如 'advisor_1'）。不会注入到 prompt 中。"
               },
               "model": {
                 "type": "string",
-                "description": "Substring to match vscode.lm model name, e.g. 'GLM-5.2'"
+                "description": "Substring to match vscode.lm model name, e.g. 'GLM-5.2'\n\nvscode.lm 模型名称的子串匹配，如 'GLM-5.2'"
               },
               "systemHint": {
                 "type": "string",
-                "description": "Deprecated in v2 (equal mode). Kept for backward compat, ignored at runtime.",
-                "deprecationMessage": "Equal-mode MoA ignores per-ref systemHint. Use moa.sharedRefPrompt instead."
+                "description": "Deprecated in v2 (equal mode). Kept for backward compat, ignored at runtime.\n\nv2 等权模式下已弃用。仅为向后兼容保留，运行时被忽略。",
+                "deprecationMessage": "Equal-mode MoA ignores per-ref systemHint. Use moa.sharedRefPrompt instead.\n\n等权 MoA 忽略每个 ref 的 systemHint。请改用 moa.sharedRefPrompt。"
               }
             },
             "required": [
@@ -418,15 +418,15 @@
         "moa.aggregator": {
           "type": "object",
           "default": {},
-          "description": "Aggregator (synthesizer) model. Use 'Moa: Configure Models' command to set interactively.",
+          "description": "Aggregator (synthesizer) model. Use 'Moa: Configure Models' command to set interactively.\n\n聚合器（综合者）模型。建议通过 'Moa: Configure Models' 命令交互式配置。",
           "properties": {
             "model": {
               "type": "string",
-              "description": "Substring to match vscode.lm model name"
+              "description": "Substring to match vscode.lm model name.\n\nvscode.lm 模型名称的子串匹配。"
             },
             "temperature": {
               "type": "number",
-              "description": "Informational only (vscode.lm doesn't expose per-call temp yet)."
+              "description": "Informational only (vscode.lm doesn't expose per-call temp yet).\n\n仅供参考（vscode.lm API 暂未开放 per-call temperature）。"
             }
           },
           "order": 2
@@ -434,19 +434,19 @@
         "moa.parallelRefs": {
           "type": "boolean",
           "default": true,
-          "description": "Fan out reference advisors in parallel (Promise.allSettled). When true (default), all ref requests fire simultaneously → wall-clock time = slowest ref. When false, refs run sequentially (safer for providers that rate-limit concurrent requests). NOTE: pre-v0.14.14 this setting existed but was never read by code; v0.14.14 makes it actually work.",
+          "description": "Fan out reference advisors in parallel (Promise.allSettled). When true (default), all ref requests fire simultaneously → wall-clock time = slowest ref. When false, refs run sequentially (safer for providers that rate-limit concurrent requests). NOTE: pre-v0.14.14 this setting existed but was never read by code; v0.14.14 makes it actually work.\n\n---\n\n并行扇出参考顾问（Promise.allSettled）。**true**（默认）= 所有 ref 请求同时发出，wall-clock 时间 = 最慢的那个 ref。**false** = 串行执行（对限制并发请求的 provider 更安全）。注：v0.14.14 之前该配置存在但代码从未读取；v0.14.14 起才真正生效。",
           "order": 3
         },
         "moa.parallelRecon": {
           "type": "boolean",
           "default": true,
-          "description": "Fan out Recon agents in parallel when preset.reconModels has 2+ models. When true (default), all recon agents run simultaneously → wall-clock time = slowest. When false, or when only 1 recon model is configured, runs sequentially (single-model mode) and Recon Aggregator is auto-disabled. Parallel recon produces N independent results that are merged by Recon Aggregator (pure LLM integration, no tool calls) into a single summary before injecting to Refs.",
+          "description": "Fan out Recon agents in parallel when preset.reconModels has 2+ models. When true (default), all recon agents run simultaneously → wall-clock time = slowest. When false, or when only 1 recon model is configured, runs sequentially (single-model mode) and Recon Aggregator is auto-disabled. Parallel recon produces N independent results that are merged by Recon Aggregator (pure LLM integration, no tool calls) into a single summary before injecting to Refs.\n\n---\n\n当 preset.reconModels 有 2+ 个模型时并行扇出 Recon 代理。**true**（默认）= 所有 recon 代理同时运行，wall-clock = 最慢者。**false** 或只配置了 1 个 recon 模型时，串行运行（单模型模式），Recon Aggregator 自动禁用。并行 recon 产生 N 个独立结果，由 Recon Aggregator（纯 LLM 整合，无工具调用）合并成单一 summary 后注入 Refs。",
           "order": 20
         },
         "moa.presets": {
           "type": "object",
           "default": {},
-          "description": "Named preset groups. Each value is a full pipeline config: {name, refModels, aggregator, reconModel, l3Summarizer, description?}. Switch active preset via 'Moa: Switch Preset' command. Legacy flat config (moa.refModels + moa.aggregator + ...) is auto-migrated to presets.default on first use.",
+          "description": "Named preset groups. Each value is a full pipeline config: {name, refModels, aggregator, reconModel, l3Summarizer, description?}. Switch active preset via 'Moa: Switch Preset' command. Legacy flat config (moa.refModels + moa.aggregator + ...) is auto-migrated to presets.default on first use.\n\n---\n\n命名预设组。每个值是完整的流水线配置：{name, refModels, aggregator, reconModel, l3Summarizer, description?}。通过 'Moa: Switch Preset' 命令切换激活的预设。旧的扁平配置（moa.refModels + moa.aggregator + ...）会在首次使用时自动迁移到 presets.default。",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -478,13 +478,13 @@
         "moa.activePreset": {
           "type": "string",
           "default": "default",
-          "description": "Key into moa.presets identifying the currently active group. Switch via 'Moa: Switch Preset' command. When the referenced preset doesn't exist, falls back to the first available preset, then to legacy flat config.",
+          "description": "Key into moa.presets identifying the currently active group. Switch via 'Moa: Switch Preset' command. When the referenced preset doesn't exist, falls back to the first available preset, then to legacy flat config.\n\n---\n\nmoa.presets 中标识当前激活组的 key。通过 'Moa: Switch Preset' 命令切换。当引用的预设不存在时，按顺序 fallback：第一个可用预设 → 旧的扁平配置。",
           "order": 51
         },
         "moa.sharedRefPrompt": {
           "type": "string",
           "default": "",
-          "description": "Optional override for the shared prompt prepended to every ref query. If empty (recommended), uses the built-in Hermes _REFERENCE_SYSTEM_PROMPT ported from NousResearch/hermes-agent. All refs get the SAME prompt — diversity comes from model differences, not role assignment.",
+          "description": "Optional override for the shared prompt prepended to every ref query. If empty (recommended), uses the built-in Hermes _REFERENCE_SYSTEM_PROMPT ported from NousResearch/hermes-agent. All refs get the SAME prompt — diversity comes from model differences, not role assignment.\n\n---\n\n可选：覆盖每个 ref 查询前置的共享 prompt。**留空（推荐）** = 使用内置的 Hermes _REFERENCE_SYSTEM_PROMPT（移植自 NousResearch/hermes-agent）。所有 ref 拿到的是**同一个** prompt —— 多样性来自模型差异，而非角色分配。",
           "order": 4
         },
         "moa.refDisplayMode": {
@@ -495,46 +495,46 @@
           ],
           "default": "thinking",
           "enumDescriptions": [
-            "Hermes-style: refs shown only as progress indicators ('Ref advisor_1 thinking...'). Detailed ref output goes to the 'MoA Bridge — Ref Output' panel. Ref content does NOT enter chat history — only the aggregator synthesis does. Matches Hermes' design where refs are side-channel advisory calls.",
-            "Legacy: refs stream inline as markdown in the chat response. Visible AND recorded in chat history. Use this if you want Copilot follow-ups to reference individual ref opinions."
+            "Hermes-style: refs shown only as progress indicators ('Ref advisor_1 thinking...'). Detailed ref output goes to the 'MoA Bridge — Ref Output' panel. Ref content does NOT enter chat history — only the aggregator synthesis does. Matches Hermes' design where refs are side-channel advisory calls.\n\n---\n\nHermes 风格：ref 只显示为进度指示（'Ref advisor_1 thinking...'）。详细 ref 输出写入 'MoA Bridge — Ref Output' 面板。**ref 内容不进入 chat history** —— 只有 aggregator 综合结果进入。符合 Hermes 设计：ref 是侧信道咨询调用。",
+            "⚠️ WARNING — context pollution risk. Legacy: refs stream inline as markdown in the chat response. Visible AND recorded in chat history. This means ALL ref outputs (potentially thousands of tokens × N refs × M iterations) accumulate in Copilot's context window, causing context bloat, slower follow-ups, and potential aggregator confusion (aggregator should read in-memory JSON, not chat-text refs). Use this only if you explicitly need Copilot follow-ups to reference individual ref opinions.\n\n---\n\n⚠️ 警告 —— 上下文污染风险。遗留模式：ref 以 markdown 内联流式输出到 chat 响应。可见 **且** 记入 chat history。这意味着所有 ref 输出（可能数千 token × N 个 ref × M 轮迭代）会累积到 Copilot 的上下文窗口，导致上下文膨胀、后续 follow-up 变慢、甚至 aggregator 混乱（aggregator 应该读内存中的 JSON，而非 chat 正文里的 ref）。仅当你明确需要 Copilot follow-up 引用单个 ref 意见时才用此模式。"
           ],
-          "description": "How to display reference advisor output in the chat UI. 'thinking' (default) keeps refs out of chat history (Hermes-style); 'verbose' shows them inline.",
+          "description": "How to display reference advisor output in the chat UI. **'thinking' (default, STRONGLY RECOMMENDED)** keeps refs out of chat history (Hermes-style); aggregator reads in-memory ref results only. **'verbose'** streams refs inline as markdown — ⚠️ WARNING: pollutes Copilot context, may cause aggregator confusion. Change only if you fully understand the trade-off.\n\n---\n\n参考顾问输出在 chat UI 的显示方式。**'thinking'（默认，强烈推荐）** 让 ref 不进 chat history（Hermes 风格），aggregator 只读内存中的 ref 结果。**'verbose'** 把 ref 以 markdown 内联流式输出 —— ⚠️ 警告：会污染 Copilot 上下文，可能导致 aggregator 混乱。仅当你完全理解权衡时才修改。",
           "order": 5
         },
         "moa.enableActingAgent": {
           "type": "boolean",
           "default": true,
-          "description": "Enable the 3-layer Hermes architecture. When true, the aggregator's output becomes guidance for an acting agent that can call tools (read_file, find_files, apply_patch, run_in_terminal, etc.) to actually accomplish the user's task. When false, falls back to v0.7.x 2-layer behavior (aggregator output IS the final answer). Requires copilot_* tools to be registered (default when GitHub Copilot Chat is active).",
+          "description": "Enable the 3-layer Hermes architecture. When true, the aggregator's output becomes guidance for an acting agent that can call tools (read_file, find_files, apply_patch, run_in_terminal, etc.) to actually accomplish the user's task. When false, falls back to v0.7.x 2-layer behavior (aggregator output IS the final answer). Requires copilot_* tools to be registered (default when GitHub Copilot Chat is active).\n\n---\n\n启用 3 层 Hermes 架构。**true** = aggregator 的输出成为 acting agent 的指导，后者可调用工具（read_file / find_files / apply_patch / run_in_terminal 等）真正完成用户任务。**false** = 回退到 v0.7.x 的 2 层行为（aggregator 输出即最终答案）。需要 copilot_* 工具已注册（GitHub Copilot Chat 激活时默认满足）。",
           "order": 6
         },
         "moa.enableActorInLoop": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "%moa.config.enableActorInLoop%",
-          "description": "Enable the Actor role in the 5-role Loop mode (moaOrchestrator). When false (default), Actor is skipped and Aggregator's actor_needed suggestion is downgraded to recon_needed. When true, Actor executes action_items using the acting agent loop. Independent from moa.enableActingAgent (which controls single-shot Hermes mode in moaRunner). Default false for safety — Actor has side effects (file writes, terminal commands).",
+          "description": "Enable the Actor role in the 5-role Loop mode (moaOrchestrator). When false (default), Actor is skipped and Aggregator's actor_needed suggestion is downgraded to recon_needed. When true, Actor executes action_items using the acting agent loop. Independent from moa.enableActingAgent (which controls single-shot Hermes mode in moaRunner). Default false for safety — Actor has side effects (file writes, terminal commands).\n\n---\n\n在 5 角色 Loop 模式（moaOrchestrator）中启用 Actor 角色。**false**（默认）= Actor 被跳过，Aggregator 的 actor_needed 建议被降级为 recon_needed。**true** = Actor 通过 acting agent 循环执行 action_items。与 moa.enableActingAgent（控制 moaRunner 单次 Hermes 模式）独立。默认 false 以策安全 —— Actor 有副作用（写文件、跑终端命令）。",
           "order": 6.1
         },
         "moa.safeExecutionMode": {
           "type": "boolean",
           "default": true,
           "markdownDescription": "%moa.config.safeExecutionMode%",
-          "description": "v0.19.1: When true (default), Actor's tool calls are wrapped by SafeExecutor: write_file/delete operations are backed up to .bak.<timestamp> before execution, all side-effecting actions are logged to .moa_cache/<task_id>/manifest.json. When false, Actor executes tools directly without backup/manifest. Default true for safety.",
+          "description": "v0.19.1: When true (default), Actor's tool calls are wrapped by SafeExecutor: write_file/delete operations are backed up to .bak.<timestamp> before execution, all side-effecting actions are logged to .moa_cache/<task_id>/manifest.json. When false, Actor executes tools directly without backup/manifest. Default true for safety.\n\n---\n\nv0.19.1：**true**（默认）= Actor 的工具调用被 SafeExecutor 包装：write_file/delete 操作执行前备份到 .bak.<时间戳>，所有副作用操作记录到 .moa_cache/<task_id>/manifest.json。**false** = Actor 直接执行工具，无备份无清单。默认 true 以策安全。",
           "order": 6.2
         },
         "moa.cacheTtlDays": {
           "type": "number",
           "default": 30,
-          "minimum": 1,
-          "maximum": 365,
+          "minimum": 0,
+          "maximum": 36500,
           "markdownDescription": "%moa.config.cacheTtlDays%",
-          "description": "v0.19.1: Tasks older than this TTL (in days) will be cleaned up when running the 'MoA: Cleanup Old Tasks' command. Default 30 days.",
+          "description": "v0.19.1 (rev v0.20.2): Tasks older than this TTL (in days) will be cleaned up when running the 'MoA: Cleanup Old Tasks' command. Default 30 days. **Set to 0 to disable TTL cleanup entirely** (tasks are never auto-deleted; you must manually remove .moa_cache/). Maximum raised from 365 to 36500 (~100 years) in v0.20.2 for long-term archival needs.\n\n---\n\nv0.19.1（v0.20.2 修订）：超过此 TTL（天）的任务会在运行 'MoA: Cleanup Old Tasks' 命令时被清理。默认 30 天。**设为 0 完全禁用 TTL 清理**（任务永不自动删除，需手动删除 .moa_cache/）。v0.20.2 将上限从 365 提高到 36500（约 100 年），满足长期归档需求。",
           "order": 6.3
         },
         "moa.cacheRootDir": {
           "type": "string",
           "default": "",
           "markdownDescription": "%moa.config.cacheRootDir%",
-          "description": "v0.19.1: Override the cache root directory. Default empty (uses <workspaceFolder>/.moa_cache/). Set to an absolute path to centralize all MoA task caches.",
+          "description": "v0.19.1: Override the cache root directory. Default empty (uses <workspaceFolder>/.moa_cache/). Set to an absolute path to centralize all MoA task caches.\n\n---\n\nv0.19.1：覆盖缓存根目录。默认空（使用 <workspaceFolder>/.moa_cache/）。设为绝对路径可跨工作区集中存储所有 MoA 任务缓存。",
           "order": 6.4
         },
         "moa.executionPreset": {
@@ -548,21 +548,21 @@
           ],
           "default": "manual",
           "enumDescriptions": [
-            "manual（默认，v0.19.x 兼容）：finalize 后只返回 markdown 给主会话，需要用户/主会话显式调用 #moa_execute 才会执行 action_items。approvalMode=batch、safeMode=true。",
-            "supervised（半自动 + 人工审批）：finalize 后自动执行 action_items，但每个 action 执行前会弹 QuickPick 让用户多选/反选。safeMode=true。适合多数有人值守的场景。",
-            "autopilot（全自动，推荐用于可信 CI/重试流水线）：finalize 后自动执行，无任何审批弹窗。安全网 = SafeExecutor 自动备份 (.bak.<时间戳>)。用户仍可从 .moa_cache/<task_id>/manifest.json 审计。",
-            "yolo（极端，仅沙盒/CI）：全自动 + 完全关闭 SafeExecutor 备份。任何变更不可逆。UI 会显示警告。",
-            "custom（自定义）：手动控制下方 3 个细粒度配置 (autoExecuteAfterFinalize / approvalMode / safeExecutionMode)，executionPreset 字段本身被忽略。"
+            "manual（默认，v0.19.x 兼容）：finalize 后只返回 markdown 给主会话，需要用户/主会话显式调用 #moa_execute 才会执行 action_items。approvalMode=batch、safeMode=true。\n\nEnglish: manual (default, v0.19.x-compatible): finalize returns markdown only; user/main session must call #moa_execute explicitly. approvalMode=batch, safeMode=true.",
+            "supervised（半自动 + 人工审批）：finalize 后自动执行 action_items，但每个 action 执行前会弹 QuickPick 让用户多选/反选。safeMode=true。\n\nEnglish: supervised (semi-auto + human approval): auto-executes after finalize, but QuickPick multi-select pops up before each round. safeMode=true.",
+            "autopilot（全自动，推荐用于可信 CI/重试流水线）：finalize 后自动执行，无任何审批弹窗。安全网 = SafeExecutor 自动备份 (.bak.<时间戳>)。用户仍可从 .moa_cache/<task_id>/manifest.json 审计。\n\nEnglish: autopilot (fully auto, recommended for trusted CI/retry pipelines): auto-executes after finalize, zero popups. Safety net = SafeExecutor automatic .bak.<timestamp> backup. Auditable via manifest.json.",
+            "yolo（极端，仅沙盒/CI）：全自动 + 完全关闭 SafeExecutor 备份。任何变更不可逆。UI 会显示警告。\n\nEnglish: yolo (extreme, sandbox/CI only): fully auto + SafeExecutor backup OFF. All changes irreversible. UI shows a warning.",
+            "custom（自定义）：手动控制下方 3 个细粒度配置 (autoExecuteAfterFinalize / approvalMode / safeExecutionMode)，executionPreset 字段本身被忽略。\n\nEnglish: custom: control 3 fine-grained configs (autoExecuteAfterFinalize / approvalMode / safeExecutionMode) independently; executionPreset itself is ignored."
           ],
           "markdownDescription": "%moa.config.executionPreset%",
-          "description": "v0.20.0：顶层执行模式快捷方式。选择一个 preset 即可覆盖最常见的 autoExecute + approvalMode + safeMode 组合。设为 custom 可独立控制 3 个细粒度配置。",
+          "description": "v0.20.0：顶层执行模式快捷方式。选择一个 preset 即可覆盖最常见的 autoExecute + approvalMode + safeMode 组合。设为 custom 可独立控制 3 个细粒度配置。详见下方 'Actor execution control' 章节（README）。\n\n---\n\nEnglish: v0.20.0: Top-level execution mode shortcut. Pick a preset to cover the most common autoExecute + approvalMode + safeMode combinations. Set to 'custom' to control the 3 fine-grained configs independently. See 'Actor execution control' section in README for details.",
           "order": 6.5
         },
         "moa.autoExecuteAfterFinalize": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "%moa.config.autoExecuteAfterFinalize%",
-          "description": "v0.20.0：true = finalizeTask 自动调用 Actor 执行 final.json 的 action_items（受 approvalMode 约束）。false = finalize 只返回 markdown，主会话需显式调用 #moa_execute。仅在 executionPreset='custom' 时生效；其他 preset 下此值被 preset 覆盖。",
+          "description": "v0.20.0：true = finalizeTask 自动调用 Actor 执行 final.json 的 action_items（受 approvalMode 约束）。false = finalize 只返回 markdown，主会话需显式调用 #moa_execute。\n\n⚠️ 仅在 executionPreset='custom' 时生效；其他 preset 会覆盖此值。\n\n---\n\nEnglish: v0.20.0: When true, finalizeTask() automatically invokes Actor to execute final.json's action_items (subject to approvalMode). When false (default), finalize returns markdown and main session must call #moa_execute explicitly.\n\n⚠️ Only effective when executionPreset='custom'; other presets override this value.",
           "order": 6.6
         },
         "moa.approvalMode": {
@@ -575,91 +575,92 @@
           ],
           "default": "batch",
           "enumDescriptions": [
-            "none（不弹窗）：完全依赖 SafeExecutor 备份作为安全网。建议仅与 safeMode=true 一起使用。",
-            "batch（默认，Gate-A 批量审批）：每次 Actor 调用入口弹 QuickPick 多选框，列出所有 action_items，用户可反选不想要的项。",
-            "per_call（Gate-B 逐次审批）：每个破坏性工具调用前（write_file / delete / execute）弹 Yes/No/Yes to All/Reject All 对话框。",
-            "batch_plus_per_call（双门，最保守）：Gate-A 入口批量 + Gate-B 每次破坏性调用前。"
+            "none（不弹窗）：完全依赖 SafeExecutor 备份作为安全网。建议仅与 safeMode=true 一起使用。\n\nEnglish: none (no popups): rely solely on SafeExecutor backup. Recommended only with safeMode=true.",
+            "batch（默认，Gate-A 批量审批）：每次 Actor 调用入口弹 QuickPick 多选框，列出所有 action_items，用户可反选不想要的项。\n\nEnglish: batch (default, Gate-A batch approval): QuickPick multi-select at each Actor entry, listing all action_items. User can deselect unwanted items.",
+            "per_call（Gate-B 逐次审批）：每个破坏性工具调用前（write_file / delete / execute）弹 Yes/No/Yes to All/Reject All 对话框。\n\nEnglish: per_call (Gate-B per-call approval): Yes/No/YesToAll/RejectAll dialog before each destructive tool call (write_file / delete / execute).",
+            "batch_plus_per_call（双门，最保守）：Gate-A 入口批量 + Gate-B 每次破坏性调用前。\n\nEnglish: batch_plus_per_call (both gates, most conservative): Gate-A batch at entry + Gate-B before each destructive call."
           ],
           "markdownDescription": "%moa.config.approvalMode%",
-          "description": "v0.20.0：审批门模式，控制破坏性 Actor 工具调用在执行前如何被门控。仅在 executionPreset='custom' 时生效。",
+          "description": "v0.20.0：审批门模式，控制破坏性 Actor 工具调用在执行前如何被门控。\n\n⚠️ 仅在 executionPreset='custom' 时生效；其他 preset 会覆盖此值。\n\n---\n\nEnglish: v0.20.0: Approval gate mode controlling how destructive Actor tool calls are gated before execution.\n\n⚠️ Only effective when executionPreset='custom'; other presets override this value.",
           "order": 6.7
         },
         "moa.enableRecon": {
           "type": "boolean",
           "default": true,
-          "description": "Enable the recon phase (Phase 0). When true, a recon agent runs BEFORE ref fan-out to collect files relevant to the user's question (read_file, find_files, grep, get_errors, search_codebase). The collected raw context is injected into ref prompts so refs can give grounded analysis instead of guessing. When false, skips recon — refs see only workspace context (v0.8.0 behavior).",
+          "description": "Enable the recon phase (Phase 0). When true, a recon agent runs BEFORE ref fan-out to collect files relevant to the user's question (read_file, find_files, grep, get_errors, search_codebase). The collected raw context is injected into ref prompts so refs can give grounded analysis instead of guessing. When false, skips recon — refs see only workspace context (v0.8.0 behavior).\n\n---\n\n启用 recon 阶段（Phase 0）。**true**（默认）= recon 代理在 ref 扇出**前**运行，收集与用户问题相关的文件（read_file / find_files / grep / get_errors / search_codebase），原始上下文注入 ref prompts，让 ref 给出有依据的分析而非猜测。**false** = 跳过 recon，ref 只能看到 workspace 上下文（v0.8.0 行为）。",
           "order": 7
         },
         "moa.maxReconRounds": {
           "type": "number",
           "default": 3,
           "minimum": 1,
-          "maximum": 10,
-          "description": "Maximum number of recon rounds. Each round = 1 recon pass + N ref fan-out. If refs report 'sufficient=false' in their JSON output, the next recon round uses their 'missing' hints to fill gaps. Loop exits early when a majority of refs say sufficient=true. v0.20.1 raised hard cap from 5 to 10 (complex research tasks may need more rounds).",
+          "maximum": 20,
+          "description": "Maximum number of recon rounds. Each round = 1 recon pass + N ref fan-out. If refs report 'sufficient=false' in their JSON output, the next recon round uses their 'missing' hints to fill gaps. Loop exits early when a majority of refs say sufficient=true. v0.20.1 raised hard cap from 5 to 10; v0.20.2 raised further to 20 for deep research workflows.\n\n---\n\n最大 recon 轮数。每轮 = 1 次 recon 通道 + N 个 ref 扇出。若 refs 在 JSON 输出中报告 'sufficient=false'，下一轮 recon 会用它们的 'missing' 提示填补缺口。当多数 refs 表示 sufficient=true 时提前退出。v0.20.1 上限从 5 提到 10；v0.20.2 进一步提到 20 以支持深度研究工作流。",
           "order": 8
         },
         "moa.reconContextChars": {
           "type": "number",
           "default": 500000,
-          "description": "[DEPRECATED — 不再作上限]: 仅作为审计指标记录到 meta.json。原 v0.13.0 用于总字符预算截断，v0.14.5 起完全不再截断 —— refs 单轮无历史 + 1M 上下文模型可以消化任意大小；如果 recon 真爆了说明检索方向出问题（噪声过多），是 LLM 该处理的不是工程层该截断的。保留此配置仅为向后兼容。",
+          "description": "[DEPRECATED — 不再作上限 / No longer a cap]: 仅作为审计指标记录到 meta.json。原 v0.13.0 用于总字符预算截断，v0.14.5 起完全不再截断 —— refs 单轮无历史 + 1M 上下文模型可以消化任意大小；如果 recon 真爆了说明检索方向出问题（噪声过多），是 LLM 该处理的不是工程层该截断的。保留此配置仅为向后兼容。\n\nEnglish: Kept for backward compat only. Original v0.13.0 role (character budget truncation) was removed in v0.14.5 — refs are single-turn history-less and 1M-context models can digest any size. If recon truly overflows, that's a search-direction problem for the LLM, not a truncation problem.",
           "order": 9
         },
         "moa.forceDirect": {
           "type": "boolean",
           "default": false,
-          "description": "Skip the entire recon/ref/aggregator pipeline. The acting agent receives only the user prompt + workspace context and acts directly (no multi-model consultation). Useful when the user has had repeated multi-model failures and just wants a single competent model to handle the task with full tool access.",
+          "description": "⚠️ WARNING — bypasses multi-model safety net. Skip the entire recon/ref/aggregator pipeline. The acting agent receives only the user prompt + workspace context and acts directly (no multi-model consultation). Useful ONLY when the user has had repeated multi-model failures and just wants a single competent model to handle the task with full tool access. With forceDirect=true, you lose: (1) cross-model verification, (2) recon-collected evidence, (3) aggregator synthesis. Use sparingly.\n\n---\n\n⚠️ 警告 —— 绕过多模型安全网。跳过整个 recon/ref/aggregator 流水线。acting agent 只拿到用户 prompt + workspace 上下文就直接行动（无多模型协商）。**仅在**用户反复遭遇多模型失败、只想用单一强力模型 + 完整工具权限处理任务时使用。开启 forceDirect=true 后你会失去：(1) 跨模型校验、(2) recon 收集的证据、(3) aggregator 综合。慎用。",
           "order": 10
         },
         "moa.maxReconIterations": {
           "type": "number",
           "default": 50,
           "minimum": 4,
-          "maximum": 200,
-          "description": "Recon agent 单次任务的最大工具调用迭代数（兜底硬上限）。默认 50。v0.20.1 提高上限到 200（大型 monorepo 或深度研究任务可能需要更多迭代）。实际多数任务会在 LLM 自主判断 + 早停机制触发后更早收敛。配置项 moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated 控制主动早停。",
+          "maximum": 500,
+          "description": "Recon agent 单次任务的最大工具调用迭代数（兜底硬上限）。默认 50。v0.20.1 提高上限到 200；v0.20.2 进一步提高到 500（超大型 monorepo 或深度研究任务可能需要）。实际多数任务会在 LLM 自主判断 + 早停机制触发后更早收敛。配置项 moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated 控制主动早停。\n\n---\n\nEnglish: Hard cap on recon agent tool-call iterations per task. Default 50. v0.20.1 raised cap to 200; v0.20.2 raised further to 500 (very large monorepos or deep research tasks). Most tasks converge earlier via LLM self-judgment + early-stop heuristics (see moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated).",
           "order": 11
         },
         "moa.reconAllowTerminal": {
           "type": "boolean",
           "default": false,
-          "description": "允许 recon agent 使用 terminal 类工具（runInTerminal / sendToTerminal / killTerminal）。默认 false（安全为先）。Debug 工作流需要 recon 跑测试/编译时设为 true。注意：prompt 会指示 recon 避免破坏性命令（rm -rf / git push --force 等），但最终取决于模型遵循度。",
+          "description": "允许 recon agent 使用 terminal 类工具（runInTerminal / sendToTerminal / killTerminal）。默认 false（安全为先）。Debug 工作流需要 recon 跑测试/编译时设为 true。注意：prompt 会指示 recon 避免破坏性命令（rm -rf / git push --force 等），但最终取决于模型遵循度。\n\n---\n\nEnglish: Allow recon agent to use terminal tools (runInTerminal / sendToTerminal / killTerminal). Default false (safety-first). Set true for debug workflows where recon needs to run tests/compilation. Note: prompt instructs recon to avoid destructive commands (rm -rf / git push --force etc.), but ultimately depends on model compliance.",
           "order": 12
         },
         "moa.reconEarlyStopStagnant": {
           "type": "number",
           "default": 2,
           "minimum": 1,
-          "maximum": 10,
-          "description": "Recon 早停阈值 —— 连续 N 轮工具签名（工具名+输入摘要）完全相同 → 触发早停（防死循环）。默认 2。设大可让 recon 更'耐心'，设小可更激进省成本。",
+          "maximum": 50,
+          "description": "Recon 早停阈值 —— 连续 N 轮工具签名（工具名+输入摘要）完全相同 → 触发早停（防死循环）。默认 2。v0.20.2 上限从 10 提高到 50。设大可让 recon 更'耐心'，设小可更激进省成本。\n\n---\n\nEnglish: Recon early-stop threshold — stop after N consecutive identical tool signatures (tool name + input summary). Default 2. v0.20.2 raised max from 10 to 50. Larger = more 'patient' recon; smaller = more aggressive cost saving.",
           "order": 13
         },
         "moa.reconEarlyStopSaturated": {
           "type": "number",
           "default": 200,
           "minimum": 0,
-          "maximum": 5000,
-          "description": "Recon 早停阈值 —— iterations > 5 后，单轮新增 capturedToolCalls 字符数 < 此值持续 N 轮（N 同 reconEarlyStopStagnant）→ 触发早停（信息饱和）。默认 200 字符。",
+          "maximum": 50000,
+          "description": "Recon 早停阈值 —— iterations > 5 后，单轮新增 capturedToolCalls 字符数 < 此值持续 N 轮（N 同 reconEarlyStopStagnant）→ 触发早停（信息饱和）。默认 200 字符。v0.20.2 上限从 5000 提高到 50000。\n\n---\n\nEnglish: Recon early-stop threshold — after iterations > 5, if new capturedToolCalls chars per round < this value for N consecutive rounds (N = reconEarlyStopStagnant), trigger early stop (info saturation). Default 200 chars. v0.20.2 raised max from 5000 to 50000.",
           "order": 14
         },
         "moa.reconL3Threshold": {
           "type": "number",
           "default": 200000,
-          "minimum": 50000,
-          "description": "L3 孙代理触发阈值。单个文件超过此字符数且为代码文件时，才派 L3 做内容精选（保留关键函数）。v0.14.4 默认从 60k 提升到 200k —— 现代 LLM 1M 上下文，绝大多数文件无需精选。只有真正巨型文件（如生成的 schema、minified bundle）才需要 L3。",
+          "minimum": 10000,
+          "description": "L3 孙代理触发阈值。单个文件超过此字符数且为代码文件时，才派 L3 做内容精选（保留关键函数）。v0.14.4 默认从 60k 提升到 200k —— 现代 LLM 1M 上下文，绝大多数文件无需精选。只有真正巨型文件（如生成的 schema、minified bundle）才需要 L3。v0.20.2 minimum 从 50000 降到 10000，允许更激进触发。\n\n---\n\nEnglish: L3 grandchild trigger threshold. A single file must exceed this char count AND be a code file to trigger L3 summarization (key-function extraction). v0.14.4 raised default from 60k to 200k — modern 1M-context LLMs rarely need L3. Only truly huge files (generated schemas, minified bundles) need it. v0.20.2 lowered minimum from 50000 to 10000 for more aggressive triggering.",
           "order": 15
         },
         "moa.reconL3MaxCalls": {
           "type": "number",
           "default": 5,
           "minimum": 0,
-          "maximum": 20,
-          "description": "单次 MoA 任务最多派多少个 L3 孙代理。超出后即使文件超大也降级为 L2 语义边界截断。设 0 完全禁用 L3。默认 5（兼顾效果与成本）。",
+          "maximum": 100,
+          "description": "单次 MoA 任务最多派多少个 L3 孙代理。超出后即使文件超大也降级为 L2 语义边界截断。设 0 完全禁用 L3。默认 5（兼顾效果与成本）。v0.20.2 上限从 20 提高到 100。\n\n---\n\nEnglish: Max L3 grandchild calls per MoA task. Beyond this, even huge files degrade to L2 semantic-boundary truncation. Set 0 to fully disable L3. Default 5 (balance of effect and cost). v0.20.2 raised max from 20 to 100.",
           "order": 16
         },
         "moa.reconL3TargetChars": {
           "type": "number",
           "default": 50000,
           "minimum": 5000,
-          "description": "L3 孙代理对单个大文件精选后的目标输出长度（字符）。默认 50k —— v0.14.3 是 10k，过度压缩。1M 上下文模型完全可以消化 50k 的精选结果。",
+          "maximum": 500000,
+          "description": "L3 孙代理对单个大文件精选后的目标输出长度（字符）。默认 50k —— v0.14.3 是 10k，过度压缩。1M 上下文模型完全可以消化 50k 的精选结果。v0.20.2 加上 maximum=500000 上限。\n\n---\n\nEnglish: L3 grandchild target output length (chars) for each large file. Default 50k — v0.14.3 was 10k (over-compressed). 1M-context models easily digest 50k digests. v0.20.2 added maximum=500000 cap.",
           "order": 17
         },
         "moa.reconModel": {
@@ -667,16 +668,16 @@
           "default": {
             "model": ""
           },
-          "description": "Recon agent 专用模型配置。model 字段为 vscode.lm 模型 ID（如 gcmp.zhipu:::GLM-5.2-CodingPlan）。空字符串 = fallback 到 aggregator 模型（保持 v0.13.x 行为）。通过 'Moa: Configure Models' 命令的 Step 3/7 设置（v0.18.2+ 支持多选并行，见 moa.presets.reconModels）。",
+          "description": "Recon agent 专用模型配置。model 字段为 vscode.lm 模型 ID（如 gcmp.zhipu:::GLM-5.2-CodingPlan）。空字符串 = fallback 到 aggregator 模型（保持 v0.13.x 行为）。通过 'Moa: Configure Models' 命令的 Step 3/7 设置（v0.18.2+ 支持多选并行，见 moa.presets.reconModels）。\n\n---\n\nEnglish: Recon agent model config. The `model` field is a vscode.lm model ID (e.g. gcmp.zhipu:::GLM-5.2-CodingPlan). Empty string = fallback to aggregator model (v0.13.x behavior). Set via 'Moa: Configure Models' Step 3/7 (v0.18.2+ supports multi-select parallelism, see moa.presets.reconModels).",
           "properties": {
             "model": {
               "type": "string",
               "default": "",
-              "description": "Recon 模型 ID。空 = 复用 aggregator（向后兼容）。"
+              "description": "Recon 模型 ID。空 = 复用 aggregator（向后兼容）。\n\nEnglish: Recon model ID. Empty = reuse aggregator (backward compat)."
             },
             "temperature": {
               "type": "number",
-              "description": "保留字段（vscode.lm API 暂未使用）。"
+              "description": "保留字段（vscode.lm API 暂未使用）。\n\nEnglish: Reserved field (vscode.lm API doesn't use this yet)."
             }
           },
           "order": 18
@@ -686,12 +687,12 @@
           "default": {
             "model": ""
           },
-          "description": "L3 孙代理（大文件精选器）模型配置。model 字段为 vscode.lm 模型 ID。空字符串 = 禁用 L3（所有大文件降级为 L2 语义边界截断）。推荐 MiniMax-M3 (TokenPlan)。通过 'Moa: Configure Models' 命令的 Step 7/7 设置。",
+          "description": "L3 孙代理（大文件精选器）模型配置。model 字段为 vscode.lm 模型 ID。空字符串 = 禁用 L3（所有大文件降级为 L2 语义边界截断）。推荐 MiniMax-M3 (TokenPlan)。通过 'Moa: Configure Models' 命令的 Step 7/7 设置。\n\n---\n\nEnglish: L3 grandchild (large-file summarizer) model config. The `model` field is a vscode.lm model ID. Empty string = disable L3 (all large files degrade to L2 semantic-boundary truncation). Recommended: MiniMax-M3 (TokenPlan). Set via 'Moa: Configure Models' Step 7/7.",
           "properties": {
             "model": {
               "type": "string",
               "default": "",
-              "description": "L3 模型 ID。空 = 禁用 L3。"
+              "description": "L3 模型 ID。空 = 禁用 L3。\n\nEnglish: L3 model ID. Empty = disable L3."
             }
           },
           "order": 19

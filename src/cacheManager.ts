@@ -178,6 +178,15 @@ export async function cleanupExpiredTasks(options?: {
     errors: [],
   };
 
+  // v0.20.2: ttlDays <= 0 表示永不清理（用户显式禁用 TTL）
+  if (ttlDays <= 0) {
+    // 仍扫描目录以报告 scanned，但不删任何东西
+    const taskDirs = await listTaskDirs(cacheRoot);
+    result.scanned = taskDirs.length;
+    result.kept = taskDirs.length;
+    return result;
+  }
+
   const taskDirs = await listTaskDirs(cacheRoot);
   result.scanned = taskDirs.length;
 

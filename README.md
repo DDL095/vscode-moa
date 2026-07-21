@@ -313,24 +313,24 @@ All settings live under the `moa.*` namespace. Edit via `settings.json` or use *
 | `moa.parallelRefs` | boolean | `true` | Fan out refs in parallel (`Promise.allSettled`) — wall-clock = slowest ref. Set `false` for sequential fan-out if your provider rate-limits concurrent requests. *(v0.14.14: default flipped from `false` to `true`)* |
 | `moa.parallelRecon` | boolean | `true` | Fan out Recon agents in parallel when `preset.reconModels` has 2+ models. When `false`, or when only 1 recon model is configured, runs sequentially. *(v0.18.0)* |
 | `moa.sharedRefPrompt` | string | `""` | Override the shared ref system prompt. Empty = built-in Hermes prompt. |
-| `moa.refDisplayMode` | `"thinking"` \| `"verbose"` | `"thinking"` | `thinking` keeps refs out of chat history (Hermes-style); `verbose` streams inline. |
+| `moa.refDisplayMode` | `"thinking"` \| `"verbose"` | `"thinking"` | ⚠️ **Keep `thinking` (default, STRONGLY RECOMMENDED)**. `thinking` keeps refs out of chat history (Hermes-style — refs go to 'MoA Bridge — Ref Output' panel, aggregator reads in-memory JSON only). `verbose` streams refs inline as markdown AND records them to chat history — ⚠️ **context pollution risk**: thousands of tokens × N refs × M iterations accumulate in Copilot context, slowing follow-ups and potentially confusing the aggregator. Use `verbose` only if you explicitly need Copilot follow-ups to reference individual ref opinions. |
 | `moa.enableRecon` | boolean | `true` | Toggle Phase 0. |
 | `moa.enableActingAgent` | boolean | `true` | Toggle Phase 3. |
-| `moa.forceDirect` | boolean | `false` | Skip the whole pipeline — direct acting agent. |
-| `moa.maxReconRounds` | number (1-10) | `3` | Sufficiency-loop cap. v0.20.1 raised hard cap from 5 → 10 (complex research tasks may need more rounds). |
+| `moa.forceDirect` | boolean | `false` | ⚠️ **WARNING — bypasses multi-model safety net.** Skip the whole pipeline — direct acting agent. Loses: (1) cross-model verification, (2) recon-collected evidence, (3) aggregator synthesis. Use ONLY after repeated multi-model failures. |
+| `moa.maxReconRounds` | number (1-20) | `3` | Sufficiency-loop cap. v0.20.1 raised hard cap from 5 → 10; v0.20.2 raised further to 20 for deep research. |
 
 ### Recon tuning (v0.13.0+)
 
 | Key | Default | Description |
 |---|---|---|
-| `moa.maxReconIterations` | `50` | Hard cap on tool calls per recon task. v0.20.1 raised max from 100 → 200. |
+| `moa.maxReconIterations` | `50` | Hard cap on tool calls per recon task. v0.20.1 raised max from 100 → 200; v0.20.2 raised further to 500 for very large monorepos / deep research. |
 | `moa.reconContextChars` | `500000` | **[DEPRECATED v0.14.5]** No longer enforces a cap; only recorded to `meta.json` as an audit metric. Original v0.13.0 role (character budget truncation) was removed because refs are single-turn history-less and 1M-context models can digest any size — if recon truly overflows, that's a search-direction problem for the LLM to handle, not a truncation problem. Kept for backward compat. |
 | `moa.reconAllowTerminal` | `false` | Allow terminal tools in recon (off by default for safety). |
-| `moa.reconEarlyStopStagnant` | `2` | Stop after N consecutive identical tool signatures. |
-| `moa.reconEarlyStopSaturated` | `200` | Stop after N iterations adding <200 chars each (post-iter-5). |
-| `moa.reconL3Threshold` | `200000` | Single-file size (chars) that triggers L3 summarization. v0.14.4 raised from 60k → 200k — modern 1M-context models rarely need L3; only truly huge files (generated schemas, minified bundles) trigger it. |
-| `moa.reconL3MaxCalls` | `5` | Max L3 grandchild calls per MoA task. `0` disables. |
-| `moa.reconL3TargetChars` | `50000` | L3 target output length (chars). v0.14.4 raised from 10k → 50k to avoid over-compression. |
+| `moa.reconEarlyStopStagnant` | `2` (max 50) | Stop after N consecutive identical tool signatures. v0.20.2 raised max from 10 → 50. |
+| `moa.reconEarlyStopSaturated` | `200` (max 50000) | Stop after N iterations adding <200 chars each (post-iter-5). v0.20.2 raised max from 5000 → 50000. |
+| `moa.reconL3Threshold` | `200000` (min 10000) | Single-file size (chars) that triggers L3 summarization. v0.14.4 raised from 60k → 200k — modern 1M-context models rarely need L3; only truly huge files (generated schemas, minified bundles) trigger it. v0.20.2 lowered minimum from 50000 → 10000 for more aggressive triggering. |
+| `moa.reconL3MaxCalls` | `5` (max 100) | Max L3 grandchild calls per MoA task. `0` disables. v0.20.2 raised max from 20 → 100. |
+| `moa.reconL3TargetChars` | `50000` (max 500000) | L3 target output length (chars). v0.14.4 raised from 10k → 50k to avoid over-compression. v0.20.2 added maximum=500000 cap. |
 
 ### Actor execution control (v0.20.0+)
 
@@ -421,6 +421,19 @@ Actor 角色（Phase 5）会**真正执行** Aggregator 给出的 `action_items`
 - 任何 preset 下的每个副作用操作都被记录到 `.moa_cache/<task_id>/manifest.json`，字段含 `iter` / `seq` / `type` / `target` / `tool_name` / `input_summary` / `status` / `backup_path` / `output_chars` / `timestamp`。
 - 备份写入 `<target>.bak.<timestamp>`（原文件旁边）。要回滚：删新文件，把 `.bak.<ts>` 改回原名即可。
 - 任务目录里的 `autopilot.log`（v0.20.0）是人类可读摘要：`started_at` / `elapsed_sec` / `tool_calls` / 每个 action 的 status。适合 CI 日志。
+
+### Cache & lifecycle (v0.19.1+, revised v0.20.2)
+
+| Key | Default | Description |
+|---|---|---|
+| `moa.cacheTtlDays` | `30` | Tasks older than this TTL (in days) will be cleaned up when running the `MoA: Cleanup Old Tasks` command. **v0.20.2: Set to 0 to disable TTL cleanup entirely** (tasks are never auto-deleted; you must manually remove `.moa_cache/`). Maximum raised from 365 to 36500 (~100 years) for long-term archival. |
+| `moa.cacheRootDir` | `""` (empty) | Override the cache root directory. Default empty (uses `<workspaceFolder>/.moa_cache/`). Set to an absolute path to centralize all MoA task caches across workspaces. |
+
+**Common patterns**:
+- **Default (30 days)**: suitable for most users; stale experiments auto-cleaned monthly.
+- **`0` (never delete)**: for long-running research projects where you want to audit every task months later.
+- **`365` (1 year)**: balance between retention and disk usage.
+- **Custom `cacheRootDir`**: set to e.g. `D:/moa_cache` to share cache across multiple workspaces (useful for CI).
 
 ## File layout
 
