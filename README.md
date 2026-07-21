@@ -11,9 +11,9 @@
 [![Marketplace](https://img.shields.io/badge/Marketplace-dudali095.moa--bridge-green.svg)](https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge)
 [![GitHub Release](https://img.shields.io/github/v/release/DDL095/vscode-moa?color=blue&label=release)](https://github.com/DDL095/vscode-moa/releases/latest)
 
-> ⚠️ **Default Autopilot mode (v0.21.3+)** — New installs default to `moa.executionPreset="autopilot"` + `moa.enableActorInLoop=true`. After task convergence, the Actor role **automatically executes** `action_items` (write files, run terminal commands) with SafeExecutor `.bak.<timestamp>` backup. Audit trail: `.moa_cache/<task_id>/manifest.json`. To disable: set `moa.executionPreset="manual"` (finalize returns markdown only) or `"supervised"` (Gate-A QuickPick approval before each round).
+> ⚠️ **默认 Autopilot 模式（v0.21.3+）** —— 新安装默认 `moa.executionPreset="autopilot"` + `moa.enableActorInLoop=true`。任务收敛后，Actor 角色**自动执行** `action_items`（写文件 / 跑终端命令），由 SafeExecutor 做 `.bak.<timestamp>` 备份。审计日志：`.moa_cache/<task_id>/manifest.json`。关闭方式：设 `moa.executionPreset="manual"`（finalize 仅返回 markdown）或 `"supervised"`（每轮 Gate-A QuickPick 审批）。
 >
-> *English: v0.21.3+ defaults to autopilot + Actor-in-loop. After convergence, Actor auto-executes action_items with SafeExecutor backup. To opt out: `manual` (markdown only) or `supervised` (Gate-A approval).*
+> *English (summary): v0.21.3+ defaults to autopilot + Actor-in-loop. After convergence, Actor auto-executes action_items with SafeExecutor backup. Opt out via `manual` or `supervised`.*
 
 ## 它能做什么 / What it does
 

@@ -4,7 +4,7 @@
 
 **Mixture-of-Agents (MoA) for VSCode Copilot Chat** — orchestrates a streamlined 5-role pipeline (Planner → Recon → Refs → Aggregator → Actor) through the native `vscode.lm` API, letting multiple LLMs collaborate as heterogeneous advisors.
 >
-> *中文用户请查看 [README.md](./README.md)。Chinese-speaking users please see [README.md](./README.md).*
+> *Chinese-speaking users: see [README.md](./README.md).*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![VSCode](https://img.shields.io/badge/VSCode-1.95+-blue.svg)](https://code.visualstudio.com)
