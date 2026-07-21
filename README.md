@@ -13,16 +13,16 @@
 
 ## What it does / 它能做什么
 
-`@moa <your question>` runs a multi-model fan-out directly in Copilot Chat. Three entry points, two loop shapes:
+`@moa <your question>` 在 Copilot Chat 中直接运行多模型扇出。三种入口，两种 loop 形态：
 
-| Entry point | When to use | Loop shape |
+| 入口 | 使用场景 | Loop 形态 |
 |---|---|---|
-| `@moa` (default) | Most cases — iterative refinement until Aggregator converges | Hermes loop, up to `MAX_ITER=12` |
-| `@moaloop` | Same as `@moa` — explicit loop mode | Hermes loop |
-| `@moasingle` | Fast single-shot — 1 iteration, forced finalize | No loop |
-| `#moa_orchestrate` / `#moa_continue` / `#moa_finalize` | LM tools — drive the loop from another agent or chat | Hermes loop, disk-persisted state |
-| `#moa_analyze` | LM tool — one-shot N refs + 1 aggregator, no loop | No loop |
-| `#moa_recon` | LM tool — standalone read-only file collection | N/A |
+| `@moa`（默认） | 多数场景 —— 迭代优化直到 Aggregator 收敛 | Hermes loop，最多 `MAX_ITER=12` 轮 |
+| `@moaloop` | 同 `@moa` —— 显式 loop 模式 | Hermes loop |
+| `@moasingle` | 快速单次 —— 1 轮迭代，强制 finalize | 无 loop |
+| `#moa_orchestrate` / `#moa_continue` / `#moa_finalize` | LM 工具 —— 从另一个 agent 或 chat 驱动 loop | Hermes loop，状态落盘 |
+| `#moa_analyze` | LM 工具 —— 单次 N refs + 1 aggregator，无 loop | 无 loop |
+| `#moa_recon` | LM 工具 —— 独立只读文件收集 | N/A |
 
 ### The 5-role pipeline (v0.15.0+, redesigned in v0.17–v0.18)
 
@@ -173,82 +173,82 @@ flowchart TD
 
 > **ℹ️ 渲染说明**：GitHub 和 VSCode Marketplace 原生支持 mermaid。**VSCode 自带的 markdown preview 不支持** —— 请安装 [Markdown Preview Mermaid Support](https://marketplace.visualstudio.com/items?itemName=bierner.markdown-mermaid) 扩展，或在 GitHub 上查看本文件。
 
-**Single-model mode**: when `preset.reconModels` has only 1 entry (or `moa.parallelRecon: false`), the parallel fan-out collapses to a single Recon Agent. The Aggregator still runs — its job changes from "dedupe across models" to "normalize raw output + strip noise". Downstream Refs see the same shape either way (Plan B, see [CHANGELOG v0.18.0](./CHANGELOG.md#0180---2026-07-20)).
+**单模型模式 / Single-model mode**：当 `preset.reconModels` 只有 1 项（或 `moa.parallelRecon: false`）时，并行扇出塌缩为单个 Recon Agent。Aggregator 仍会运行 —— 职责从"跨模型去重"变为"规范化原始输出 + 剔除噪声"。下游 Refs 看到的形状不变（Plan B，见 [CHANGELOG v0.18.0](./CHANGELOG.md#0180---2026-07-20)）。
 
-### Why parallel Recon?
+### 为什么需要并行 Recon？/ Why parallel Recon?
 
-Different LLMs exhibit different tool preferences under the same prompt:
+不同 LLM 在同一个 prompt 下表现出不同的工具偏好：
 
-- One model might lean on `fetch_webpage` for API docs; another prefers `grep_search` for symbol lookup
-- One follows Planner's `recon_hints` literally; another deviates productively
-- A rate-limit / 1213 from one model no longer tanks the phase — siblings compensate
+- 一个模型可能偏向用 `fetch_webpage` 查 API 文档；另一个偏好用 `grep_search` 查符号
+- 一个严格遵循 Planner 的 `recon_hints`；另一个会做有益的偏离
+- 某个模型遇到 rate-limit / 1213 不会再拖垮整个 phase —— 兄弟模型会补偿
 
-Configure via `preset.reconModels` (array). See [Configuration](#configuration-reference) below.
+通过 `preset.reconModels`（数组）配置。见下方 [Configuration](#configuration-reference)。
 
 ### Closed-loop design (v0.15+)
 
-The pipeline is fully closed-loop: Actor's artifacts feed back into `state.evidence` (high confidence), and Aggregator's `gaps` drive the next iteration's Recon. The Aggregator decides convergence — no hard thresholds on "what a good answer looks like", only on runaway protection:
+流水线是完全闭环的：Actor 的 artifacts 反馈到 `state.evidence`（高置信度），Aggregator 的 `gaps` 驱动下一轮 Recon。Aggregator 决定收敛 —— 不对"好答案长什么样"设硬阈值，只做失控保护：
 
-- Hard `MAX_ITER=12` cap
-- Convergence detection: 3 stalled iterations (completeness Δ < 0.05) → forced finalize
-- Aggregator's `next_action` is the source of truth (`finalize` / `actor_needed` / `recon_needed`)
+- 硬性 `MAX_ITER=12` 上限
+- 收敛检测：连续 3 轮停滞（completeness Δ < 0.05）→ 强制 finalize
+- Aggregator 的 `next_action` 是真相源（`finalize` / `actor_needed` / `recon_needed`）
 
-State persists to `<workspace>/.moa_cache/<task_id>/` so the loop survives main-session compaction. See [moaOrchestrator.ts](src/moaOrchestrator.ts) for the full state machine.
+状态持久化到 `<workspace>/.moa_cache/<task_id>/`，让 loop 能挺过主会话 compact。完整状态机见 [moaOrchestrator.ts](src/moaOrchestrator.ts)。
 
-## Install
+## 安装 / Install
 
-### Option A — from VSCode Marketplace (recommended)
+### 方式 A — 从 VSCode Marketplace 安装（推荐）
 
-1. Open the Extensions panel (`Ctrl+Shift+X`)
-2. Search **"MoA Bridge"**
-3. Click Install
+1. 打开扩展面板（`Ctrl+Shift+X`）
+2. 搜索 **"MoA Bridge"**
+3. 点击 Install
 
-Or command line:
+或命令行：
 ```powershell
 code --install-extension dudali095.moa-bridge
 ```
 
-Marketplace page: https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge
+Marketplace 页面：https://marketplace.visualstudio.com/items?itemName=dudali095.moa-bridge
 
-### Option B — from GitHub Release
+### 方式 B — 从 GitHub Release 安装
 
-1. Download the latest `moa-bridge-<version>.vsix` from the [releases page](https://github.com/DDL095/vscode-moa/releases).
+1. 从 [releases 页面](https://github.com/DDL095/vscode-moa/releases) 下载最新的 `moa-bridge-<version>.vsix`。
 2. `code --install-extension moa-bridge-<version>.vsix`
-3. Reload VSCode.
+3. 重载 VSCode。
 
-### Option C — from source
+### 方式 C — 从源码构建
 
 ```powershell
 git clone https://github.com/DDL095/vscode-moa.git
 cd vscode-moa
 npm install
-npm run compile      # dev bundle with source maps
-# or: npm run package  # production bundle
+npm run compile      # 开发 bundle，含 source map
+# 或：npm run package  # 生产 bundle
 code --extensionDevelopmentPath .
 ```
 
-## First-run configuration
+## 首次配置 / First-run configuration
 
-Run **`Moa: Configure Models`** from the command palette — an 8-step flow:
+从命令面板运行 **`Moa: Configure Models`** —— 8 步引导式配置：
 
-| Step | What | UI |
+| 步骤 | 配置内容 | UI |
 |---|---|---|
-| 0/7 | Pick / create / delete a preset group *(v0.14.14)* | single-select |
-| 1/7 | Reference advisors (2-8 models) | multi-select checkbox |
-| 2/7 | Aggregator | single-select checkbox |
-| 3/7 | Recon agent(s) — pick 1 for single-mode, 2+ for parallel, or "Use aggregator" for fallback *(v0.18.2: multi-select)* | multi-select checkbox |
-| 4/7 | Recon Aggregator — integrates parallel Recon outputs; "Use main aggregator" is the recommended default *(v0.18.2)* | single-select checkbox |
-| 5/7 | Planner — task decomposition for iter 1; "Use aggregator" is the recommended default *(v0.18.2)* | single-select checkbox |
-| 6/7 | Actor — executes `action_items` with full tools; "Use aggregator" is the recommended default *(v0.18.2)* | single-select checkbox |
-| 7/7 | L3 summarizer *(optional, default = disabled)* | single-select checkbox |
+| 0/7 | 选择 / 创建 / 删除一个 preset 组 *(v0.14.14)* | 单选 |
+| 1/7 | 参考顾问（2-8 个模型） | 多选复选框 |
+| 2/7 | 聚合器 | 单选复选框 |
+| 3/7 | Recon 代理 —— 选 1 个为单模式，选 2+ 个为并行，或选 "Use aggregator" fallback *(v0.18.2: 多选)* | 多选复选框 |
+| 4/7 | Recon 聚合器 —— 整合并行 Recon 输出；推荐默认 "Use main aggregator" *(v0.18.2)* | 单选复选框 |
+| 5/7 | Planner —— iter 1 的任务分解；推荐默认 "Use aggregator" *(v0.18.2)* | 单选复选框 |
+| 6/7 | Actor —— 用完整工具执行 `action_items`；推荐默认 "Use aggregator" *(v0.18.2)* | 单选复选框 |
+| 7/7 | L3 摘要器 *(可选，默认禁用)* | 单选复选框 |
 
-Every step except refs (Step 1) and recon (Step 3) offers a sentinel "Use aggregator" / "Disable" option as the first item — this is the recommended default for new presets, so users never see a concrete model pre-picked on first configuration. Pick a specific model only when you want to deviate from the aggregator.
+除 refs（Step 1）和 recon（Step 3）外，每步都提供哨兵选项 "Use aggregator" / "Disable" 作为第一项 —— 这是新 preset 的推荐默认值，用户首次配置时不会看到具体模型被预先选中。只有想偏离 aggregator 时才选具体模型。
 
-Configuration is persisted to **both** User (Global) and Workspace tiers, so it works across windows without manual duplication.
+配置会同时持久化到 **User（Global）和 Workspace** 两级，跨窗口无需手动同步。
 
-### Preset groups (v0.14.14+)
+### Preset 组 / Preset groups (v0.14.14+)
 
-A preset bundles the **entire pipeline config** into a named group. You can save multiple presets for different scenarios and switch between them with one click via **`Moa: Switch Preset`**.
+一个 preset 把**整个流水线配置**打包到一个命名组里。你可以为不同场景保存多个 preset，通过 **`Moa: Switch Preset`** 一键切换。
 
 ```text
 moa.presets = {
@@ -256,14 +256,14 @@ moa.presets = {
   "research":{ refModels: [...6 refs...], aggregator: {MiniMax-M3},  reconModels: [DeepSeek, MiniMax], reconAggregator: {GLM-5.2}, l3: {disabled}   },
   "quick":   { refModels: [...2 refs...], aggregator: {GLM-5.2},     reconModel:  {DeepSeek},          l3: {disabled}   }
 }
-moa.activePreset = "code"   ← @moa uses this one
+moa.activePreset = "code"   ← @moa 使用这个
 ```
 
-**Backward compatibility**: legacy flat config (`moa.refModels` + `moa.aggregator` + ...) is auto-migrated to `presets.default` on extension activation. Legacy fields are kept as read-only fallback.
+**向后兼容**：旧的扁平配置（`moa.refModels` + `moa.aggregator` + ...）会在扩展激活时自动迁移到 `presets.default`。旧字段作为只读 fallback 保留。
 
-## Usage
+## 用法 / Usage
 
-### As a chat participant (simplest)
+### 作为 chat 参与者（最简单）
 
 ```
 @moa refactor src/moaRunner.ts to extract the sufficiency loop into its own module
@@ -271,98 +271,100 @@ moa.activePreset = "code"   ← @moa uses this one
 @moa review the auth flow in src/services/auth/
 ```
 
-### As VSCode LM tools (composable)
+### 作为 VSCode LM 工具（可组合）
 
-MoA registers five LM tools that any agent (Copilot Chat, other extensions, MCP servers) can invoke:
+MoA 注册了 6 个 LM 工具，任何 agent（Copilot Chat、其他扩展、MCP server）都可以调用：
 
-| Tool | Purpose |
+| 工具 | 用途 |
 |---|---|
-| `moa_recon` | Standalone read-only file collection — returns structured Markdown summary of relevant files. |
-| `moa_analyze` | One-shot MoA analysis — N refs + 1 aggregator in a single call. |
-| `moa_orchestrate` | Start the iterative Hermes loop, returns `task_id` (supports `deferredResultId` for resume across compaction). |
-| `moa_continue` | Advance the loop — optionally provide `reconResult` from a subagent to fill gaps. |
-| `moa_finalize` | Terminate the loop — emits `action_items` + summary + unresolved gaps. |
+| `moa_recon` | 独立只读文件收集 —— 返回相关文件的结构化 Markdown 摘要。 |
+| `moa_analyze` | 单次 MoA 分析 —— N 个 refs + 1 个 aggregator 一次调用完成。 |
+| `moa_orchestrate` | 启动迭代 Hermes loop，返回 `task_id`（支持 `deferredResultId` 跨 compact 恢复）。 |
+| `moa_continue` | 推进 loop —— 可选提供来自 subagent 的 `reconResult` 来填补缺口。 |
+| `moa_finalize` | 终止 loop —— 产出 `action_items` + summary + 未解决缺口。 |
+| `moa_execute` *(v0.20.0+)* | 执行 finalized 的 `action_items`，受审批门约束。`autopilot` 模式下自动跳过（finalize 后已自动执行）。 |
 
-Hermes-style subagent flow (recommended for complex tasks):
+Hermes 风格 subagent 流（复杂任务推荐）：
 
 ```
 #moaRecon "gather everything related to the recon pipeline"
 #moaAnalyze prompt="..." reconContext=<result from above>
 ```
 
-Or drive the iterative loop manually:
+或手动驱动迭代 loop：
 
 ```
-#moaOrchestrate prompt="..." → returns task_id
+#moaOrchestrate prompt="..." → 返回 task_id
 #moaContinue task_id=<id> reconResult=<subagent output>
 #moaFinalize task_id=<id> → action_items
 ```
 
-## Pipeline visibility — 5 OutputChannels (v0.17.0+)
+## 流水线可视化 —— 5 个 OutputChannel / Pipeline visibility (v0.17.0+)
 
-The full 5-role pipeline now writes intermediate output to **5 separate VSCode OutputChannels**, visible in `View → Output` dropdown (same level as `MoA Bridge Diag`):
+完整的 5 角色流水线现在会把中间输出写到 **5 个独立的 VSCode OutputChannel**，在 `View → Output` 下拉框可见（与 `MoA Bridge Diag` 同级）：
 
-| Channel | Contents |
+| Channel | 内容 |
 |---|---|
-| `MoA Planner` | Planner JSON output (iter 1 only) |
-| `MoA Recon` | Per-recon-agent header + tool_calls count + elapsed + early_stop reason; ends with Recon Aggregator merged summary |
-| `MoA Refs` | Each ref's raw LLM output (failed refs also logged) |
-| `MoA Aggregator` | Aggregator raw + parsed JSON + finalizer output + iteration summary (completeness / next_action / convergence) |
-| `MoA Actor` | Each action_item's status + artifacts + self_assessment |
+| `MoA Planner` | Planner JSON 输出（仅 iter 1） |
+| `MoA Recon` | 每个 recon agent 的 header + tool_calls 数 + 耗时 + early_stop 原因；末尾是 Recon Aggregator 合并摘要 |
+| `MoA Refs` | 每个 ref 的原始 LLM 输出（失败的 ref 也会记录） |
+| `MoA Aggregator` | Aggregator 原始输出 + 解析后 JSON + finalizer 输出 + 迭代摘要（completeness / next_action / convergence） |
+| `MoA Actor` | 每个 action_item 的 status + artifacts + self_assessment |
 
-Each channel includes iteration boundary headers (`═══════ iter N ═══════`) so users can scroll through multi-iteration runs without losing track. The chat response footer reminds you of these channels.
+每个 channel 都有迭代边界 header（`═══════ iter N ═══════`），方便多迭代运行时滚动查看不丢失上下文。chat 响应末尾会提醒这些 channel。
 
-## Architecture
+## 架构 / Architecture
 
-### 5 roles (v0.15.0+, redesigned v0.17–v0.18)
+### 5 个角色 / 5 roles (v0.15.0+, v0.17–v0.18 重设计)
 
-| Role | When | Purpose | Default model source | Tools? | UI step |
+| 角色 | 运行时机 | 用途 | 默认模型来源 | 工具？ | UI 步骤 |
 |---|---|---|---|---|---|
-| **Planner** | iter 1 only | Clarify task; emit `sub_questions` + `recon_hints` | `preset.planner` (falls back to `moa.aggregator`) | None (pure reasoning) | Step 5/7 |
-| **Recon** | every iter | Read files / grep / fetch URLs / list symbols; produce context summary | `preset.reconModels[]` (parallel) or `preset.reconModel` (single) | Read-only whitelist (24-pattern hard blacklist + 3-pattern soft blacklist) | Step 3/7 (multi-select) |
-| **Recon Aggregator** | every iter (v0.18.0 Plan B) | Integrate N parallel Recon outputs; dedupe + label sources + verify cited files | `preset.reconAggregator` (falls back to `moa.aggregator`) | Full tools, prompt-constrained to verification only | Step 4/7 |
-| **Refs** | every iter | N parallel LLM advisors; each emits `{sufficient, missing, analysis}` JSON | `moa.refModels` (multi-select) | None (pure reasoning) | Step 1/7 |
-| **Aggregator** | every iter | Fuse ref outputs; emit `completeness` + `next_action` | `moa.aggregator` | None | Step 2/7 |
-| **Actor** | on `actor_needed` | Execute `action_items` with full tool access; produce artifacts | `preset.actor` (falls back to `moa.aggregator`) | All `vscode.lm.tools` (filtered through read/write split) | Step 6/7 |
-| **L3 Summarizer** | per large file in Recon | Digest single large file (>200K chars) to ~50K chars | `moa.l3Summarizer` (disabled by default) | None | Step 7/7 |
+| **Planner** | 仅 iter 1 | 澄清任务；产出 `sub_questions` + `recon_hints` | `preset.planner`（fallback 到 `moa.aggregator`） | 无（纯推理） | Step 5/7 |
+| **Recon** | 每 iter | 读文件 / grep / fetch URL / 列符号；产出上下文摘要 | `preset.reconModels[]`（并行）或 `preset.reconModel`（单模型） | 只读白名单（24 模式硬黑名单 + 3 模式软黑名单） | Step 3/7（多选） |
+| **Recon Aggregator** | 每 iter（v0.18.0 Plan B） | 整合 N 个并行 Recon 输出；去重 + 标注来源 + 验证引用文件 | `preset.reconAggregator`（fallback 到 `moa.aggregator`） | 全工具，prompt 约束为仅验证 | Step 4/7 |
+| **Refs** | 每 iter | N 个并行 LLM 顾问；每个产出 `{sufficient, missing, analysis}` JSON | `moa.refModels`（多选） | 无（纯推理） | Step 1/7 |
+| **Aggregator** | 每 iter | 融合 ref 输出；产出 `completeness` + `next_action` | `moa.aggregator` | 无 | Step 2/7 |
+| **Actor** | 触发于 `actor_needed` | 用完整工具权限执行 `action_items`；产出 artifacts | `preset.actor`（fallback 到 `moa.aggregator`） | 所有 `vscode.lm.tools`（按读/写分离过滤） | Step 6/7 |
+| **L3 Summarizer** | Recon 中遇到大文件时 | 把单个大文件（>200K 字符）消化到 ~50K 字符 | `moa.l3Summarizer`（默认禁用） | 无 | Step 7/7 |
 
-Every role with a "falls back to `moa.aggregator`" note offers a "Use aggregator" sentinel in its UI step — pick that unless you have a specific reason to deviate.
+每个标注 "falls back to `moa.aggregator`" 的角色在 UI 步骤中都提供 "Use aggregator" 哨兵选项 —— 除非有特殊原因要偏离，否则选这个。
 
-Layer toggles (any combination):
+层级开关（任意组合）：
 
-- `moa.enableRecon` (default `true`) — skip Phase 0 entirely
-- `moa.enableActingAgent` (default `true`) — Aggregator output becomes the final answer when `false` (2-layer behavior)
-- `moa.forceDirect` (default `false`) — bypass everything; Actor runs with just the user prompt + workspace context
-- `moa.parallelRefs` (default `true`) — fan out Refs in parallel
-- `moa.parallelRecon` (default `true`) — fan out Recon agents in parallel (requires `preset.reconModels.length ≥ 2`)
+- `moa.enableRecon`（默认 `true`）—— 完全跳过 Phase 0
+- `moa.enableActingAgent`（默认 `true`）—— `false` 时 Aggregator 输出即最终答案（2 层行为）
+- `moa.forceDirect`（默认 `false`）—— 绕过一切；Actor 只拿用户 prompt + workspace 上下文直接跑
+- `moa.parallelRefs`（默认 `true`）—— 并行扇出 Refs
+- `moa.parallelRecon`（默认 `true`）—— 并行扇出 Recon agent（需要 `preset.reconModels.length ≥ 2`）
 
-### Recon safeguards (v0.13.0+)
+### Recon 防护 / Recon safeguards (v0.13.0+)
 
-- **Tool blacklist**: 24 hard-blocked patterns (write/edit/delete/run/exec/terminal/git/…) + 3 soft-blocked (`run_in_terminal`, `get_terminal_output`, `exec`).
-- **Early-stop**: stagnant (2 consecutive identical tool signatures) **or** saturated (<200 new chars per iteration for 2 iterations).
-- **Max iterations**: 50 (hard cap 100). Most tasks converge in <15.
-- **L3 grandchild agent**: when a single file exceeds `moa.reconL3Threshold` (default 200000 chars), a small model (default disabled; recommended MiniMax-M3) digests it to ~50k chars. Cached at `<workspace>/.moa_cache/l3_summaries/<sha1>.txt`. Set `moa.l3Summarizer.model = ""` to disable.
-- **Path normalization** (v0.14.12+): relative paths emitted by LLMs are auto-resolved against the workspace root before tool dispatch; multi-workspace smart matching included.
+- **工具黑名单**：24 个硬阻断模式（write/edit/delete/run/exec/terminal/git/…）+ 3 个软阻断（`run_in_terminal`、`get_terminal_output`、`exec`）。
+- **早停**：stagnant（连续 2 次工具签名完全相同）**或** saturated（连续 2 次迭代新增 <200 字符）。
+- **最大迭代数**：50（硬上限 100，v0.20.2 提到 500）。多数任务 <15 就收敛。
+- **L3 孙代理**：单个文件超过 `moa.reconL3Threshold`（默认 200000 字符）时，派一个小模型（默认禁用；推荐 MiniMax-M3）把它消化到 ~50k 字符。缓存在 `<workspace>/.moa_cache/l3_summaries/<sha1>.txt`。设 `moa.l3Summarizer.model = ""` 禁用。
+- **路径规范化**（v0.14.12+）：LLM 输出的相对路径会在工具派发前自动按 workspace root 解析；含多 workspace 智能匹配。
 
-### Local cache & workspace artifacts (v0.14.10+, updated v0.18.0)
+### 本地缓存与工作区产物 / Local cache & workspace artifacts (v0.14.10+, v0.18.0 更新)
 
-MoA writes intermediate artifacts to `<workspace>/.moa_cache/`. These are **safe to delete** — MoA regenerates them on demand. The directory ships with an auto-generated `README.md` (template v2, written on first creation, never overwrites a user-edited copy) that documents every subdirectory, diagnostic flow, and cleanup strategy.
+MoA 把中间产物写到 `<workspace>/.moa_cache/`。这些文件**可以安全删除** —— MoA 会按需重新生成。该目录会自动生成一份 `README.md`（template v2，首次创建时写入，永不覆盖用户编辑过的副本），文档化每个子目录、诊断流程和清理策略。
 
 ```mermaid
 flowchart LR
-    ROOT[.moa_cache/] --> R1[recon/&lt;task_sha&gt;/<br/>@moa end-to-end trace<br/>v0.14.3+]
-    ROOT --> R2[l3_summaries/&lt;sha1&gt;.txt<br/>large-file digest cache<br/>v0.13.0+]
-    ROOT --> R3[&lt;task_id&gt;/<br/>#moa_orchestrate state<br/>v0.12.0+]
-    R3 --> S1[state.json<br/>atomic overwrite]
-    R3 --> S2[timeline.md<br/>9-column iter view]
-    R3 --> S3[final.md / final.json<br/>#moa_finalize output]
-    R3 --> S4[iteration_NNN/<br/>per-iter artifacts]
-    S4 --> I1[planner.json<br/>iter 1 only]
-    S4 --> I2[recon_result.json<br/>Aggregator-merged<br/>v0.18.0: always written]
-    S4 --> I3[recon/recon_N.json<br/>per parallel agent<br/>v0.18.0: parallel mode only]
-    S4 --> I4[refs/&lt;label&gt;.json<br/>each ref raw output]
-    S4 --> I5[aggregator.json<br/>completeness + next_action]
-    S4 --> I6[actor_result.json<br/>actor_needed only]
+    ROOT[".moa_cache/"]
+    ROOT --> R1["recon/&lt;task_sha&gt;/<br/>@moa 端到端 trace<br/>v0.14.3+"]
+    ROOT --> R2["l3_summaries/&lt;sha1&gt;.txt<br/>大文件消化缓存<br/>v0.13.0+"]
+    ROOT --> R3["&lt;task_id&gt;/<br/>#moa_orchestrate 状态<br/>v0.12.0+"]
+    R3 --> S1["state.json<br/>原子化覆盖写"]
+    R3 --> S2["timeline.md<br/>9 列迭代视图"]
+    R3 --> S3["final.md / final.json<br/>#moa_finalize 输出"]
+    R3 --> S4["iteration_NNN/<br/>每轮产物"]
+    S4 --> I1["planner.json<br/>仅 iter 1"]
+    S4 --> I2["recon_result.json<br/>Aggregator 合并<br/>v0.18.0: 总是写入"]
+    S4 --> I3["recon/recon_N.json<br/>每个并行 agent<br/>v0.18.0: 仅并行模式"]
+    S4 --> I4["refs/&lt;label&gt;.json<br/>每个 ref 原始输出"]
+    S4 --> I5["aggregator.json<br/>completeness + next_action"]
+    S4 --> I6["actor_result.json<br/>仅 actor_needed 时"]
     classDef root fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#bf360c
     classDef branch fill:#e8f4fd,stroke:#1976d2,stroke-width:1px,color:#0d47a1
     classDef leaf fill:#f1f8e9,stroke:#33691e,stroke-width:1px,color:#33691e
@@ -371,139 +373,84 @@ flowchart LR
     class S1,S2,S3,I1,I2,I3,I4,I5,I6 leaf
 ```
 
-**Recommended `.gitignore` entry**:
+**推荐的 `.gitignore` 条目**：
 
 ```gitignore
-# MoA Bridge cache (auto-generated by vscode-moa extension)
+# MoA Bridge cache（vscode-moa 扩展自动生成）
 .moa_cache/
 ```
 
 ### Tokenizer
 
-**None.** MoA has no tokenizer dependency — no `tiktoken`, no `js-tiktoken`, no `@vscode/*-tokenizer`. All budgets (`reconContextChars`, `reconL3Threshold`, `reconEarlyStopSaturated`, …) are **character-level approximations**. This keeps the bundle small (~270 KB vsix), avoids native bindings, and behaves consistently across Chinese / English / code. The trade-off is that "30k chars" is not "30k tokens" — for code-heavy prompts assume ~1.5-3× ratio.
+**无。** MoA 不依赖任何 tokenizer —— 没有 `tiktoken`、没有 `js-tiktoken`、没有 `@vscode/*-tokenizer`。所有预算（`reconContextChars`、`reconL3Threshold`、`reconEarlyStopSaturated` 等）都是**字符级近似**。好处：bundle 小（~370 KB vsix）、无需 native binding、中英文/代码行为一致。代价："30k 字符" ≠ "30k tokens" —— 代码密集型 prompt 假设 ~1.5-3× 比率。
 
-## Relationship with GCMP
+## 与 GCMP 的关系 / Relationship with GCMP
 
-**MoA is vendor-agnostic** — it only calls `vscode.lm.selectChatModels({})` and uses whatever models VSCode exposes. It does not import, configure, or depend on [GCMP](https://marketplace.visualstudio.com/items?itemName=vicanent.gcmp) (or any other model-provider extension).
+**MoA 是 vendor-agnostic 的** —— 它只调用 `vscode.lm.selectChatModels({})`，使用 VSCode 暴露的任何模型。它不 import、配置或依赖 [GCMP](https://marketplace.visualstudio.com/items?itemName=vicanent.gcmp)（或任何其他 model-provider 扩展）。
 
-**But MoA is much more useful with GCMP installed.** The whole point of mixture-of-agents is *diverse* perspectives:
+**但 MoA 装了 GCMP 会更有用。** Mixture-of-agents 的全部意义就是*异构*视角：
 
-| Setup | Visible models | MoA behavior |
+| 配置 | 可见模型 | MoA 行为 |
 |---|---|---|
-| Official Copilot only | GPT-5, Claude Sonnet, … (3-5) | Limited diversity — fan-out mostly hits same family |
-| Official Copilot + **GCMP** | + DeepSeek-V4-Pro/Flash, GLM-5.2, MiniMax-M3, Qwen3, … (10-30+) | **True heterogeneous MoA** — different labs, different training data, different reasoning styles |
+| 仅官方 Copilot | GPT-5、Claude Sonnet 等（3-5 个） | 多样性有限 —— 扇出基本撞同一家族 |
+| 官方 Copilot + **GCMP** | + DeepSeek-V4-Pro/Flash、GLM-5.2、MiniMax-M3、Qwen3 等（10-30+ 个） | **真正的异构 MoA** —— 不同实验室、不同训练数据、不同推理风格 |
 
-Recommended pairing:
+推荐搭配：
 
-| Role | Recommended vendor |
+| 角色 | 推荐厂商 |
 |---|---|
-| Recon Agents (Phase 0) | DeepSeek-V4-Pro + MiniMax-M3 (different tool preferences) |
-| Recon Aggregator | GLM-5.2 (CodingPlan) — strong fusion reasoning |
-| Refs (Phase 1) | 3-4 models from different labs |
-| Aggregator (Phase 2) | GLM-5.2 (CodingPlan) |
-| L3 Summarizer | MiniMax-M3 (TokenPlan) — cheap, good at compression |
+| Recon Agent（Phase 0） | DeepSeek-V4-Pro + MiniMax-M3（工具偏好不同） |
+| Recon Aggregator | GLM-5.2 (CodingPlan) —— 强融合推理 |
+| Refs（Phase 1） | 3-4 个来自不同实验室的模型 |
+| Aggregator（Phase 2） | GLM-5.2 (CodingPlan) |
+| L3 Summarizer | MiniMax-M3 (TokenPlan) —— 便宜、擅长压缩 |
 
-MoA is fully vendor-agnostic — there are **no hardcoded model IDs** in the codebase. Every layer reads its model from the `moa.*` configuration namespace; empty values disable the layer (or fall back to aggregator, in the case of `moa.reconModel`).
+MoA 完全 vendor-agnostic —— 代码中**没有硬编码任何 model ID**。每一层从 `moa.*` 配置命名空间读取模型；空值禁用该层（或 fallback 到 aggregator，如 `moa.reconModel`）。
 
-## Configuration reference
+## 配置参考 / Configuration reference
 
-All settings live under the `moa.*` namespace. Edit via `settings.json` or use **`Moa: Configure Models`** for the 8-step guided flow.
+所有配置都在 `moa.*` 命名空间下。通过 `settings.json` 编辑，或用 **`Moa: Configure Models`** 8 步引导流程。
 
-### Models
+> 📖 配置项的 VSCode 设置 UI 描述已在 v0.20.2+ 全部双语化（中文 + 英文）。本节给出表格化的完整参考。
 
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `moa.presets` | `Object<name, MoaPreset>` | `{}` | Named preset groups, each bundling refs + aggregator + recon + L3. Switch via **`Moa: Switch Preset`**. *(v0.14.14+; v0.18.0: `reconModels[]` + `reconAggregator` added to preset schema)* |
-| `moa.activePreset` | string | `"default"` | Key into `moa.presets` for the currently active group. *(v0.14.14+)* |
-| `moa.refModels` | `Array<{role, model}>` | `[]` | Reference advisors. `model` is matched as a substring against `LanguageModelChat.id`. *(legacy flat config; auto-migrated to `presets.default` on first use)* |
-| `moa.aggregator` | `{model, temperature?}` | `{}` | Aggregator model (substring match). |
-| `moa.reconModel` | `{model}` | `{model: ""}` | Single Recon model. Empty = reuse aggregator. *(For parallel multi-model Recon, use `preset.reconModels[]` instead — v0.18.0)* |
-| `moa.l3Summarizer` | `{model}` | `{model: ""}` | L3 grandchild model. Empty = disable L3. |
-
-### Pipeline behavior
+### Models / 模型
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `moa.parallelRefs` | boolean | `true` | Fan out refs in parallel (`Promise.allSettled`) — wall-clock = slowest ref. Set `false` for sequential fan-out if your provider rate-limits concurrent requests. *(v0.14.14: default flipped from `false` to `true`)* |
-| `moa.parallelRecon` | boolean | `true` | Fan out Recon agents in parallel when `preset.reconModels` has 2+ models. When `false`, or when only 1 recon model is configured, runs sequentially. *(v0.18.0)* |
-| `moa.sharedRefPrompt` | string | `""` | Override the shared ref system prompt. Empty = built-in Hermes prompt. |
-| `moa.refDisplayMode` | `"thinking"` \| `"verbose"` | `"thinking"` | ⚠️ **Keep `thinking` (default, STRONGLY RECOMMENDED)**. `thinking` keeps refs out of chat history (Hermes-style — refs go to 'MoA Bridge — Ref Output' panel, aggregator reads in-memory JSON only). `verbose` streams refs inline as markdown AND records them to chat history — ⚠️ **context pollution risk**: thousands of tokens × N refs × M iterations accumulate in Copilot context, slowing follow-ups and potentially confusing the aggregator. Use `verbose` only if you explicitly need Copilot follow-ups to reference individual ref opinions. |
-| `moa.enableRecon` | boolean | `true` | Toggle Phase 0. |
-| `moa.enableActingAgent` | boolean | `true` | Toggle Phase 3. |
-| `moa.forceDirect` | boolean | `false` | ⚠️ **WARNING — bypasses multi-model safety net.** Skip the whole pipeline — direct acting agent. Loses: (1) cross-model verification, (2) recon-collected evidence, (3) aggregator synthesis. Use ONLY after repeated multi-model failures. |
-| `moa.maxReconRounds` | number (1-20) | `3` | Sufficiency-loop cap. v0.20.1 raised hard cap from 5 → 10; v0.20.2 raised further to 20 for deep research. |
+| `moa.presets` | `Object<name, MoaPreset>` | `{}` | 命名预设组，每个打包 refs + aggregator + recon + L3。通过 **`Moa: Switch Preset`** 切换。*(v0.14.14+；v0.18.0: preset schema 新增 `reconModels[]` + `reconAggregator`)* |
+| `moa.activePreset` | string | `"default"` | `moa.presets` 中当前激活组的 key。*(v0.14.14+)* |
+| `moa.refModels` | `Array<{role, model}>` | `[]` | 参考顾问。`model` 作为子串匹配 `LanguageModelChat.id`。*(旧扁平配置；首次使用时自动迁移到 `presets.default`)* |
+| `moa.aggregator` | `{model, temperature?}` | `{}` | Aggregator 模型（子串匹配）。 |
+| `moa.reconModel` | `{model}` | `{model: ""}` | 单个 Recon 模型。空 = 复用 aggregator。*(并行多模型 Recon 请用 `preset.reconModels[]` —— v0.18.0)* |
+| `moa.l3Summarizer` | `{model}` | `{model: ""}` | L3 孙代理模型。空 = 禁用 L3。 |
 
-### Recon tuning (v0.13.0+)
+### Pipeline behavior / 流水线行为
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `moa.parallelRefs` | boolean | `true` | 并行扇出 refs（`Promise.allSettled`）—— wall-clock = 最慢的 ref。设 `false` 为串行扇出（适合 provider 限并发的场景）。*(v0.14.14: 默认从 `false` 翻转为 `true`)* |
+| `moa.parallelRecon` | boolean | `true` | `preset.reconModels` 有 2+ 个模型时并行扇出 Recon agent。`false` 或只配 1 个 recon 模型时，串行运行。*(v0.18.0)* |
+| `moa.sharedRefPrompt` | string | `""` | 覆盖共享 ref system prompt。空 = 内置 Hermes prompt。 |
+| `moa.refDisplayMode` | `"thinking"` \| `"verbose"` | `"thinking"` | ⚠️ **保持 `thinking`（默认，强烈推荐）**。`thinking` 让 refs 不进 chat history（Hermes 风格 —— refs 写入 'MoA Bridge — Ref Output' 面板，aggregator 只读内存中的 JSON）。`verbose` 把 refs 以 markdown 内联流式输出 **且** 记入 chat history —— ⚠️ **上下文污染风险**：数千 token × N refs × M 轮迭代会累积到 Copilot 上下文，拖慢 follow-up，甚至让 aggregator 混乱。仅当你明确需要 Copilot follow-up 引用单个 ref 意见时才用 `verbose`。 |
+| `moa.enableRecon` | boolean | `true` | 切换 Phase 0。 |
+| `moa.enableActingAgent` | boolean | `true` | 切换 Phase 3。 |
+| `moa.forceDirect` | boolean | `false` | ⚠️ **警告 —— 绕过多模型安全网。** 跳过整个流水线 —— acting agent 直接跑。失去：(1) 跨模型校验、(2) recon 收集的证据、(3) aggregator 综合。仅在反复遭遇多模型失败后才用。 |
+| `moa.maxReconRounds` | number (1-20) | `3` | 充分性 loop 上限。v0.20.1 上限从 5 → 10；v0.20.2 进一步提到 20 以支持深度研究。 |
+
+### Recon 调优 / Recon tuning (v0.13.0+)
 
 | Key | Default | Description |
 |---|---|---|
-| `moa.maxReconIterations` | `50` | Hard cap on tool calls per recon task. v0.20.1 raised max from 100 → 200; v0.20.2 raised further to 500 for very large monorepos / deep research. |
-| `moa.reconContextChars` | `500000` | **[DEPRECATED v0.14.5]** No longer enforces a cap; only recorded to `meta.json` as an audit metric. Original v0.13.0 role (character budget truncation) was removed because refs are single-turn history-less and 1M-context models can digest any size — if recon truly overflows, that's a search-direction problem for the LLM to handle, not a truncation problem. Kept for backward compat. |
-| `moa.reconAllowTerminal` | `false` | Allow terminal tools in recon (off by default for safety). |
-| `moa.reconEarlyStopStagnant` | `2` (max 50) | Stop after N consecutive identical tool signatures. v0.20.2 raised max from 10 → 50. |
-| `moa.reconEarlyStopSaturated` | `200` (max 50000) | Stop after N iterations adding <200 chars each (post-iter-5). v0.20.2 raised max from 5000 → 50000. |
-| `moa.reconL3Threshold` | `200000` (min 10000) | Single-file size (chars) that triggers L3 summarization. v0.14.4 raised from 60k → 200k — modern 1M-context models rarely need L3; only truly huge files (generated schemas, minified bundles) trigger it. v0.20.2 lowered minimum from 50000 → 10000 for more aggressive triggering. |
-| `moa.reconL3MaxCalls` | `5` (max 100) | Max L3 grandchild calls per MoA task. `0` disables. v0.20.2 raised max from 20 → 100. |
-| `moa.reconL3TargetChars` | `50000` (max 500000) | L3 target output length (chars). v0.14.4 raised from 10k → 50k to avoid over-compression. v0.20.2 added maximum=500000 cap. |
+| `moa.maxReconIterations` | `50` | Recon 每个任务的硬性工具调用上限。v0.20.1 上限从 100 → 200；v0.20.2 进一步提到 500 以支持超大型 monorepo / 深度研究。 |
+| `moa.reconContextChars` | `500000` | **[DEPRECATED v0.14.5]** 不再作上限；仅作为审计指标记录到 `meta.json`。原 v0.13.0 角色（字符预算截断）在 v0.14.5 被移除 —— refs 单轮无历史 + 1M 上下文模型可消化任意大小；如果 recon 真爆了，那是 LLM 的搜索方向问题，不是截断问题。保留仅为向后兼容。 |
+| `moa.reconAllowTerminal` | `false` | 允许 recon 用 terminal 工具（默认关，以策安全）。 |
+| `moa.reconEarlyStopStagnant` | `2` (max 50) | 连续 N 次工具签名完全相同后停止。v0.20.2 上限从 10 → 50。 |
+| `moa.reconEarlyStopSaturated` | `200` (max 50000) | iterations > 5 后，连续 N 轮新增 <200 字符则停止。v0.20.2 上限从 5000 → 50000。 |
+| `moa.reconL3Threshold` | `200000` (min 10000) | 触发 L3 摘要的单文件大小（字符）。v0.14.4 从 60k → 200k —— 现代 1M 上下文模型很少需要 L3；只有真正巨型文件（生成的 schema、minified bundle）才触发。v0.20.2 minimum 从 50000 → 10000 允许更激进触发。 |
+| `moa.reconL3MaxCalls` | `5` (max 100) | 单次 MoA 任务最多派多少个 L3 孙代理。`0` 禁用。v0.20.2 上限从 20 → 100。 |
+| `moa.reconL3TargetChars` | `50000` (max 500000) | L3 目标输出长度（字符）。v0.14.4 从 10k → 50k 避免过度压缩。v0.20.2 新增 maximum=500000 上限。 |
 
-### Actor execution control (v0.20.0+)
-
-The Actor role (Phase 5) actually *executes* the Aggregator's `action_items` — it can write files, run terminal commands, and produce side effects. v0.20.0 introduces a layered control system to gate this power.
-
-**At a glance — the 4+1 `executionPreset` modes**:
-
-| Preset | Auto-execute after finalize? | Approval popups | Backup `.bak.<ts>` | Use case |
-|---|---|---|---|---|
-| `manual` (default) | ❌ returns markdown; user calls `#moa_execute` | `batch` (Gate-A QuickPick) | ✅ | First-time use, exploratory tasks |
-| `supervised` | ✅ | `batch` (Gate-A QuickPick multi-select per round) | ✅ | Trusted but human-monitored workflows |
-| `autopilot` | ✅ | `none` (zero human-in-the-loop) | ✅ (only safety net) | Trusted CI / repeated retry pipelines |
-| `yolo` | ✅ | `none` | ❌ (irreversible) | Sandboxed / throwaway runs |
-| `custom` | controlled by `autoExecuteAfterFinalize` | controlled by `approvalMode` | controlled by `safeExecutionMode` | Manual fine-grained control |
-
-**Execution flow under each preset**:
-
-```
-finalize completes
-   │
-   ├─ manual:        return markdown → user/main session calls #moa_execute → Gate-A QuickPick → execute
-   ├─ supervised:    auto-call Actor → Gate-A QuickPick multi-select → execute (safeMode on)
-   ├─ autopilot:     auto-call Actor → execute immediately (safeMode on, no popups)
-   ├─ yolo:          auto-call Actor → execute immediately (safeMode off, no popups, no backup)
-   └─ custom:        behavior driven by 3 fine-grained configs below
-```
-
-**The 3 fine-grained configs** (only effective when `executionPreset='custom'`; otherwise preset overrides):
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `moa.autoExecuteAfterFinalize` | boolean | `false` | When `true`, `finalizeTask()` auto-invokes Actor. When `false`, returns markdown for manual `#moa_execute`. |
-| `moa.approvalMode` | `none` \| `batch` \| `per_call` \| `batch_plus_per_call` | `batch` | Approval gate before destructive tool calls. `batch` = Gate-A QuickPick at Actor entry; `per_call` = Gate-B Yes/No dialog before each destructive call; `batch_plus_per_call` = both gates. |
-| `moa.safeExecutionMode` | boolean | `true` | When `true`, SafeExecutor backs up every `write_file` to `<target>.bak.<timestamp>` and records all actions to `manifest.json`. When `false`, no backup (irreversible). |
-
-**Approval gates — two flavors**:
-
-- **Gate-A (batch)**: QuickPick multi-select dialog at the entry of each Actor call. Lists all `action_items` with type + target + rationale. User can deselect unwanted items. Rejected items are recorded as `status: rejected_by_user` in `manifest.json` for auditability.
-- **Gate-B (per-call)**: Yes/No/Yes to All/Reject All dialog before each destructive tool call (`write_file` / `delete` / `execute`). `Yes to All` skips subsequent Gate-B prompts in the same task. `Reject All` throws `ApprovalRejectedError` and aborts the Actor.
-
-**Auditing & recovery**:
-
-- Every side-effecting action (in any preset) is logged to `.moa_cache/<task_id>/manifest.json` with `iter` / `seq` / `type` / `target` / `tool_name` / `input_summary` / `status` / `backup_path` / `output_chars` / `timestamp`.
-- Backups go to `<target>.bak.<timestamp>` next to the original file. To roll back, delete the new file and rename `.bak.<ts>` back.
-- `autopilot.log` (v0.20.0) in the task dir is a human-readable summary: `started_at` / `elapsed_sec` / `tool_calls` / per-action status. Useful for CI logs.
-
-**Recommended preset for each scenario**:
-
-| Scenario | Recommended preset | Reason |
-|---|---|---|
-| First-time user trying MoA | `manual` | See what the pipeline produces before executing |
-| Daily coding assistant (you watch the screen) | `supervised` | Auto-execute + visual approval |
-| Nightly batch / CI pipeline | `autopilot` | Zero human-in-the-loop, backup is the safety net |
-| Sandboxed experiment (VM / container) | `yolo` | Fast iteration, no backup overhead |
-| Need to mix-and-match behaviors | `custom` | Independent control of the 3 axes |
-
----
-
-### Actor 执行控制（中文版）
+### Actor 执行控制 / Actor execution control (v0.20.0+)
 
 Actor 角色（Phase 5）会**真正执行** Aggregator 给出的 `action_items` —— 可能写文件、跑终端命令、产生副作用。v0.20.0 引入分层控制系统来门控这种权力。
 
@@ -516,6 +463,18 @@ Actor 角色（Phase 5）会**真正执行** Aggregator 给出的 `action_items`
 | `autopilot` | ✅ | `none`（零人工介入） | ✅（唯一安全网） | 可信 CI / 重试流水线 |
 | `yolo` | ✅ | `none` | ❌（不可逆） | 沙盒 / 一次性运行 |
 | `custom` | 由 `autoExecuteAfterFinalize` 控制 | 由 `approvalMode` 控制 | 由 `safeExecutionMode` 控制 | 手动细粒度控制 |
+
+**每个 preset 的执行流程**：
+
+```
+finalize 完成
+   │
+   ├─ manual:        返回 markdown → 用户/主会话调用 #moa_execute → Gate-A QuickPick → 执行
+   ├─ supervised:    自动调 Actor → Gate-A QuickPick 多选 → 执行（safeMode 开）
+   ├─ autopilot:     自动调 Actor → 立即执行（safeMode 开，无弹窗）
+   ├─ yolo:          自动调 Actor → 立即执行（safeMode 关，无弹窗，无备份）
+   └─ custom:        行为由下方 3 个细粒度配置驱动
+```
 
 **3 个细粒度配置**（仅在 `executionPreset='custom'` 时生效；其他 preset 会覆盖）：
 
@@ -536,68 +495,81 @@ Actor 角色（Phase 5）会**真正执行** Aggregator 给出的 `action_items`
 - 备份写入 `<target>.bak.<timestamp>`（原文件旁边）。要回滚：删新文件，把 `.bak.<ts>` 改回原名即可。
 - 任务目录里的 `autopilot.log`（v0.20.0）是人类可读摘要：`started_at` / `elapsed_sec` / `tool_calls` / 每个 action 的 status。适合 CI 日志。
 
-### Cache & lifecycle (v0.19.1+, revised v0.20.2)
+**每个场景的推荐 preset**：
 
-| Key | Default | Description |
+| 场景 | 推荐 preset | 原因 |
 |---|---|---|
-| `moa.cacheTtlDays` | `30` | Tasks older than this TTL (in days) will be cleaned up when running the `MoA: Cleanup Old Tasks` command. **v0.20.2: Set to 0 to disable TTL cleanup entirely** (tasks are never auto-deleted; you must manually remove `.moa_cache/`). Maximum raised from 365 to 36500 (~100 years) for long-term archival. |
-| `moa.cacheRootDir` | `""` (empty) | Override the cache root directory. Default empty (uses `<workspaceFolder>/.moa_cache/`). Set to an absolute path to centralize all MoA task caches across workspaces. |
+| 首次用户尝试 MoA | `manual` | 先看流水线产出什么，再决定是否执行 |
+| 日常编码助手（你在屏幕前） | `supervised` | 自动执行 + 可视审批 |
+| 夜间批处理 / CI 流水线 | `autopilot` | 零人工介入，备份作为安全网 |
+| 沙盒实验（VM / 容器） | `yolo` | 快速迭代，无备份开销 |
+| 需要混搭行为 | `custom` | 独立控制 3 个维度 |
 
-**Common patterns**:
-- **Default (30 days)**: suitable for most users; stale experiments auto-cleaned monthly.
-- **`0` (never delete)**: for long-running research projects where you want to audit every task months later.
-- **`365` (1 year)**: balance between retention and disk usage.
-- **Custom `cacheRootDir`**: set to e.g. `D:/moa_cache` to share cache across multiple workspaces (useful for CI).
+### 缓存与生命周期 / Cache & lifecycle (v0.19.1+, v0.20.2 修订)
 
-## File layout
+| Key | 默认值 | 说明 |
+|---|---|---|
+| `moa.cacheTtlDays` | `30` | 超过此 TTL（天）的任务会在运行 `MoA: Cleanup Old Tasks` 命令时被清理。**v0.20.2：设为 0 完全禁用 TTL 清理**（任务永不自动删除，需手动删 `.moa_cache/`）。上限从 365 提到 36500（约 100 年）以支持长期归档。 |
+| `moa.cacheRootDir` | `""` (空) | 覆盖缓存根目录。默认空（用 `<workspaceFolder>/.moa_cache/`）。设为绝对路径可跨工作区集中存储所有 MoA 任务缓存。 |
+
+**常见模式**：
+- **默认（30 天）**：适合多数用户；过期实验每月自动清理。
+- **`0`（永不删除）**：长期研究项目，几个月后还想审计每个任务。
+- **`365`（1 年）**：保留期与磁盘占用的平衡。
+- **自定义 `cacheRootDir`**：设为如 `D:/moa_cache` 可跨多个工作区共享缓存（适合 CI）。
+
+## 文件结构 / File layout
 
 ```
 vscode-moa/
-├── package.json                # manifest, chatParticipants, languageModelTools, configuration
+├── package.json                # 清单、chatParticipants、languageModelTools、configuration
 ├── src/
-│   ├── extension.ts            # activate() — registers @moa + LM tools + commands
-│   ├── moaHandler.ts           # ChatRequestHandler — dispatches @moa / @moaloop / @moasingle
-│   ├── moaRunner.ts            # single-shot @moa pipeline (recon → refs → aggregator → acting)
-│   ├── moaConfig.ts            # Configure Models 8-step flow + switchPreset + singlePickWithCheckbox
-│   ├── presetConfig.ts         # Preset group management (incl. resolveReconModels — v0.18.0)
-│   ├── actingAgent.ts          # Phase 3 tool-calling agent + read-only tool filter + runReconAgent
-│   ├── workspaceContext.ts     # active editor / open docs / project tree snapshot
-│   ├── l3Summarizer.ts         # L3 grandchild agent (large-file digest) + cache
-│   ├── cacheReadme.ts          # auto-write `.moa_cache/README.md` (template v2 — v0.18.0)
-│   ├── moaReconTool.ts         # moa_recon LM tool impl
-│   ├── moaTool.ts              # moa_analyze LM tool impl
-│   ├── moaOrchestrator.ts      # iterative MoA loop state machine (5-role)
-│   ├── moaOrchestrateTools.ts  # moa_orchestrate / continue / finalize LM tools
-│   ├── pipelineChannels.ts     # 5 OutputChannels + logPipeline helpers (v0.17.0)
-│   ├── probeTools.ts           # debug command — list vscode.lm.tools
+│   ├── extension.ts            # activate() —— 注册 @moa + LM 工具 + 命令
+│   ├── moaHandler.ts           # ChatRequestHandler —— 派发 @moa / @moaloop / @moasingle
+│   ├── moaRunner.ts            # 单次 @moa 流水线（recon → refs → aggregator → acting）
+│   ├── moaConfig.ts            # Configure Models 8 步流程 + switchPreset + singlePickWithCheckbox
+│   ├── presetConfig.ts         # Preset 组管理（含 resolveReconModels —— v0.18.0）
+│   ├── actingAgent.ts          # Phase 3 工具调用 agent + 只读工具过滤 + runReconAgent
+│   ├── workspaceContext.ts     # 活动编辑器 / 打开的文档 / 项目树快照
+│   ├── l3Summarizer.ts         # L3 孙代理（大文件消化）+ 缓存
+│   ├── cacheReadme.ts          # 自动写 `.moa_cache/README.md`（template v2 —— v0.18.0）
+│   ├── moaReconTool.ts         # moa_recon LM 工具实现
+│   ├── moaTool.ts              # moa_analyze LM 工具实现
+│   ├── moaOrchestrator.ts      # 迭代 MoA loop 状态机（5 角色）
+│   ├── moaOrchestrateTools.ts  # moa_orchestrate / continue / finalize / execute LM 工具
+│   ├── pipelineChannels.ts     # 5 个 OutputChannel + logPipeline 辅助函数（v0.17.0）
+│   ├── probeTools.ts           # 调试命令 —— 列出 vscode.lm.tools
 │   ├── moaCore/
 │   │   ├── roles.ts            # buildPlannerPrompt / buildReconPrompt / buildRefPrompt / buildAggregatorPrompt / buildFinalPrompt
-│   │   ├── runRecon.ts         # callRecon Plan B pipeline + parallel models + Recon Aggregator (v0.18.0)
-│   │   ├── actorEvidence.ts    # buildActorEvidence pure helper (v0.15.1)
+│   │   ├── runRecon.ts         # callRecon Plan B 流水线 + 并行模型 + Recon Aggregator（v0.18.0）
+│   │   ├── actorEvidence.ts    # buildActorEvidence 纯辅助函数（v0.15.1）
+│   │   ├── safeExecutor.ts     # SafeExecutor 备份 + manifest（v0.19.1）
+│   │   ├── runActor.ts         # Actor 主入口 + Gate-A/Gate-B 审批门（v0.20.0）
 │   │   └── ...
-│   └── types.ts                # shared TS types (MoaPreset.reconModels/reconAggregator — v0.18.0)
+│   └── types.ts                # 共享 TS 类型（MoaPreset.reconModels/reconAggregator —— v0.18.0）
 ├── CHANGELOG.md
-└── README.md
+├── README.md                   # 中文为主（当前文件）
+└── README.en.md                # 英文版
 ```
 
-## Debugging
+## 调试 / Debugging
 
-- **`Moa: Probe Available Tools`** — lists every tool registered in `vscode.lm.tools`. Use this to verify Copilot / other extensions are exposing the tools MoA's acting agent can call.
-- **5 OutputChannels** (`View → Output` dropdown) — per-role visibility into Planner / Recon / Refs / Aggregator / Actor output, with iteration boundary headers.
-- Set `"moa.refDisplayMode": "verbose"` to see raw ref outputs inline (useful when debugging aggregator fusion issues).
-- **End-to-end audit**: every `@moa` invocation writes a complete trace to `<workspace>/.moa_cache/recon/<task_sha>/`; every `#moa_orchestrate` iteration writes to `<workspace>/.moa_cache/<task_id>/iteration_NNN/`. The auto-generated `.moa_cache/README.md` (template v2) has dedicated diagnostic sections for both.
+- **`Moa: Probe Available Tools`** —— 列出 `vscode.lm.tools` 中所有已注册工具。用来验证 Copilot / 其他扩展是否暴露了 MoA acting agent 能调用的工具。
+- **5 个 OutputChannel**（`View → Output` 下拉框）—— 按角色查看 Planner / Recon / Refs / Aggregator / Actor 的输出，含迭代边界 header。
+- 设 `"moa.refDisplayMode": "verbose"` 可在线看到原始 ref 输出（调试 aggregator 融合问题时有用）。⚠️ 警告：会污染 Copilot 上下文，详见该配置项说明。
+- **端到端审计**：每次 `@moa` 调用把完整 trace 写到 `<workspace>/.moa_cache/recon/<task_sha>/`；每次 `#moa_orchestrate` 迭代写到 `<workspace>/.moa_cache/<task_id>/iteration_NNN/`。自动生成的 `.moa_cache/README.md`（template v2）对两者都有专门的诊断章节。
 
-## Build & release
+## 构建与发布 / Build & release
 
 ```powershell
 npm install
-npm run compile          # dev bundle
-npm run package          # production bundle
-npx vsce package         # build .vsix
+npm run compile          # 开发 bundle
+npm run package          # 生产 bundle
+npx vsce package         # 构建 .vsix
 ```
 
-Releases are published to [GitHub Releases](https://github.com/DDL095/vscode-moa/releases) — each release has the corresponding `.vsix` attached.
+发布到 [GitHub Releases](https://github.com/DDL095/vscode-moa/releases) —— 每个 release 附带对应的 `.vsix`。
 
-## License
+## 许可证 / License
 
-MIT — see [LICENSE](./LICENSE).
+MIT —— 见 [LICENSE](./LICENSE)。

@@ -5,6 +5,29 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.4] - 2026-07-21
+
+### Changed — README.md 全面中文化（中文为主，英文为辅）
+
+**问题**：v0.20.3 的 README.md 仅顶部和部分章节中文化，大量核心章节（Install / Usage / Architecture / Configuration reference / Debugging / Build / File layout）仍是英文为主，与"中文版"定位不符。
+
+**修复**：所有章节标题改为"中文 / English"双语格式；所有正文段落翻译为中文（保留代码示例、配置 key、命令名等英文术语不变）：
+
+- `## Install` → `## 安装 / Install`（方式 A/B/C 标题中文化）
+- `## First-run configuration` → `## 首次配置 / First-run configuration`（8 步表格全部翻译）
+- `## Usage` → `## 用法 / Usage`（含 chat 参与者 + LM 工具两小节）
+- `## Architecture` → `## 架构 / Architecture`（5 角色表格 + Recon 防护 + 本地缓存 + Tokenizer 全部翻译）
+- `## Configuration reference` → `## 配置参考 / Configuration reference`（Models / Pipeline behavior / Recon tuning 三大表格全部翻译）
+- `## Debugging` → `## 调试 / Debugging`
+- `## Build & release` → `## 构建与发布 / Build & release`
+- `## License` → `## 许可证 / License`
+- `## File layout` → `## 文件结构 / File layout`（树形注释全部翻译，新增 safeExecutor.ts / runActor.ts 两项）
+- Single-model mode / Why parallel Recon / Closed-loop design 三段翻译为中文
+- Actor execution control：去掉重复的英文版（之前是英文 + 中文双份），保留中文版
+- Cache & lifecycle 段落：完整翻译为中文（含 cacheTtlDays=0 语义 + 4 种常见模式）
+
+**英文版用户**：请查看 [README.en.md](./README.en.md)。
+
 ## [0.20.3] - 2026-07-21
 
 ### Fixed — README mermaid 渲染错误 + 双语拆分
