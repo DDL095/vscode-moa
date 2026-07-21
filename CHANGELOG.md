@@ -5,6 +5,47 @@ All notable changes to the **vscode-moa** extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.3] - 2026-07-21
+
+### Changed — 默认值全面调整（用户原话 2026-07-21：让新用户装完即用）
+
+针对新用户开箱体验，调整 7 项默认配置：
+
+| 配置项 | 旧默认 | 新默认 | 理由 |
+|---|---|---|---|
+| `moa.executionPreset` | `"manual"` | **`"autopilot"`** | finalize 后自动执行 action_items（SafeExecutor 备份兜底） |
+| `moa.enableActorInLoop` | `false` | **`true`** | Loop 内 Actor 角色启用（否则 `actor_needed` 降级为 `recon_needed` 死循环） |
+| `moa.maxReconRounds` | `3` | **`5`** | 单任务内 recon 轮数提高（仅 @moasingle + moa_analyze；@moa/@moaloop 由 MAX_ITER=12 控制） |
+| `moa.maxReconIterations` | `50` (max 500) | **`100`** (max 300) | recon agent 单轮工具调用次数提高；上限收紧防成本失控 |
+| `moa.reconAllowTerminal` | `false` | **`true`** | 允许 recon 用 terminal（debug / 编译验证 / 测试场景必需） |
+| `moa.reconL3TargetChars` | `50000` | **`100000`** | L3 单文件精选输出加大（1M 上下文模型完全可以消化） |
+| `moa.cacheTtlDays` | `30` | **`0`** | 永不自动清理（任务持久化保留，需手动删除 .moa_cache/） |
+
+**配套代码改动**：
+- `moaRunner.ts` L397：`Math.min(5, maxReconRoundsRaw)` → `Math.min(20, ...)`（与 package.json maximum=20 对齐）
+- `moaOrchestrator.ts readSettingsSnapshot()`：默认值同步（manual→autopilot, false→true, 3→5）
+- `cacheReadme.ts`：CACHE_README_VERSION 2→3，版本升级时强制覆盖（让老用户看到新 autopilot 警告）
+
+### Added — Loop 逻辑 + Autopilot 警告强制注入（用户原话：在用户可看到的地方提醒）
+
+**4 处强制注入**当前 loop 模式 + execution preset 状态：
+
+1. **README.md / README.en.md**：顶部加显眼警告块 "Default Autopilot mode (v0.21.3+)"
+2. **docs/ARCHITECTURE.md**：新增 "Loop 控制逻辑 + Autopilot 警告" 章节（中文 + English），含伪代码流程 + execution preset 表
+3. **final.md 渲染**：`renderFinalMd` 顶部注入 "Loop & Execution Context" 块，显示 loop mode / MAX_ITER cap / 收敛来源 / presetWarn（autopilot/yolo/supervised/manual 各自警告）
+4. **chat 退出总结**（`moaHandler.ts`）：在 action_items 渲染前注入 autopilot/supervised/manual/yolo 各自的状态警告，含已执行数量 + manifest.json 审计路径
+5. **`.moa_cache/README.md`**（`cacheReadme.ts`）：顶部加 autopilot 警告块，配置项表更新（新增 8 项 v0.21.3 默认值）
+
+### Investigation — maxReconRounds 计数源澄清
+
+用户原话："3 轮 recon 的计数是从哪里开始算的?"
+
+**答案**：`moa.maxReconRounds` **只**作用于 `@moasingle` + `moa_analyze` 工具路径（`moaRunner.runP1Fanout`）—— 单次 MoA 任务内 refs 反馈 `sufficient=false` 时触发新一轮 recon。**不**控制 `@moa`/`@moaloop` 多轮 loop（那个由 `moaOrchestrator` 的 `MAX_ITER=12` 控制）。
+
+已在 `package.json` 配置描述 + `docs/ARCHITECTURE.md` + `.moa_cache/README.md` 三处显式标注此区别。
+
+---
+
 ## [0.21.2] - 2026-07-21
 
 ### Changed — 扩展 icon 重做（用户反馈）

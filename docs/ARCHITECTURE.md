@@ -240,6 +240,48 @@ flowchart TD
 - **收敛检测**：连续 3 轮 completeness Δ < 0.05 → 强制 finalize（失控保护）
 - **硬上限**：`MAX_ITER=12`
 
+### Loop 控制逻辑 + Autopilot 警告（v0.21.3+）
+
+> ⚠️ **默认 `executionPreset="autopilot"` + `enableActorInLoop=true`**（v0.21.3 起的新装默认）。任务收敛后 Actor 会**自动执行** `action_items`（写文件、跑终端命令），安全网为 SafeExecutor 的 `.bak.<时间戳>` 备份 + `.moa_cache/<task_id>/manifest.json` 审计清单。
+
+**`@moa` / `@moaloop` 多轮 loop**（5 角色，由 `moaOrchestrator` 控制）：
+
+```
+while (iter < MAX_ITER=12) {
+  Planner (iter=1 only) → Recon (每 iter) → Refs (每 iter) → Aggregator
+  switch (Aggregator.next_action) {
+    case 'finalize':       → finalizeTask → (autopilot?) execute action_items → exit
+    case 'actor_needed':   → Actor 执行 → evidence 入栈 → continue
+    case 'recon_needed':   → continue（下轮 Recon 基于 gaps）
+  }
+  if (shouldStop()) → finalizeTask  // 失控保护
+}
+→ finalizeTask（MAX_ITER 强制）
+```
+
+**`@moasingle` 单次模式**（5 角色 1 轮，强制 finalize）：
+
+```
+Planner → Recon → Refs → Aggregator → finalizeTask → (autopilot?) execute
+```
+
+**单次任务内的 Recon 轮数**（`moa.maxReconRounds`，default=5）：
+
+> ⚠️ 此项**不是** `@moa`/`@moaloop` 多轮 loop 的轮数（那个由 `MAX_ITER=12` 控制）。
+> 它仅作用于 `@moasingle` + `moa_analyze` 工具路径（`moaRunner.runP1Fanout`）—— 在单次 MoA 任务内，当 refs 报告 `sufficient=false` 时触发新一轮 recon，最多 `maxReconRounds` 轮。
+
+**执行预设与 Actor 自动执行**（v0.20.0+）：
+
+| `executionPreset` | autoExecute | approvalMode | safeMode | 行为 |
+|---|---|---|---|---|
+| `manual` | ❌ false | batch | ✅ true | finalize 只返回 markdown，需显式 `#moa_execute` |
+| `supervised` | ✅ true | batch（Gate-A） | ✅ true | 自动执行 + 入口批量 QuickPick 审批 |
+| **`autopilot`（v0.21.3 默认）** | ✅ true | none | ✅ true | **全自动，零弹窗**，SafeExecutor 备份兜底 |
+| `yolo` | ✅ true | none | ❌ false | 全自动 + 无备份（仅供沙盒/CI） |
+| `custom` | — | — | — | 手动控制三个细粒度配置 |
+
+回滚方法：原文件旁的 `.bak.<时间戳>` 文件 + `manifest.json` 记录所有变更。
+
 ---
 
 ## English Version
@@ -473,3 +515,45 @@ This is the "how does intermediate data flow" question in detail. Three stages:
 - **Gap feedback**: Aggregator's `gaps` written to `state.gaps`; drives next iter's Recon
 - **Convergence detection**: 3 consecutive iters with completeness Δ < 0.05 → force finalize (runaway protection)
 - **Hard cap**: `MAX_ITER=12`
+
+### Loop control logic + Autopilot warning (v0.21.3+)
+
+> ⚠️ **Defaults to `executionPreset="autopilot"` + `enableActorInLoop=true`** (v0.21.3+ new-install default). After convergence, the Actor role **automatically executes** `action_items` (write files, run terminal). Safety net = SafeExecutor `.bak.<timestamp>` backup + `.moa_cache/<task_id>/manifest.json` audit trail.
+
+**`@moa` / `@moaloop` multi-iteration loop** (5-role, controlled by `moaOrchestrator`):
+
+```
+while (iter < MAX_ITER=12) {
+  Planner (iter=1 only) → Recon (every iter) → Refs (every iter) → Aggregator
+  switch (Aggregator.next_action) {
+    case 'finalize':       → finalizeTask → (autopilot?) execute action_items → exit
+    case 'actor_needed':   → Actor executes → evidence appended → continue
+    case 'recon_needed':   → continue (next Recon based on gaps)
+  }
+  if (shouldStop()) → finalizeTask  // runaway protection
+}
+→ finalizeTask (MAX_ITER forced)
+```
+
+**`@moasingle` single-shot mode** (5 roles, 1 iter, forced finalize):
+
+```
+Planner → Recon → Refs → Aggregator → finalizeTask → (autopilot?) execute
+```
+
+**Recon rounds within a single MoA task** (`moa.maxReconRounds`, default=5):
+
+> ⚠️ This is **NOT** the `@moa`/`@moaloop` multi-iteration loop counter (that's `MAX_ITER=12`).
+> It only applies to the `@moasingle` + `moa_analyze` tool path (`moaRunner.runP1Fanout`) — within a single MoA task, when refs report `sufficient=false`, a new recon round is triggered, up to `maxReconRounds` rounds.
+
+**Execution presets & Actor auto-execution** (v0.20.0+):
+
+| `executionPreset` | autoExecute | approvalMode | safeMode | Behavior |
+|---|---|---|---|---|
+| `manual` | ❌ false | batch | ✅ true | finalize returns markdown only; explicit `#moa_execute` required |
+| `supervised` | ✅ true | batch (Gate-A) | ✅ true | auto-execute + entry QuickPick approval |
+| **`autopilot` (v0.21.3 default)** | ✅ true | none | ✅ true | **fully automatic, zero popups**, SafeExecutor backup |
+| `yolo` | ✅ true | none | ❌ false | fully automatic + no backup (sandbox/CI only) |
+| `custom` | — | — | — | manually control three fine-grained configs |
+
+Rollback: original files' `.bak.<timestamp>` siblings + `manifest.json` records all changes.

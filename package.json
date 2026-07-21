@@ -2,7 +2,7 @@
   "name": "moa-bridge",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.21.2",
+  "version": "0.21.3",
 
   "publisher": "dudali095",
   "license": "MIT",
@@ -510,9 +510,9 @@
         },
         "moa.enableActorInLoop": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "markdownDescription": "%moa.config.enableActorInLoop%",
-          "description": "Enable the Actor role in the 5-role Loop mode (moaOrchestrator). When false (default), Actor is skipped and Aggregator's actor_needed suggestion is downgraded to recon_needed. When true, Actor executes action_items using the acting agent loop. Independent from moa.enableActingAgent (which controls single-shot Hermes mode in moaRunner). Default false for safety — Actor has side effects (file writes, terminal commands).\n\n---\n\n在 5 角色 Loop 模式（moaOrchestrator）中启用 Actor 角色。**false**（默认）= Actor 被跳过，Aggregator 的 actor_needed 建议被降级为 recon_needed。**true** = Actor 通过 acting agent 循环执行 action_items。与 moa.enableActingAgent（控制 moaRunner 单次 Hermes 模式）独立。默认 false 以策安全 —— Actor 有副作用（写文件、跑终端命令）。",
+          "description": "Enable the Actor role in the 5-role Loop mode (moaOrchestrator). v0.21.3 起默认 true —— 让 Aggregator 的 actor_needed 决策真正被执行，而非降级为 recon_needed 死循环。**true（默认）** = Actor 执行 action_items（受 executionPreset + approvalMode + SafeExecutor 三层保护）。**false** = Actor 被跳过，actor_needed 降级为 recon_needed（仅用于纯只读审查任务）。与 moa.enableActingAgent（控制 moaRunner 单次 Hermes 模式）独立。\n\n---\n\nEnglish: Enable Actor in 5-role Loop. v0.21.3 default true — Aggregator's actor_needed now triggers real execution instead of degrading to recon_needed. Independent from moa.enableActingAgent.",
           "order": 6.1
         },
         "moa.safeExecutionMode": {
@@ -524,11 +524,11 @@
         },
         "moa.cacheTtlDays": {
           "type": "number",
-          "default": 30,
+          "default": 0,
           "minimum": 0,
           "maximum": 36500,
           "markdownDescription": "%moa.config.cacheTtlDays%",
-          "description": "v0.19.1 (rev v0.20.2): Tasks older than this TTL (in days) will be cleaned up when running the 'MoA: Cleanup Old Tasks' command. Default 30 days. **Set to 0 to disable TTL cleanup entirely** (tasks are never auto-deleted; you must manually remove .moa_cache/). Maximum raised from 365 to 36500 (~100 years) in v0.20.2 for long-term archival needs.\n\n---\n\nv0.19.1（v0.20.2 修订）：超过此 TTL（天）的任务会在运行 'MoA: Cleanup Old Tasks' 命令时被清理。默认 30 天。**设为 0 完全禁用 TTL 清理**（任务永不自动删除，需手动删除 .moa_cache/）。v0.20.2 将上限从 365 提高到 36500（约 100 年），满足长期归档需求。",
+          "description": "v0.19.1 (rev v0.20.2 / v0.21.3): Tasks older than this TTL (in days) will be cleaned up when running the 'MoA: Cleanup Old Tasks' command. **v0.21.3 起默认 0 = 永不自动清理**（任务持久化保留，需手动删除 .moa_cache/）。Maximum raised from 365 to 36500 (~100 years) in v0.20.2 for long-term archival needs.\n\n---\n\nEnglish: v0.19.1 (rev v0.20.2 / v0.21.3): Cleanup threshold in days. **v0.21.3 default 0 = never auto-clean** (tasks persist; manual removal required).",
           "order": 6.3
         },
         "moa.cacheRootDir": {
@@ -547,11 +547,11 @@
             "yolo",
             "custom"
           ],
-          "default": "manual",
+          "default": "autopilot",
           "enumDescriptions": [
-            "manual（默认，v0.19.x 兼容）：finalize 后只返回 markdown 给主会话，需要用户/主会话显式调用 #moa_execute 才会执行 action_items。approvalMode=batch、safeMode=true。\n\nEnglish: manual (default, v0.19.x-compatible): finalize returns markdown only; user/main session must call #moa_execute explicitly. approvalMode=batch, safeMode=true.",
+            "manual（仅 finalize 后返回 markdown）：finalize 后只返回 markdown 给主会话，需要用户/主会话显式调用 #moa_execute 才会执行 action_items。approvalMode=batch、safeMode=true。\n\nEnglish: manual (markdown-only after finalize): finalize returns markdown only; user/main session must call #moa_execute explicitly. approvalMode=batch, safeMode=true.",
             "supervised（半自动 + 人工审批）：finalize 后自动执行 action_items，但每个 action 执行前会弹 QuickPick 让用户多选/反选。safeMode=true。\n\nEnglish: supervised (semi-auto + human approval): auto-executes after finalize, but QuickPick multi-select pops up before each round. safeMode=true.",
-            "autopilot（全自动，推荐用于可信 CI/重试流水线）：finalize 后自动执行，无任何审批弹窗。安全网 = SafeExecutor 自动备份 (.bak.<时间戳>)。用户仍可从 .moa_cache/<task_id>/manifest.json 审计。\n\nEnglish: autopilot (fully auto, recommended for trusted CI/retry pipelines): auto-executes after finalize, zero popups. Safety net = SafeExecutor automatic .bak.<timestamp> backup. Auditable via manifest.json.",
+            "autopilot（默认，v0.21.3+）：finalize 后自动执行，无任何审批弹窗。安全网 = SafeExecutor 自动备份 (.bak.<时间戳>)。用户仍可从 .moa_cache/<task_id>/manifest.json 审计。**新用户装完即用，完整 MoA 体验。**\n\nEnglish: autopilot (default, v0.21.3+): auto-executes after finalize, zero popups. Safety net = SafeExecutor automatic .bak.<timestamp> backup. Auditable via manifest.json.",
             "yolo（极端，仅沙盒/CI）：全自动 + 完全关闭 SafeExecutor 备份。任何变更不可逆。UI 会显示警告。\n\nEnglish: yolo (extreme, sandbox/CI only): fully auto + SafeExecutor backup OFF. All changes irreversible. UI shows a warning.",
             "custom（自定义）：手动控制下方 3 个细粒度配置 (autoExecuteAfterFinalize / approvalMode / safeExecutionMode)，executionPreset 字段本身被忽略。\n\nEnglish: custom: control 3 fine-grained configs (autoExecuteAfterFinalize / approvalMode / safeExecutionMode) independently; executionPreset itself is ignored."
           ],
@@ -593,10 +593,10 @@
         },
         "moa.maxReconRounds": {
           "type": "number",
-          "default": 3,
+          "default": 5,
           "minimum": 1,
           "maximum": 20,
-          "description": "Maximum number of recon rounds. Each round = 1 recon pass + N ref fan-out. If refs report 'sufficient=false' in their JSON output, the next recon round uses their 'missing' hints to fill gaps. Loop exits early when a majority of refs say sufficient=true. v0.20.1 raised hard cap from 5 to 10; v0.20.2 raised further to 20 for deep research workflows.\n\n---\n\n最大 recon 轮数。每轮 = 1 次 recon 通道 + N 个 ref 扇出。若 refs 在 JSON 输出中报告 'sufficient=false'，下一轮 recon 会用它们的 'missing' 提示填补缺口。当多数 refs 表示 sufficient=true 时提前退出。v0.20.1 上限从 5 提到 10；v0.20.2 进一步提到 20 以支持深度研究工作流。",
+          "description": "Maximum number of recon rounds **within a single MoA task** (applies to @moasingle + moa_analyze tool via moaRunner.runP1Fanout). Each round = 1 recon pass + N ref fan-out. If refs report 'sufficient=false' in their JSON output, the next recon round uses their 'missing' hints to fill gaps. **⚠️ Not the @moa/@moaloop multi-iteration loop** (that's MAX_ITER=12 in moaOrchestrator). v0.20.1 raised hard cap from 5 to 10; v0.20.2 raised further to 20; v0.21.3 default raised from 3 to 5 for deeper single-task recon.\n\n---\n\n单次 MoA 任务内的最大 recon 轮数（适用于 @moasingle + moa_analyze 工具，via moaRunner.runP1Fanout）。每轮 = 1 次 recon 通道 + N 个 ref 扇出。若 refs 在 JSON 输出中报告 'sufficient=false'，下一轮 recon 会用它们的 'missing' 提示填补缺口。**⚠️ 此项不是 @moa/@moaloop 的多轮 loop**（那个由 moaOrchestrator 的 MAX_ITER=12 控制）。v0.21.3 默认从 3 提到 5，让单任务 recon 更深入。",
           "order": 8
         },
         "moa.reconContextChars": {
@@ -613,16 +613,16 @@
         },
         "moa.maxReconIterations": {
           "type": "number",
-          "default": 50,
+          "default": 100,
           "minimum": 4,
-          "maximum": 500,
-          "description": "Recon agent 单次任务的最大工具调用迭代数（兜底硬上限）。默认 50。v0.20.1 提高上限到 200；v0.20.2 进一步提高到 500（超大型 monorepo 或深度研究任务可能需要）。实际多数任务会在 LLM 自主判断 + 早停机制触发后更早收敛。配置项 moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated 控制主动早停。\n\n---\n\nEnglish: Hard cap on recon agent tool-call iterations per task. Default 50. v0.20.1 raised cap to 200; v0.20.2 raised further to 500 (very large monorepos or deep research tasks). Most tasks converge earlier via LLM self-judgment + early-stop heuristics (see moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated).",
+          "maximum": 300,
+          "description": "Recon agent 单次任务的最大工具调用迭代数（兜底硬上限）。v0.21.3 默认从 50 提到 100，上限从 500 降到 300（防成本失控）。实际多数任务会在 LLM 自主判断 + 早停机制触发后更早收敛。配置项 moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated 控制主动早停。\n\n---\n\nEnglish: Hard cap on recon agent tool-call iterations per task. v0.21.3 raised default from 50 to 100, lowered max from 500 to 300 (cost control). Most tasks converge earlier via LLM self-judgment + early-stop heuristics (see moa.reconEarlyStopStagnant / moa.reconEarlyStopSaturated).",
           "order": 11
         },
         "moa.reconAllowTerminal": {
           "type": "boolean",
-          "default": false,
-          "description": "允许 recon agent 使用 terminal 类工具（runInTerminal / sendToTerminal / killTerminal）。默认 false（安全为先）。Debug 工作流需要 recon 跑测试/编译时设为 true。注意：prompt 会指示 recon 避免破坏性命令（rm -rf / git push --force 等），但最终取决于模型遵循度。\n\n---\n\nEnglish: Allow recon agent to use terminal tools (runInTerminal / sendToTerminal / killTerminal). Default false (safety-first). Set true for debug workflows where recon needs to run tests/compilation. Note: prompt instructs recon to avoid destructive commands (rm -rf / git push --force etc.), but ultimately depends on model compliance.",
+          "default": true,
+          "description": "v0.21.3 默认从 false 改为 true —— 允许 recon agent 使用 terminal 类工具（runInTerminal / sendToTerminal / killTerminal）。Debug / 编译验证 / 测试运行场景必需。Prompt 会指示 recon 避免破坏性命令（rm -rf / git push --force 等），但最终取决于模型遵循度。需要更严格安全时设为 false。\n\n---\n\nEnglish: v0.21.3 default changed from false to true — allow recon agent to use terminal tools (runInTerminal / sendToTerminal / killTerminal). Essential for debug / compile verification / test runs. Prompt instructs recon to avoid destructive commands (rm -rf / git push --force etc.), but ultimately depends on model compliance. Set false for stricter safety.",
           "order": 12
         },
         "moa.reconEarlyStopStagnant": {
@@ -658,10 +658,10 @@
         },
         "moa.reconL3TargetChars": {
           "type": "number",
-          "default": 50000,
+          "default": 100000,
           "minimum": 5000,
           "maximum": 500000,
-          "description": "L3 孙代理对单个大文件精选后的目标输出长度（字符）。默认 50k —— v0.14.3 是 10k，过度压缩。1M 上下文模型完全可以消化 50k 的精选结果。v0.20.2 加上 maximum=500000 上限。\n\n---\n\nEnglish: L3 grandchild target output length (chars) for each large file. Default 50k — v0.14.3 was 10k (over-compressed). 1M-context models easily digest 50k digests. v0.20.2 added maximum=500000 cap.",
+          "description": "L3 孙代理对单个大文件精选后的目标输出长度（字符）。v0.21.3 默认从 50k 提到 100k —— 现代 1M 上下文模型完全可以消化 100k 的精选结果，过度压缩反而丢失关键信息。v0.14.3 是 10k，v0.14.4 提到 50k，v0.20.2 加上 maximum=500000 上限。\n\n---\n\nEnglish: L3 grandchild target output length (chars) for each large file. v0.21.3 raised default from 50k to 100k — modern 1M-context models easily digest 100k digests; over-compression loses key info. v0.14.3 was 10k, v0.14.4 raised to 50k, v0.20.2 added maximum=500000 cap.",
           "order": 17
         },
         "moa.reconModel": {

@@ -105,6 +105,29 @@ async function runMoaChatEntry(
     }
 
     if (output.action_items.length > 0) {
+      // v0.21.3: 强制警告用户当前 execution preset 状态
+      //   让用户在 chat 总结里就看到"Actor 是否已自动执行"
+      try {
+        const { resolveExecutionConfig } = await import('./moaCore/safeExecutor');
+        const exec = resolveExecutionConfig();
+        const executed = (output as { executed_actions?: unknown[] }).executed_actions;
+        if (exec.preset === 'autopilot' || exec.preset === 'yolo') {
+          const emoji = exec.preset === 'yolo' ? '🚨' : '⚠️';
+          const safeNote = exec.preset === 'yolo'
+            ? '**no SafeExecutor backup** (changes are irreversible)'
+            : 'SafeExecutor `.bak.<timestamp>` backup applied';
+          const status = Array.isArray(executed)
+            ? `**${executed.length}/${output.action_items.length} already auto-executed**`
+            : 'auto-execution attempted (see manifest.json)';
+          stream.markdown(`\n> ${emoji} **${exec.preset.toUpperCase()} MODE** — ${status}, ${safeNote}. Audit: \`.moa_cache/${output.task_id}/manifest.json\`.`);
+        } else if (exec.preset === 'supervised') {
+          stream.markdown(`\n> 📋 **Supervised mode** — action_items below went through Gate-A batch approval. Audit: \`.moa_cache/${output.task_id}/manifest.json\`.`);
+        } else if (exec.preset === 'manual') {
+          stream.markdown(`\n> 📝 **Manual mode** — action_items below NOT executed. Call \`#moa_execute\` to run them.`);
+        }
+      } catch {
+        // resolveExecutionConfig 失败静默跳过（chat 总结不应被警告逻辑阻塞）
+      }
       stream.markdown(`\n\n**Action Items:**`);
       for (const a of output.action_items) {
         stream.markdown(`\n- **[${a.type}]** ${a.target}`);

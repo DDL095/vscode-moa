@@ -393,8 +393,9 @@ export async function runP1Fanout(
   // Recon reuses the aggregator model (consistent with v0.8.0 acting agent).
   // ─────────────────────────────────────────────────────────────────────────
   const enableRecon = config.get<boolean>('enableRecon') ?? true;
-  const maxReconRoundsRaw = config.get<number>('maxReconRounds') ?? 3;
-  const maxReconRounds = Math.max(1, Math.min(5, maxReconRoundsRaw));
+  const maxReconRoundsRaw = config.get<number>('maxReconRounds') ?? 5;
+  // v0.21.3: 上限从 5 放宽到 20（与 package.json maximum=20 对齐；v0.13.x 时代的 5 已过时）
+  const maxReconRounds = Math.max(1, Math.min(20, maxReconRoundsRaw));
   // v0.14.5: reconContextChars 不再作上限 —— 只读取用于 meta 审计。
   // 原设计假设下游 LLM 上下文紧张，但 refs 单轮无历史 + 1M 上下文模型，
   // 即使 recon 收集到 1MB+ 也应该原样传递。

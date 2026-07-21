@@ -648,16 +648,17 @@ async function renderMetaJson(
  */
 function readSettingsSnapshot(): Record<string, unknown> {
   const config = vscode.workspace.getConfiguration('moa');
+  // v0.21.3: 默认值与 package.json 对齐（autopilot / enableActorInLoop=true / maxReconRounds=5）
   return {
-    executionPreset: config.get('executionPreset', 'manual'),
+    executionPreset: config.get('executionPreset', 'autopilot'),
     approvalMode: config.get('approvalMode', 'batch'),
     safeExecutionMode: config.get('safeExecutionMode', true),
     enableRecon: config.get('enableRecon', true),
-    enableActorInLoop: config.get('enableActorInLoop', false),
+    enableActorInLoop: config.get('enableActorInLoop', true),
     refDisplayMode: config.get('refDisplayMode', 'thinking'),
     parallelRefs: config.get('parallelRefs', true),
     parallelRecon: config.get('parallelRecon', true),
-    maxReconRounds: config.get('maxReconRounds', 3),
+    maxReconRounds: config.get('maxReconRounds', 5),
   };
 }
 
@@ -964,18 +965,41 @@ async function renderFinalMd(
     ? `${sourceLabel[state.convergence_source]}${state.convergence_raw_next_action ? ` (Aggregator suggested: \`${state.convergence_raw_next_action}\`)` : ''}`
     : '(unknown source — pre-v0.16.0 task)';
 
+  // v0.21.3: 强制注入当前 loop 模式 + execution preset 到 final.md 顶部
+  //   让用户在审计时一眼看出：(1) 用了哪种 loop 模式 (2) Actor 是否自动执行
+  const execConfig = resolveExecutionConfig();
+  const settingsSnapshot = readSettingsSnapshot();
+  const loopMode = settingsSnapshot.enableActorInLoop === true
+    ? '5-role full loop (Planner → Recon → Refs → Aggregator → Actor → feedback)'
+    : '4-role loop without Actor (actor_needed degrades to recon_needed)';
+  const presetWarn = execConfig.preset === 'autopilot'
+    ? '⚠️ **Autopilot mode active** — action_items below have been auto-executed by Actor (with SafeExecutor backup). Audit trail: `.moa_cache/<task_id>/manifest.json`. Rollback: `.bak.<timestamp>` files next to originals.'
+    : execConfig.preset === 'yolo'
+      ? '🚨 **YOLO mode active** — action_items auto-executed WITHOUT SafeExecutor backup. Changes are irreversible.'
+      : `Execution preset: \`${execConfig.preset}\` (autoExecute=${execConfig.autoExecute}, approvalMode=${execConfig.approvalMode}, safeMode=${execConfig.safeMode})`;
+
   const lines: string[] = [
     `# MoA Final Output — Task \`${taskId}\``,
     '',
     `**Task:** ${state.task}`,
     '',
+    '> **Loop & Execution Context** (v0.21.3+)',
+    '>',
+    `> - **Loop mode:** ${loopMode}`,
+    `> - **MAX_ITER cap:** ${MAX_ITER} (this task used ${output.iterations_used})`,
+    `> - **Convergence source:** ${sourceStr}`,
+    '>',
+    `> ${presetWarn}`,
+    '',
     '| Field | Value |',
     '|---|---|',
     `| Created | ${state.created_at} |`,
     `| Finalized | ${state.last_update} |`,
+
     `| Iterations used | ${output.iterations_used}/${MAX_ITER} |`,
     `| Final confidence | ${(output.confidence * 100).toFixed(0)}% |`,
-    `| Convergence source | ${sourceStr} |`,
+    `| Execution preset | \`${execConfig.preset}\` (safeMode=${execConfig.safeMode ? 'on' : 'off'}) |`,
+    `| Actor in loop | ${settingsSnapshot.enableActorInLoop === true ? '✅ enabled' : '❌ disabled'} |`,
     `| Status | ${state.status} |`,
     '',
     '---',

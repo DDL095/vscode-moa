@@ -28,7 +28,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 /** 当前 README 模板版本号 —— 改模板时递增。 */
-const CACHE_README_VERSION = 2;
+const CACHE_README_VERSION = 3;
 
 /** 插件仓库 URL（README 里用，便于用户查 issue）。 */
 const REPO_URL = 'https://github.com/DDL095/vscode-moa';
@@ -46,6 +46,8 @@ export function buildCacheReadmeContent(): string {
     '> All files here are **safe to delete** — MoA will regenerate them on demand.',
     '>',
     `> Cache README v${CACHE_README_VERSION} · generated ${generatedAt}`,
+    '>',
+    '> ⚠️ **Autopilot mode is ON by default (v0.21.3+)** — After task convergence, the Actor role **auto-executes** `action_items` (write files, run terminal commands). SafeExecutor `.bak.<timestamp>` backup is applied. Audit: `<task_id>/manifest.json`. To disable: set `moa.executionPreset="manual"` or `"supervised"`.',
     '',
     '---',
     '',
@@ -190,12 +192,18 @@ export function buildCacheReadmeContent(): string {
     '',
     '| Key | 默认 | 影响 |',
     '|---|---|---|',
+    '| `moa.executionPreset` | **`autopilot`** (v0.21.3+) | `autopilot` = finalize 后自动执行 action_items；`manual` = 只返回 markdown；`supervised` = Gate-A 审批；`yolo` = 无备份裸跑 |',
+    '| `moa.enableActorInLoop` | **`true`** (v0.21.3+) | Loop 内 Actor 角色是否启用（false 时 `actor_needed` 降级为 `recon_needed`） |',
     '| `moa.enableRecon` | `true` | `false` 时跳过 Phase 0，不产生 `recon/` 新目录 |',
     '| `moa.l3Summarizer.model` | `""` (disabled) | 空字符串完全禁用 L3，不产生 `l3_summaries/` |',
     '| `moa.reconL3Threshold` | `200000` | 单文件超过多少字符才触发 L3 摘要 |',
     '| `moa.reconL3MaxCalls` | `5` | 单次任务最多派几次 L3 孙代理 |',
-    '| `moa.maxReconRounds` | `3` | recon 循环轮数（影响 `recon/` 下同任务可多个 round 文件） |',
+    '| `moa.reconL3TargetChars` | `100000` (v0.21.3+) | L3 单文件精选后的目标输出长度 |',
+    '| `moa.maxReconRounds` | `5` (v0.21.3+) | **单任务内** recon 循环轮数（仅 @moasingle + moa_analyze；@moa/@moaloop 用 MAX_ITER=12） |',
+    '| `moa.maxReconIterations` | `100` (v0.21.3+) | recon agent 单轮最多工具调用次数 |',
+    '| `moa.reconAllowTerminal` | **`true`** (v0.21.3+) | 允许 recon 用 terminal（runInTerminal 等） |',
     '| `moa.parallelRecon` | `true` | v0.18.0：并行多模型 Recon（影响 `iteration_NNN/recon/` 是否生成） |',
+    '| `moa.cacheTtlDays` | **`0`** (v0.21.3+) | 0 = 永不自动清理（需手动删除 .moa_cache/） |',
     '',
     '**禁用一切写入**：目前没有一个总开关；最干净的做法是 `moa.enableRecon=false` + `moa.l3Summarizer.model=""`，',
     '剩下 `moa_orchestrate` 工具的状态文件仅在使用该工具时产生（不用即不写）。',
@@ -235,9 +243,23 @@ export function ensureCacheReadme(cacheRoot: string): boolean {
 
     const readmePath = path.join(cacheRoot, 'README.md');
 
-    // 已存在 → 不覆盖（用户可能改过 / 已是最新版本）
+    // v0.21.3: 版本升级时强制覆盖（让用户看到新的 autopilot 警告）
+    //   读现有 README 头部的 "Cache README vN" 提取版本号
+    //   若不存在或版本低于 CACHE_README_VERSION → 覆盖
+    //   若版本等于当前 → 不覆盖（尊重用户修改）
     if (fs.existsSync(readmePath)) {
-      return false;
+      try {
+        const existing = fs.readFileSync(readmePath, 'utf8');
+        const m = existing.match(/Cache README v(\d+)/);
+        const existingVer = m ? parseInt(m[1], 10) : 0;
+        if (existingVer >= CACHE_README_VERSION) {
+          return false;  // 已是最新版本，不覆盖
+        }
+        // 版本低于当前 → 继续覆盖
+      } catch {
+        // 读失败 → 不覆盖（保守）
+        return false;
+      }
     }
 
     const content = buildCacheReadmeContent();
